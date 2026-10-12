@@ -977,6 +977,16 @@ impl Gui {
         });
     }
 
+    fn periodic_refresh_due(&self) -> bool {
+        let refresh_interval = self.config.user_config.refresher.refresh_interval;
+
+        self.config.user_config.git.auto_refresh
+            && refresh_interval > 0
+            && !self.refresh_in_progress
+            && self.initial_load_rx.is_none()
+            && self.last_refresh_at.elapsed().as_secs() >= refresh_interval
+    }
+
     fn show_notification(&mut self, notification: PopupState) {
         if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
             // Auto-refresh can report the same failure repeatedly during a
@@ -1738,12 +1748,7 @@ impl Gui {
                 break;
             }
 
-            // Background auto-refresh on refresher.refreshInterval (0 = disabled).
-            let refresh_interval = self.config.user_config.refresher.refresh_interval;
-            if self.config.user_config.git.auto_refresh
-                && refresh_interval > 0
-                && self.last_refresh_at.elapsed().as_secs() >= refresh_interval
-            {
+            if self.periodic_refresh_due() {
                 self.needs_refresh = true;
             }
 
@@ -10698,6 +10703,25 @@ mod terminal_mouse_tests {
         assert_eq!(gui.input_wait_timeout(), Duration::from_millis(200));
         gui.needs_refresh = true;
         assert_eq!(gui.input_wait_timeout(), Duration::from_millis(16));
+    }
+
+    #[test]
+    fn periodic_refresh_does_not_requeue_while_refresh_is_running() {
+        let repo = TempRepo::new("periodic-refresh-no-requeue");
+        let mut gui = checkout_test_gui(&repo);
+
+        let mut config = crate::config::AppConfig::default();
+        config.user_config.git.auto_refresh = true;
+        config.user_config.refresher.refresh_interval = 1;
+        gui.config = Arc::new(config);
+
+        gui.last_refresh_at = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
+
+        assert!(gui.periodic_refresh_due());
+
+        gui.refresh_in_progress = true;
+
+        assert!(!gui.periodic_refresh_due());
     }
 
     #[test]
