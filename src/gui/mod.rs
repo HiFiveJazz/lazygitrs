@@ -587,6 +587,7 @@ struct CommitPageResult {
 }
 
 const COMMIT_PAGE_PREFETCH_THRESHOLD: usize = 100;
+const PULL_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 2;
 
 pub struct Gui {
     pub config: Arc<AppConfig>,
@@ -749,6 +750,7 @@ pub struct Gui {
     initial_load_rx: Option<mpsc::Receiver<ModelPart>>,
     /// How many model parts have arrived so far (out of MODEL_PART_COUNT).
     initial_load_received: usize,
+    initial_load_expected: usize,
     /// True while a background `load_model_streaming` refresh is in flight.
     /// Prevents stacking concurrent full refreshes on the UI thread.
     refresh_in_progress: bool,
@@ -1115,6 +1117,7 @@ impl Gui {
             model: Arc::new(Mutex::new(model)),
             initial_load_rx: Some(initial_load_rx),
             initial_load_received: 0,
+            initial_load_expected: MODEL_PART_COUNT,
             refresh_in_progress: false,
             context_mgr,
             layout: LayoutState::default(),
@@ -1439,7 +1442,7 @@ impl Gui {
                     self.needs_diff_refresh = true;
                 }
                 // All parts received — done loading.
-                if self.initial_load_received >= MODEL_PART_COUNT {
+                if self.initial_load_received >= self.initial_load_expected {
                     self.initial_load_rx = None;
                     let was_refresh = self.refresh_in_progress;
                     self.refresh_in_progress = false;
@@ -2660,6 +2663,13 @@ impl Gui {
                             if self.refresh_after_push().is_err() {
                                 // Fall back to the existing full refresh if the
                                 // targeted post-push refresh fails.
+                                self.needs_refresh = true;
+                            }
+                        }
+                        RemoteOpKind::Pull => {
+                            if !self.start_background_pull_refresh() {
+                                // Another model refresh is already in flight. Queue the
+                                // normal refresh rather than risk leaving stale state.
                                 self.needs_refresh = true;
                             }
                         }
@@ -8775,6 +8785,7 @@ impl Gui {
         let (tx, rx) = mpsc::channel();
         self.initial_load_rx = Some(rx);
         self.initial_load_received = 0;
+        self.initial_load_expected = MODEL_PART_COUNT;
         self.refresh_in_progress = true;
         self.needs_refresh = false;
         self.reset_commit_pagination();
@@ -8913,6 +8924,36 @@ impl Gui {
         }
 
         Ok(())
+    }
+
+    /// Kick off the model refresh required after a successful pull.
+    ///
+    /// Reuses the normal streaming ModelPart path, but avoids reloading state
+    /// that pull cannot affect and avoids expensive per-file diff-stat scans.
+    fn start_background_pull_refresh(&mut self) -> bool {
+        if self.refresh_in_progress || self.initial_load_rx.is_some() {
+            return false;
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        self.initial_load_rx = Some(rx);
+        self.initial_load_received = 0;
+        self.initial_load_expected = PULL_MODEL_PART_COUNT;
+        self.refresh_in_progress = true;
+        self.needs_refresh = false;
+
+        self.reset_commit_pagination();
+        self.diff_preview_cache.retain_immutable();
+
+        let git = Arc::clone(&self.git);
+        let commit_filter = self.commit_filter_for_load();
+
+        std::thread::spawn(move || {
+            git.load_model_after_pull_streaming(&tx, commit_filter);
+        });
+
+        true
     }
 
     /// Lightweight refresh that only reloads files and diff stats.
@@ -10619,6 +10660,37 @@ mod terminal_mouse_tests {
         assert!(!gui.refresh_in_progress);
         assert!(gui.initial_load_rx.is_none());
         assert!(matches!(gui.popup, PopupState::None));
+    }
+
+    #[test]
+    fn pull_uses_targeted_background_refresh() {
+        let repo = TempRepo::new("pull-targeted-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.start_remote_op(RemoteOpKind::Pull, "Pull", "", |_| Ok(()));
+        wait_for_test_checkout(&mut gui);
+
+        // Pull should start the targeted streaming refresh instead of queueing
+        // the normal full-model refresh.
+        assert!(!gui.needs_refresh);
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, PULL_MODEL_PART_COUNT);
+
+        // Drain the targeted refresh so its worker threads finish before this
+        // test drops the temporary repository.
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+
+        assert_eq!(parts.len(), PULL_MODEL_PART_COUNT);
+
+        // These are deliberately omitted from post-pull refreshes because a
+        // successful pull cannot change them.
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Stash(_))));
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::RepoUrl(_)))
+        );
     }
 
     #[test]
