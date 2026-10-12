@@ -32,7 +32,30 @@ fn commit_filter_path_suggestions<'a>(paths: impl Iterator<Item = &'a str>) -> V
 
 #[cfg(test)]
 mod commit_filter_suggestion_tests {
-    use super::commit_filter_path_suggestions;
+    use super::{GitCommands, commit_filter_path_suggestions};
+    use crate::model::commit::{Commit, CommitStatus, Divergence};
+
+    #[test]
+    fn empty_unpushed_list_marks_previous_unpushed_commit_as_pushed() {
+        let mut commits = vec![Commit {
+            hash: "abc123".to_string(),
+            name: "test commit".to_string(),
+            status: CommitStatus::Unpushed,
+            action: String::new(),
+            tags: Vec::new(),
+            refs: Vec::new(),
+            extra_info: String::new(),
+            author_name: String::new(),
+            author_email: String::new(),
+            unix_timestamp: 0,
+            parents: Vec::new(),
+            divergence: Divergence::None,
+        }];
+
+        GitCommands::apply_unpushed_status(&mut commits, &[]);
+
+        assert_eq!(commits[0].status, CommitStatus::Pushed);
+    }
 
     #[test]
     fn path_suggestions_include_files_and_each_parent_directory() {
@@ -327,9 +350,6 @@ impl GitCommands {
     }
 
     pub fn apply_unpushed_status(commits: &mut [Commit], unpushed_hashes: &[String]) {
-        if unpushed_hashes.is_empty() {
-            return;
-        }
         for commit in commits {
             commit.status = if unpushed_hashes.contains(&commit.hash) {
                 CommitStatus::Unpushed

@@ -269,6 +269,14 @@ pub(crate) enum DiffPayload {
     Empty,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteOpKind {
+    Push,
+    Pull,
+    Fetch,
+    Other,
+}
+
 struct DiffJob {
     generation: u64,
     diff_key: String,
@@ -667,9 +675,9 @@ pub struct Gui {
     /// Diff source for the next AI commit message generation.
     ai_commit_source: AiCommitSource,
     /// Receiver for background remote operations (push, pull, fetch).
-    remote_op_rx: mpsc::Receiver<Result<Option<HeadState>>>,
+    remote_op_rx: mpsc::Receiver<(RemoteOpKind, Result<Option<HeadState>>)>,
     /// Sender cloned into background threads for remote operations.
-    remote_op_tx: mpsc::Sender<Result<Option<HeadState>>>,
+    remote_op_tx: mpsc::Sender<(RemoteOpKind, Result<Option<HeadState>>)>,
     /// Async light files refresh (status-only) so Space-spam doesn't freeze.
     files_refresh_rx: Option<mpsc::Receiver<Result<Vec<crate::model::File>>>>,
     files_refresh_in_progress: bool,
@@ -2361,6 +2369,7 @@ impl Gui {
                                 if !msg.is_empty() {
                                     let message = msg.to_string();
                                     gui.start_remote_op(
+                                        RemoteOpKind::Other,
                                         "Commit",
                                         "Creating commit...",
                                         move |git| {
@@ -2632,7 +2641,7 @@ impl Gui {
         if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
             return;
         }
-        if let Ok(result) = self.remote_op_rx.try_recv() {
+        if let Ok((kind, result)) = self.remote_op_rx.try_recv() {
             self.remote_op_label = None;
             match result {
                 Ok(head) => {
@@ -2646,7 +2655,18 @@ impl Gui {
                         model.head_branch_name = head.branch_name;
                         self.needs_diff_refresh = true;
                     }
-                    self.needs_refresh = true;
+                    match kind {
+                        RemoteOpKind::Push => {
+                            if self.refresh_after_push().is_err() {
+                                // Fall back to the existing full refresh if the
+                                // targeted post-push refresh fails.
+                                self.needs_refresh = true;
+                            }
+                        }
+                        _ => {
+                            self.needs_refresh = true;
+                        }
+                    }
                     self.remote_op_success_at = Some(Instant::now());
                     if was_checkout {
                         // A pre-checkout stream must not overwrite confirmed HEAD
@@ -2698,6 +2718,36 @@ impl Gui {
                 }
             }
         }
+    }
+
+    fn refresh_after_push(&mut self) -> Result<()> {
+        let branches = self.git.load_branches()?;
+        let remotes = self.git.load_remotes()?;
+        let unpushed = self.git.unpushed_commit_hashes()?;
+
+        {
+            let mut model = self.model.lock().unwrap();
+
+            model.branches = branches;
+            model.remotes = remotes;
+            GitCommands::apply_unpushed_status(&mut model.commits, &unpushed);
+
+            if !self.remote_branches_name.is_empty() {
+                let refreshed = model
+                    .remotes
+                    .iter()
+                    .find(|remote| remote.name == self.remote_branches_name)
+                    .map(|remote| remote.branches.clone());
+
+                if let Some(branches) = refreshed {
+                    model.sub_remote_branches = branches;
+                }
+            }
+        }
+
+        self.last_refresh_at = Instant::now();
+
+        Ok(())
     }
 
     /// Kick off a status-only files refresh on a background thread.
@@ -2924,7 +2974,7 @@ impl Gui {
 
     /// Run a remote operation (push/pull/fetch) on a background thread.
     /// Non-blocking: corner toast + branch-side label; input stays free (like AI commit).
-    pub fn start_remote_op<F>(&mut self, title: &str, _message: &str, op: F)
+    pub fn start_remote_op<F>(&mut self, kind: RemoteOpKind, title: &str, _message: &str, op: F)
     where
         F: FnOnce(&GitCommands) -> Result<()> + Send + 'static,
     {
@@ -2939,11 +2989,14 @@ impl Gui {
             "Fetch" => "Fetching",
             other => other,
         };
+
         self.remote_op_label = Some(label.to_string());
         self.remote_op_success_at = None;
+
         let git = Arc::clone(&self.git);
         let tx = self.remote_op_tx.clone();
         let is_checkout = self.pending_checkout_by_name.is_some();
+
         std::thread::spawn(move || {
             let result = op(&git).map(|()| {
                 if is_checkout {
@@ -2954,7 +3007,8 @@ impl Gui {
                     None
                 }
             });
-            let _ = tx.send(result);
+
+            let _ = tx.send((kind, result));
         });
     }
 
@@ -9727,7 +9781,10 @@ mod terminal_mouse_tests {
             assert_eq!(gui.deferred_notifications.len(), 2);
             gui.remote_op_label = Some("Fetch".into());
             gui.remote_op_tx
-                .send(Err(anyhow::anyhow!("queued fetch failure")))
+                .send((
+                    RemoteOpKind::Fetch,
+                    Err(anyhow::anyhow!("queued fetch failure")),
+                ))
                 .unwrap();
             gui.receive_deferred_notifications();
             gui.receive_remote_op_results();
@@ -9916,7 +9973,10 @@ mod terminal_mouse_tests {
             })
             .unwrap();
         gui.remote_op_tx
-            .send(Err(anyhow::anyhow!("concurrent fetch failed")))
+            .send((
+                RemoteOpKind::Fetch,
+                Err(anyhow::anyhow!("concurrent fetch failed")),
+            ))
             .unwrap();
         gui.handle_key(parse_key(":").unwrap()).unwrap();
         gui.handle_paste("printf shell-result".into());
@@ -9969,7 +10029,7 @@ mod terminal_mouse_tests {
         let mut gui = tree_test_gui(&repo);
         gui.remote_op_label = Some("Fetch".into());
         gui.remote_op_tx
-            .send(Err(anyhow::anyhow!("fetch failed")))
+            .send((RemoteOpKind::Fetch, Err(anyhow::anyhow!("fetch failed"))))
             .unwrap();
         start_test_custom_command(&mut gui, "printf shell-result", true);
         gui.receive_remote_op_results();
@@ -10552,7 +10612,7 @@ mod terminal_mouse_tests {
         let repo = TempRepo::new("remote-op-refresh");
         let mut gui = checkout_test_gui(&repo);
         let head = repo.git(&["rev-parse", "HEAD"]);
-        gui.start_remote_op("Fetch", "", |_| Ok(()));
+        gui.start_remote_op(RemoteOpKind::Fetch, "Fetch", "", |_| Ok(()));
         wait_for_test_checkout(&mut gui);
         assert_checkout_head(&gui, "feature", &head);
         assert!(gui.needs_refresh);
@@ -10568,7 +10628,9 @@ mod terminal_mouse_tests {
         repo.git(&["checkout", "main"]);
         gui.remote_op_label = Some("Checking out".into());
         gui.pending_checkout_by_name = Some("main".into());
-        gui.remote_op_tx.send(Ok(None)).unwrap();
+        gui.remote_op_tx
+            .send((RemoteOpKind::Other, Ok(None)))
+            .unwrap();
         gui.receive_remote_op_results();
         assert!(matches!(gui.popup, PopupState::None));
         assert!(gui.pending_checkout_by_name.is_none());

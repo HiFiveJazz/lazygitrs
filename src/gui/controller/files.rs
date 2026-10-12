@@ -1,15 +1,14 @@
-use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent};
-
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::Gui;
 use crate::gui::popup::{
     CommitInputFocus, CommitInputKind, MenuItem, PopupState, make_commit_body_textarea,
     make_commit_summary_textarea, make_textarea,
 };
+use crate::gui::{Gui, RemoteOpKind};
 use crate::os::platform::Platform;
 use crate::pager::side_by_side::DiffPanel;
+use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent};
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
     if super::diff_grep::is_diff_grep_key(key) {
@@ -111,10 +110,15 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
 
     // Fetch
     if matches_key(key, &keybindings.files.fetch) {
-        gui.start_remote_op("Fetch", "Fetching from all remotes...", |git| {
-            git.fetch_all()?;
-            Ok(())
-        });
+        gui.start_remote_op(
+            RemoteOpKind::Fetch,
+            "Fetch",
+            "Fetching from all remotes...",
+            |git| {
+                git.fetch_all()?;
+                Ok(())
+            },
+        );
         return Ok(());
     }
 
@@ -274,6 +278,7 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                             if !message.is_empty() {
                                 let message = message.to_string();
                                 gui.start_remote_op(
+                                    RemoteOpKind::Other,
                                     "Empty commit",
                                     "Creating empty commit...",
                                     move |git| {
@@ -311,10 +316,15 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                         on_confirm: Box::new(|gui, message| {
                             if !message.is_empty() {
                                 let message = message.to_string();
-                                gui.start_remote_op("Commit", "Creating commit...", move |git| {
-                                    git.create_commit(&message, false)?;
-                                    Ok(())
-                                });
+                                gui.start_remote_op(
+                                    RemoteOpKind::Other,
+                                    "Commit",
+                                    "Creating commit...",
+                                    move |git| {
+                                        git.create_commit(&message, false)?;
+                                        Ok(())
+                                    },
+                                );
                             }
                             Ok(())
                         }),
@@ -340,10 +350,15 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
         on_confirm: Box::new(|gui, message| {
             if !message.is_empty() {
                 let message = message.to_string();
-                gui.start_remote_op("Commit", "Creating commit...", move |git| {
-                    git.create_commit(&message, false)?;
-                    Ok(())
-                });
+                gui.start_remote_op(
+                    RemoteOpKind::Other,
+                    "Commit",
+                    "Creating commit...",
+                    move |git| {
+                        git.create_commit(&message, false)?;
+                        Ok(())
+                    },
+                );
             }
             Ok(())
         }),
@@ -386,10 +401,15 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
                     on_confirm: Box::new(|gui, message| {
                         if !message.is_empty() {
                             let message = message.to_string();
-                            gui.start_remote_op("Commit", "Creating commit...", move |git| {
-                                git.create_commit(&message, false)?;
-                                Ok(())
-                            });
+                            gui.start_remote_op(
+                                RemoteOpKind::Other,
+                                "Commit",
+                                "Creating commit...",
+                                move |git| {
+                                    git.create_commit(&message, false)?;
+                                    Ok(())
+                                },
+                            );
                         }
                         Ok(())
                     }),
@@ -410,10 +430,15 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
         on_confirm: Box::new(|gui, message| {
             if !message.is_empty() {
                 let message = message.to_string();
-                gui.start_remote_op("Commit", "Creating commit...", move |git| {
-                    git.create_commit(&message, false)?;
-                    Ok(())
-                });
+                gui.start_remote_op(
+                    RemoteOpKind::Other,
+                    "Commit",
+                    "Creating commit...",
+                    move |git| {
+                        git.create_commit(&message, false)?;
+                        Ok(())
+                    },
+                );
             }
             Ok(())
         }),
@@ -916,7 +941,7 @@ fn amend_commit(gui: &mut Gui) -> Result<()> {
         title: "Amend".to_string(),
         message: "Amend last commit with staged changes?".to_string(),
         on_confirm: Box::new(|gui| {
-            gui.start_remote_op("Amend", "Amending commit...", |git| {
+            gui.start_remote_op(RemoteOpKind::Other, "Amend", "Amending commit...", |git| {
                 git.amend_commit()?;
                 Ok(())
             });
@@ -935,10 +960,15 @@ fn commit_with_editor(gui: &mut Gui) -> Result<()> {
         on_confirm: Box::new(|gui, message| {
             if !message.is_empty() {
                 let message = message.to_string();
-                gui.start_remote_op("Commit", "Creating commit...", move |git| {
-                    git.create_commit(&message, false)?;
-                    Ok(())
-                });
+                gui.start_remote_op(
+                    RemoteOpKind::Other,
+                    "Commit",
+                    "Creating commit...",
+                    move |git| {
+                        git.create_commit(&message, false)?;
+                        Ok(())
+                    },
+                );
             }
             Ok(())
         }),
