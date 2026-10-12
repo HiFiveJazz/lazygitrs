@@ -2626,14 +2626,16 @@ impl Gui {
         });
     }
 
-    /// Collect auto-fetch completions. Success triggers a full refresh so the
-    /// branches/commits panes reflect any new upstream commits. Failures
-    /// (offline, auth prompt suppressed, etc.) are intentionally silent —
-    /// surfacing them as popups every 60s would be worse than missing data.
+    /// Collect auto-fetch completions. When refs changed, reuse the targeted
+    /// fetch refresh rather than reloading the entire model. Failures
+    /// (offline, auth prompt suppressed, etc.) remain intentionally silent.
     fn receive_auto_fetch_results(&mut self) {
         while let Ok(result) = self.auto_fetch_rx.try_recv() {
             self.auto_fetch_in_flight = false;
-            if matches!(result, Ok(true)) {
+
+            if matches!(result, Ok(true)) && !self.start_background_fetch_refresh() {
+                // Another model refresh is already in flight. Queue the normal
+                // refresh rather than risk leaving stale remote state.
                 self.needs_refresh = true;
             }
         }
@@ -10760,6 +10762,29 @@ mod terminal_mouse_tests {
                 .iter()
                 .any(|part| matches!(part, ModelPart::DiffStats { .. }))
         );
+    }
+
+    #[test]
+    fn auto_fetch_uses_targeted_background_refresh() {
+        let repo = TempRepo::new("auto-fetch-targeted-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.auto_fetch_in_flight = true;
+        gui.auto_fetch_tx.send(Ok(true)).unwrap();
+
+        gui.receive_auto_fetch_results();
+
+        assert!(!gui.auto_fetch_in_flight);
+        assert!(!gui.needs_refresh);
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, FETCH_MODEL_PART_COUNT);
+
+        // Drain the targeted refresh so its worker threads finish before the
+        // temporary repository is dropped.
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+
+        assert_eq!(parts.len(), FETCH_MODEL_PART_COUNT);
     }
 
     #[test]
