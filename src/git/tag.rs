@@ -17,17 +17,16 @@ impl GitCommands {
         Ok(tags)
     }
 
-    /// Refresh tags after a successful pull without querying every remote.
+    /// Refresh tags after a successful remote update without querying every remote.
     ///
-    /// Existing tags retain their previously known remote state. Tags that
-    /// appeared during the pull are assumed to have been fetched from the
-    /// upstream remote.
-    pub fn load_tags_after_pull(
+    /// Existing tags retain their previously known remote state. Tags that appeared
+    /// during the remote operation are assumed to have been fetched from a remote.
+    pub fn load_tags_after_remote_update(
         &self,
         previous_remote_state: &HashMap<String, bool>,
     ) -> Result<Vec<Tag>> {
         let mut tags = self.load_local_tags()?;
-        apply_pull_remote_state(&mut tags, previous_remote_state);
+        apply_remote_update_state(&mut tags, previous_remote_state);
         Ok(tags)
     }
 
@@ -163,7 +162,7 @@ impl GitCommands {
     }
 }
 
-fn apply_pull_remote_state(tags: &mut [Tag], previous_remote_state: &HashMap<String, bool>) {
+fn apply_remote_update_state(tags: &mut [Tag], previous_remote_state: &HashMap<String, bool>) {
     for tag in tags {
         tag.on_remote = previous_remote_state
             .get(&tag.name)
@@ -188,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_tag_refresh_preserves_known_remote_state_and_marks_new_tags_remote() {
+    fn remote_update_tag_refresh_preserves_known_remote_state_and_marks_new_tags_remote() {
         let previous = HashMap::from([
             ("already-remote".to_string(), true),
             ("local-only".to_string(), false),
@@ -200,7 +199,7 @@ mod tests {
             tag("newly-fetched"),
         ];
 
-        apply_pull_remote_state(&mut tags, &previous);
+        apply_remote_update_state(&mut tags, &previous);
 
         assert!(tags[0].on_remote);
         assert!(!tags[1].on_remote);

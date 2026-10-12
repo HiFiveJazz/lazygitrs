@@ -173,6 +173,7 @@ const DIFF_PREFETCH_BEHIND: usize = 1;
 /// At most this many prefetch loads queued or running at once.
 const DIFF_PREFETCH_INFLIGHT_MAX: usize = 2;
 const DIFF_PREFETCH_WORKERS: usize = 2;
+const FETCH_MODEL_PART_COUNT: usize = 4;
 
 fn plain_char_key(key: KeyEvent, expected: char) -> bool {
     let modifiers = if expected.is_uppercase() {
@@ -274,6 +275,7 @@ pub(crate) enum RemoteOpKind {
     Push,
     Pull,
     Fetch,
+    FetchAndCheckout,
     Other,
 }
 
@@ -2673,7 +2675,12 @@ impl Gui {
                                 self.needs_refresh = true;
                             }
                         }
-                        _ => {
+                        RemoteOpKind::Fetch => {
+                            if !self.start_background_fetch_refresh() {
+                                self.needs_refresh = true;
+                            }
+                        }
+                        RemoteOpKind::FetchAndCheckout | RemoteOpKind::Other => {
                             self.needs_refresh = true;
                         }
                     }
@@ -8797,6 +8804,40 @@ impl Gui {
         });
     }
 
+    fn start_background_fetch_refresh(&mut self) -> bool {
+        if self.refresh_in_progress || self.initial_load_rx.is_some() {
+            return false;
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        self.initial_load_rx = Some(rx);
+        self.initial_load_received = 0;
+        self.initial_load_expected = FETCH_MODEL_PART_COUNT;
+        self.refresh_in_progress = true;
+        self.needs_refresh = false;
+
+        self.reset_commit_pagination();
+
+        let previous_tag_remote_state = {
+            let model = self.model.lock().unwrap();
+            model
+                .tags
+                .iter()
+                .map(|tag| (tag.name.clone(), tag.on_remote))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+
+        let git = Arc::clone(&self.git);
+        let commit_filter = self.commit_filter_for_load();
+
+        std::thread::spawn(move || {
+            git.load_model_after_fetch_streaming(&tx, commit_filter, previous_tag_remote_state);
+        });
+
+        true
+    }
+
     fn commit_filter_for_load(&self) -> Option<crate::git::commit::CommitFilter> {
         let has = self.commit_path_filter.is_some()
             || !self.commit_author_filter.is_empty()
@@ -10658,17 +10699,67 @@ mod terminal_mouse_tests {
     }
 
     #[test]
-    fn ordinary_remote_operation_keeps_normal_refresh_behavior() {
+    fn fetch_and_checkout_keeps_normal_refresh_behavior() {
         let repo = TempRepo::new("remote-op-refresh");
         let mut gui = checkout_test_gui(&repo);
         let head = repo.git(&["rev-parse", "HEAD"]);
-        gui.start_remote_op(RemoteOpKind::Fetch, "Fetch", "", |_| Ok(()));
+
+        gui.start_remote_op(RemoteOpKind::FetchAndCheckout, "Fetch", "", |_| Ok(()));
+
         wait_for_test_checkout(&mut gui);
+
         assert_checkout_head(&gui, "feature", &head);
         assert!(gui.needs_refresh);
         assert!(!gui.refresh_in_progress);
         assert!(gui.initial_load_rx.is_none());
         assert!(matches!(gui.popup, PopupState::None));
+    }
+
+    #[test]
+    fn fetch_uses_targeted_background_refresh() {
+        let repo = TempRepo::new("fetch-targeted-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.start_remote_op(RemoteOpKind::Fetch, "Fetch", "", |_| Ok(()));
+        wait_for_test_checkout(&mut gui);
+
+        assert!(!gui.needs_refresh);
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, FETCH_MODEL_PART_COUNT);
+
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+
+        assert_eq!(parts.len(), FETCH_MODEL_PART_COUNT);
+
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Branches(_)))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Commits(_)))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Remotes(_)))
+        );
+        assert!(parts.iter().any(|part| matches!(part, ModelPart::Tags(_))));
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Files(_))));
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Stash(_))));
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Head { .. }))
+        );
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::DiffStats { .. }))
+        );
     }
 
     #[test]

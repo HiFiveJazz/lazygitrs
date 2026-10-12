@@ -325,6 +325,61 @@ impl GitCommands {
         }
     }
 
+    pub fn load_model_after_fetch_streaming(
+        self: &Arc<Self>,
+        tx: &mpsc::Sender<ModelPart>,
+        commit_filter: Option<crate::git::commit::CommitFilter>,
+        previous_tag_remote_state: std::collections::HashMap<String, bool>,
+    ) {
+        macro_rules! spawn_part {
+            ($tx:expr, $self:expr, $variant:ident, $expr:expr) => {{
+                let tx = $tx.clone();
+                let git = Arc::clone($self);
+                std::thread::spawn(move || {
+                    if let Ok(data) = $expr(&git) {
+                        let _ = tx.send(ModelPart::$variant(data));
+                    }
+                });
+            }};
+        }
+
+        // Fetch can change upstream divergence / remote-facing branch state.
+        spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
+
+        // The commits panel walks all refs, so newly fetched history must appear.
+        if let Some(filter) = commit_filter {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
+                if let Ok(mut commits) =
+                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
+                {
+                    Self::apply_unpushed_status(&mut commits, &unpushed);
+                    let _ = tx.send(ModelPart::Commits(commits));
+                }
+            });
+        } else {
+            spawn_part!(tx, self, Commits, |g: &GitCommands| {
+                g.load_commits(DEFAULT_COMMIT_LIMIT)
+            });
+        }
+
+        // Remote-tracking branches can change.
+        spawn_part!(tx, self, Remotes, |g: &GitCommands| g.load_remotes());
+
+        // Refresh local tags without re-querying the remotes we just fetched.
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                if let Ok(tags) = git.load_tags_after_remote_update(&previous_tag_remote_state) {
+                    let _ = tx.send(ModelPart::Tags(tags));
+                }
+            });
+        }
+    }
+
     /// Refresh model state that can be affected by a successful pull.
     ///
     /// Unlike a full model refresh:
@@ -382,7 +437,7 @@ impl GitCommands {
         // A pull may auto-follow tags, so keep tags correct for now.
         // We can remove the redundant ls-remote calls separately once measured.
         spawn_part!(tx, self, Tags, move |g: &GitCommands| {
-            g.load_tags_after_pull(&previous_tag_remote_state)
+            g.load_tags_after_remote_update(&previous_tag_remote_state)
         });
 
         // Pull can move the current worktree's HEAD.

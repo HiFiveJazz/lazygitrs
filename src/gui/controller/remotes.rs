@@ -356,9 +356,19 @@ fn fetch_and_checkout(
     remote_name: &str,
     branch_to_checkout: Option<String>,
 ) -> Result<()> {
+    let kind = if branch_to_checkout
+        .as_deref()
+        .is_some_and(|branch| !branch.is_empty())
+    {
+        RemoteOpKind::FetchAndCheckout
+    } else {
+        RemoteOpKind::Fetch
+    };
+
     let remote_name = remote_name.to_string();
     let msg = format!("Fetching {}...", remote_name);
-    gui.start_remote_op(RemoteOpKind::Fetch, "Fetch", &msg, move |git| {
+
+    gui.start_remote_op(kind, "Fetch", &msg, move |git| {
         git.fetch(&remote_name)?;
         if let Some(branch) = branch_to_checkout.as_deref() {
             if !branch.is_empty() {
@@ -367,6 +377,7 @@ fn fetch_and_checkout(
         }
         Ok(())
     });
+
     Ok(())
 }
 
