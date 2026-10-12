@@ -8946,11 +8946,20 @@ impl Gui {
         self.reset_commit_pagination();
         self.diff_preview_cache.retain_immutable();
 
+        let previous_tag_remote_state = {
+            let model = self.model.lock().unwrap();
+            model
+                .tags
+                .iter()
+                .map(|tag| (tag.name.clone(), tag.on_remote))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+
         let git = Arc::clone(&self.git);
         let commit_filter = self.commit_filter_for_load();
 
         std::thread::spawn(move || {
-            git.load_model_after_pull_streaming(&tx, commit_filter);
+            git.load_model_after_pull_streaming(&tx, commit_filter, previous_tag_remote_state);
         });
 
         true

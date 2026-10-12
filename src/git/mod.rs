@@ -336,6 +336,7 @@ impl GitCommands {
         self: &Arc<Self>,
         tx: &mpsc::Sender<ModelPart>,
         commit_filter: Option<crate::git::commit::CommitFilter>,
+        previous_tag_remote_state: std::collections::HashMap<String, bool>,
     ) {
         macro_rules! spawn_part {
             ($tx:expr, $self:expr, $variant:ident, $expr:expr) => {{
@@ -380,7 +381,9 @@ impl GitCommands {
 
         // A pull may auto-follow tags, so keep tags correct for now.
         // We can remove the redundant ls-remote calls separately once measured.
-        spawn_part!(tx, self, Tags, |g: &GitCommands| g.load_tags());
+        spawn_part!(tx, self, Tags, move |g: &GitCommands| {
+            g.load_tags_after_pull(&previous_tag_remote_state)
+        });
 
         // Pull can move the current worktree's HEAD.
         spawn_part!(tx, self, Worktrees, |g: &GitCommands| {
