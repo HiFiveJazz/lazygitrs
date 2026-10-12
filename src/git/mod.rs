@@ -325,6 +325,30 @@ impl GitCommands {
         }
     }
 
+    pub fn load_model_periodic_refresh_streaming(self: &Arc<Self>, tx: &mpsc::Sender<ModelPart>) {
+        // refreshInterval tracks working-tree file state.
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                if let Ok(files) = git.load_files_status_only() {
+                    let _ = tx.send(ModelPart::Files(files));
+                }
+            });
+        }
+
+        // Submodule state can also change independently of lazygitrs.
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                if let Ok(submodules) = git.load_submodules() {
+                    let _ = tx.send(ModelPart::Submodules(submodules));
+                }
+            });
+        }
+    }
+
     pub fn load_model_after_fetch_streaming(
         self: &Arc<Self>,
         tx: &mpsc::Sender<ModelPart>,

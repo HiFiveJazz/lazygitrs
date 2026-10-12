@@ -174,6 +174,7 @@ const DIFF_PREFETCH_BEHIND: usize = 1;
 const DIFF_PREFETCH_INFLIGHT_MAX: usize = 2;
 const DIFF_PREFETCH_WORKERS: usize = 2;
 const FETCH_MODEL_PART_COUNT: usize = 4;
+const PERIODIC_MODEL_PART_COUNT: usize = 2;
 
 fn plain_char_key(key: KeyEvent, expected: char) -> bool {
     let modifiers = if expected.is_uppercase() {
@@ -1748,7 +1749,7 @@ impl Gui {
                 break;
             }
 
-            if self.periodic_refresh_due() {
+            if self.periodic_refresh_due() && !self.start_background_periodic_refresh() {
                 self.needs_refresh = true;
             }
 
@@ -8811,6 +8812,27 @@ impl Gui {
         });
     }
 
+    fn start_background_periodic_refresh(&mut self) -> bool {
+        if self.refresh_in_progress || self.initial_load_rx.is_some() {
+            return false;
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        self.initial_load_rx = Some(rx);
+        self.initial_load_received = 0;
+        self.initial_load_expected = PERIODIC_MODEL_PART_COUNT;
+        self.refresh_in_progress = true;
+
+        let git = Arc::clone(&self.git);
+
+        std::thread::spawn(move || {
+            git.load_model_periodic_refresh_streaming(&tx);
+        });
+
+        true
+    }
+
     fn start_background_fetch_refresh(&mut self) -> bool {
         if self.refresh_in_progress || self.initial_load_rx.is_some() {
             return false;
@@ -10703,6 +10725,27 @@ mod terminal_mouse_tests {
         assert_eq!(gui.input_wait_timeout(), Duration::from_millis(200));
         gui.needs_refresh = true;
         assert_eq!(gui.input_wait_timeout(), Duration::from_millis(16));
+    }
+
+    #[test]
+    fn periodic_refresh_uses_targeted_model_parts() {
+        let repo = TempRepo::new("periodic-targeted-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        assert!(gui.start_background_periodic_refresh());
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, PERIODIC_MODEL_PART_COUNT);
+
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+
+        assert_eq!(parts.len(), PERIODIC_MODEL_PART_COUNT);
+        assert!(parts.iter().any(|part| matches!(part, ModelPart::Files(_))));
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Submodules(_)))
+        );
     }
 
     #[test]
