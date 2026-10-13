@@ -32,7 +32,7 @@ fn commit_filter_path_suggestions<'a>(paths: impl Iterator<Item = &'a str>) -> V
 
 #[cfg(test)]
 mod commit_filter_suggestion_tests {
-    use super::{GitCommands, commit_filter_path_suggestions};
+    use super::{GitCommands, commit_filter_path_suggestions, parse_commit_details_output};
     use crate::model::commit::{Commit, CommitStatus, Divergence};
 
     #[test]
@@ -80,6 +80,34 @@ mod commit_filter_suggestion_tests {
                 "src/gui/mod.rs",
             ]
         );
+    }
+
+    #[test]
+    fn commit_details_output_preserves_message_and_parses_shortstat() {
+        let output = concat!(
+            "Fix scheduler regression\n",
+            "\n",
+            "Preserve the full commit body across multiple lines.\n",
+            "This line contains additional context.\n",
+            "\0",
+            "\n",
+            " 2 files changed, 7 insertions(+), 3 deletions(-)\n",
+        );
+
+        let (message, stat) = parse_commit_details_output(output);
+
+        assert_eq!(
+            message,
+            concat!(
+                "Fix scheduler regression\n",
+                "\n",
+                "Preserve the full commit body across multiple lines.\n",
+                "This line contains additional context."
+            )
+        );
+        assert_eq!(stat.files_changed, 2);
+        assert_eq!(stat.insertions, 7);
+        assert_eq!(stat.deletions, 3);
     }
 }
 
@@ -427,6 +455,15 @@ impl GitCommands {
         Ok(result.stdout.trim().to_string())
     }
 
+    pub fn commit_details(&self, hash: &str) -> Result<(String, CommitStat)> {
+        let result = self
+            .git()
+            .args(&["log", "-1", "--shortstat", "--format=%B%x00", hash])
+            .run_expecting_success()?;
+
+        Ok(parse_commit_details_output(&result.stdout))
+    }
+
     pub fn commit_message_body(&self, hash: &str) -> Result<String> {
         let result = self
             .git()
@@ -473,6 +510,12 @@ impl GitCommands {
         }
         Ok(parse_shortstat(&result.stdout))
     }
+}
+
+fn parse_commit_details_output(output: &str) -> (String, CommitStat) {
+    let (message, shortstat) = output.split_once('\0').unwrap_or((output, ""));
+
+    (message.trim().to_string(), parse_shortstat(shortstat))
 }
 
 fn parse_shortstat(output: &str) -> CommitStat {

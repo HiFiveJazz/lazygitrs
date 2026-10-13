@@ -2270,6 +2270,19 @@ impl Gui {
             if generation_counter.load(Ordering::Relaxed) != generation {
                 return;
             }
+
+            if !stat_cached && !message_cached {
+                if let Ok((message, stat)) = git.commit_details(&hash) {
+                    if let Ok(mut cache) = stat_cache.lock() {
+                        cache.insert(hash.clone(), stat);
+                    }
+                    if let Ok(mut cache) = message_cache.lock() {
+                        cache.insert(hash, message);
+                    }
+                }
+                return;
+            }
+
             if !stat_cached {
                 if let Ok(stat) = git.commit_stat(&hash) {
                     if let Ok(mut cache) = stat_cache.lock() {
@@ -2281,6 +2294,7 @@ impl Gui {
             if generation_counter.load(Ordering::Relaxed) != generation {
                 return;
             }
+
             if !message_cached {
                 if let Ok(message) = git.commit_message_full(&hash) {
                     if let Ok(mut cache) = message_cache.lock() {
