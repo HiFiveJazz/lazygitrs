@@ -1,10 +1,9 @@
-use anyhow::Result;
-
-use super::GitCommands;
+use super::{GitCommands, HeadState};
 use crate::model::{
     Commit, CommitStatus,
     commit::{CommitStat, Divergence},
 };
+use anyhow::Result;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Default)]
@@ -33,6 +32,7 @@ fn commit_filter_path_suggestions<'a>(paths: impl Iterator<Item = &'a str>) -> V
 #[cfg(test)]
 mod commit_filter_suggestion_tests {
     use super::{GitCommands, commit_filter_path_suggestions, parse_commit_details_output};
+    use crate::git::HeadState;
     use crate::model::commit::{Commit, CommitStatus, Divergence};
 
     #[test]
@@ -55,6 +55,94 @@ mod commit_filter_suggestion_tests {
         GitCommands::apply_unpushed_status(&mut commits, &[]);
 
         assert_eq!(commits[0].status, CommitStatus::Pushed);
+    }
+
+    #[test]
+    fn checkout_head_state_moves_head_decoration() {
+        let mut commits = vec![
+            Commit {
+                hash: "old".into(),
+                name: "old".into(),
+                status: CommitStatus::Pushed,
+                action: String::new(),
+                tags: Vec::new(),
+                refs: vec!["HEAD -> main".into(), "origin/main".into()],
+                extra_info: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                unix_timestamp: 0,
+                parents: Vec::new(),
+                divergence: Divergence::None,
+            },
+            Commit {
+                hash: "new".into(),
+                name: "new".into(),
+                status: CommitStatus::Pushed,
+                action: String::new(),
+                tags: Vec::new(),
+                refs: vec!["feature".into()],
+                extra_info: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                unix_timestamp: 0,
+                parents: Vec::new(),
+                divergence: Divergence::None,
+            },
+        ];
+
+        let head = HeadState {
+            hash: "new".into(),
+            branch_name: "feature".into(),
+        };
+
+        GitCommands::apply_checkout_head_state(&mut commits, &head);
+
+        assert_eq!(commits[0].refs, vec!["main", "origin/main"]);
+        assert_eq!(commits[1].refs, vec!["HEAD -> feature"]);
+    }
+
+    #[test]
+    fn checkout_head_state_handles_detached_head() {
+        let mut commits = vec![
+            Commit {
+                hash: "old".into(),
+                name: "old".into(),
+                status: CommitStatus::Pushed,
+                action: String::new(),
+                tags: Vec::new(),
+                refs: vec!["HEAD -> main".into()],
+                extra_info: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                unix_timestamp: 0,
+                parents: Vec::new(),
+                divergence: Divergence::None,
+            },
+            Commit {
+                hash: "new".into(),
+                name: "new".into(),
+                status: CommitStatus::Pushed,
+                action: String::new(),
+                tags: Vec::new(),
+                refs: Vec::new(),
+                extra_info: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                unix_timestamp: 0,
+                parents: Vec::new(),
+                divergence: Divergence::None,
+            },
+        ];
+
+        let head = HeadState {
+            hash: "new".into(),
+            branch_name: String::new(),
+        };
+
+        GitCommands::apply_checkout_head_state(&mut commits, &head);
+
+        assert_eq!(commits[0].refs, vec!["main"]);
+        assert_eq!(commits[1].refs, vec!["HEAD"]);
     }
 
     #[test]
@@ -384,6 +472,41 @@ impl GitCommands {
             } else {
                 CommitStatus::Pushed
             };
+        }
+    }
+
+    pub(crate) fn apply_checkout_head_state(commits: &mut [Commit], head: &HeadState) {
+        // Remove the old HEAD marker while preserving the underlying local branch
+        // decoration. Detached HEAD is represented by a bare "HEAD" ref.
+        for commit in commits.iter_mut() {
+            commit.refs.retain(|reference| reference != "HEAD");
+
+            for reference in &mut commit.refs {
+                if let Some(branch) = reference.strip_prefix("HEAD -> ") {
+                    *reference = branch.to_string();
+                }
+            }
+        }
+
+        let Some(commit) = commits.iter_mut().find(|commit| commit.hash == head.hash) else {
+            return;
+        };
+
+        if head.branch_name.is_empty() {
+            commit.refs.insert(0, "HEAD".to_string());
+            return;
+        }
+
+        let head_ref = format!("HEAD -> {}", head.branch_name);
+
+        if let Some(index) = commit
+            .refs
+            .iter()
+            .position(|reference| reference == &head.branch_name)
+        {
+            commit.refs[index] = head_ref;
+        } else {
+            commit.refs.insert(0, head_ref);
         }
     }
 

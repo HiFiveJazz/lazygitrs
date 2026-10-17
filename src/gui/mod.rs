@@ -168,6 +168,7 @@ const DIFF_PREVIEW_CACHE_ENTRIES: usize = 24;
 const DIFF_PREVIEW_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CACHED_DIFF_BYTES: usize = 8 * 1024 * 1024;
 /// How many diffs below/above the selection to warm in the preview cache.
+const CHECKOUT_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 4;
 const DIFF_PREFETCH_AHEAD: usize = 3;
 const DIFF_PREFETCH_BEHIND: usize = 1;
 /// At most this many prefetch loads queued or running at once.
@@ -2717,7 +2718,9 @@ impl Gui {
                         self.needs_files_refresh = false;
                         // Dispatch before the next paint/input wait, not after an
                         // idle 50/200ms poll. HEAD is already visible above.
-                        self.start_background_refresh();
+                        if !self.start_background_checkout_refresh() {
+                            self.needs_refresh = true;
+                        }
                     }
                 }
                 Err(e) => {
@@ -9010,6 +9013,37 @@ impl Gui {
         Ok(())
     }
 
+    /// Kick off the model refresh required after a successful checkout.
+    fn start_background_checkout_refresh(&mut self) -> bool {
+        if self.refresh_in_progress || self.initial_load_rx.is_some() {
+            return false;
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        self.initial_load_rx = Some(rx);
+        self.initial_load_received = 0;
+        self.initial_load_expected = CHECKOUT_MODEL_PART_COUNT;
+        self.refresh_in_progress = true;
+        self.needs_refresh = false;
+
+        self.reset_commit_pagination();
+        self.diff_preview_cache.retain_immutable();
+
+        let commits = {
+            let model = self.model.lock().unwrap();
+            model.commits.clone()
+        };
+
+        let git = Arc::clone(&self.git);
+
+        std::thread::spawn(move || {
+            git.load_model_after_checkout_streaming(&tx, commits);
+        });
+
+        true
+    }
+
     /// Kick off the model refresh required after a successful pull.
     ///
     /// Reuses the normal streaming ModelPart path, but avoids reloading state
@@ -10718,7 +10752,7 @@ mod terminal_mouse_tests {
         assert!(gui.refresh_in_progress);
         assert_eq!(gui.initial_load_received, 0);
         let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
-        assert_eq!(parts.len(), MODEL_PART_COUNT);
+        assert_eq!(parts.len(), CHECKOUT_MODEL_PART_COUNT);
         assert!(parts.iter().any(|part| matches!(
             part, ModelPart::Head { branch_name, .. } if branch_name == "main"
         )));
@@ -10779,6 +10813,43 @@ mod terminal_mouse_tests {
         gui.refresh_in_progress = true;
 
         assert!(!gui.periodic_refresh_due());
+    }
+
+    #[test]
+    fn checkout_uses_targeted_background_refresh() {
+        let repo = TempRepo::new("checkout-targeted-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        request_test_checkout(&mut gui, ' ', "main");
+        wait_for_test_checkout(&mut gui);
+
+        assert!(!gui.needs_refresh);
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, CHECKOUT_MODEL_PART_COUNT);
+
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+
+        assert_eq!(parts.len(), CHECKOUT_MODEL_PART_COUNT);
+
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Commits(_)))
+        );
+
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Stash(_))));
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Remotes(_)))
+        );
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Tags(_))));
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::RepoUrl(_)))
+        );
     }
 
     #[test]
