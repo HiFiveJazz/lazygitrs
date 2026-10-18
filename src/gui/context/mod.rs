@@ -155,6 +155,8 @@ pub struct ContextManager {
     window_last_context: std::collections::HashMap<SideWindow, ContextId>,
     selections: std::collections::HashMap<ContextId, usize>,
     scroll_offsets: std::collections::HashMap<ContextId, usize>,
+    scroll_animations: std::collections::HashMap<ContextId, super::scroll::SmoothScroll>,
+    selection_animations: std::collections::HashMap<ContextId, super::scroll::SmoothScroll>,
     /// Override for files list length when tree view is active.
     pub files_list_len_override: Option<usize>,
     /// Override for commit files list length when tree view is active.
@@ -190,6 +192,8 @@ impl ContextManager {
             window_last_context: std::collections::HashMap::new(),
             selections,
             scroll_offsets: std::collections::HashMap::new(),
+            scroll_animations: std::collections::HashMap::new(),
+            selection_animations: std::collections::HashMap::new(),
             files_list_len_override: None,
             commit_files_list_len_override: None,
             viewport_manually_scrolled: false,
@@ -198,6 +202,48 @@ impl ContextManager {
 
     pub fn active(&self) -> ContextId {
         self.active
+    }
+
+    pub fn selection_target(&self, ctx: ContextId) -> usize {
+        self.selection_animations
+            .get(&ctx)
+            .map(super::scroll::SmoothScroll::target)
+            .unwrap_or_else(|| self.selected(ctx))
+    }
+
+    pub fn request_smooth_selection(&mut self, ctx: ContextId, target: usize) {
+        let current = self.selected(ctx);
+
+        let animation = self
+            .selection_animations
+            .entry(ctx)
+            .or_insert_with(|| super::scroll::SmoothScroll::new(current));
+
+        animation.retarget(current, target, super::scroll::LIST_SCROLL_DURATION);
+    }
+
+    pub fn tick_selection_animations(&mut self) {
+        let updates: Vec<(ContextId, usize)> = self
+            .selection_animations
+            .iter_mut()
+            .filter_map(|(&ctx, animation)| {
+                if animation.is_active() {
+                    Some((ctx, animation.tick()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (ctx, selected) in updates {
+            self.selections.insert(ctx, selected);
+        }
+    }
+
+    pub fn has_active_selection_animation(&self) -> bool {
+        self.selection_animations
+            .values()
+            .any(super::scroll::SmoothScroll::is_active)
     }
 
     pub fn set_active(&mut self, ctx: ContextId) {
@@ -318,6 +364,50 @@ impl ContextManager {
 
     pub fn set_scroll_offset(&mut self, ctx: ContextId, offset: usize) {
         self.scroll_offsets.insert(ctx, offset);
+    }
+
+    fn smooth_scroll_context(ctx: ContextId) -> bool {
+        matches!(
+            ctx,
+            ContextId::Files
+                | ContextId::Branches
+                | ContextId::Remotes
+                | ContextId::Tags
+                | ContextId::Commits
+                | ContextId::Reflog
+        )
+    }
+
+    pub fn request_smooth_scroll(&mut self, ctx: ContextId, target: usize) {
+        if !Self::smooth_scroll_context(ctx) {
+            self.set_scroll_offset(ctx, target);
+            return;
+        }
+
+        let current = self.scroll_offset(ctx);
+
+        let animation = self
+            .scroll_animations
+            .entry(ctx)
+            .or_insert_with(|| super::scroll::SmoothScroll::new(current));
+
+        animation.retarget(current, target, super::scroll::LIST_SCROLL_DURATION);
+    }
+
+    pub fn tick_scroll_animation(&mut self, ctx: ContextId) -> usize {
+        let Some(animation) = self.scroll_animations.get_mut(&ctx) else {
+            return self.scroll_offset(ctx);
+        };
+
+        let offset = animation.tick();
+        self.scroll_offsets.insert(ctx, offset);
+        offset
+    }
+
+    pub fn has_active_scroll_animation(&self) -> bool {
+        self.scroll_animations
+            .values()
+            .any(super::scroll::SmoothScroll::is_active)
     }
 
     /// Adjust the scroll offset for a context so that `selected` is visible

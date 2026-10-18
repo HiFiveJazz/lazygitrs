@@ -1529,6 +1529,7 @@ impl Gui {
                 || self.remote_op_label.is_some()
                 || self.rebase_mode.active
                 || self.patch_building.active;
+            self.context_mgr.tick_selection_animations();
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
@@ -1784,9 +1785,12 @@ impl Gui {
                 PopupState::ShellCommand { .. } | PopupState::CommandOutput { .. }
             )
     }
-
     fn input_wait_timeout(&self) -> Duration {
-        if self.shell_command_job.is_some()
+        if self.context_mgr.has_active_scroll_animation()
+            || self.context_mgr.has_active_selection_animation()
+        {
+            Duration::from_millis(8)
+        } else if self.shell_command_job.is_some()
             || self.ai_commit_generation_active()
             || self.remote_op_label.is_some()
             || self.needs_refresh
@@ -3699,6 +3703,7 @@ impl Gui {
         //   Alt+k → diff pane full (ratio 0.0), Alt+j → side pane full (ratio 1.0)
         // Landscape (horizontal split): side on left, diff on right.
         //   Alt+h/l → shrink/expand by step, Alt+k → side full, Alt+j → main full
+
         let portrait =
             layout::should_use_portrait(self.layout.width, self.layout.height, self.screen_mode);
         let shrink_key = matches_key(key, &keybindings.universal.shrink_side_panel);
@@ -3709,6 +3714,7 @@ impl Gui {
             self.layout.side_panel_ratio = (self.layout.side_panel_ratio + delta).clamp(0.0, 1.0);
             return true;
         }
+
         if matches_key(key, &keybindings.universal.side_panel_full) {
             // Alt+k: diff full in portrait, side full in landscape
             self.layout.side_panel_ratio = if portrait { 0.0 } else { 1.0 };
@@ -3814,6 +3820,46 @@ impl Gui {
         }
         let keybindings = &self.config.user_config.keybinding;
 
+        // Smooth multi-row list navigation.
+        if key.modifiers == KeyModifiers::CONTROL
+            && matches!(key.code, KeyCode::Char('j') | KeyCode::Char('k'))
+            && matches!(
+                self.context_mgr.active(),
+                ContextId::Files
+                    | ContextId::Branches
+                    | ContextId::Remotes
+                    | ContextId::Tags
+                    | ContextId::Commits
+                    | ContextId::Reflog
+            )
+        {
+            let ctx = self.context_mgr.active();
+            let amount = self.config.user_config.gui.scroll_height.max(1);
+
+            let model = self.model.lock().unwrap();
+            let len = self.context_mgr.list_len(&model);
+            drop(model);
+
+            if len == 0 {
+                return Ok(());
+            }
+
+            // Important: base repeated Ctrl-J/K presses on the destination,
+            // not on the intermediate animated position.
+            let current_target = self.context_mgr.selection_target(ctx);
+
+            let target = match key.code {
+                KeyCode::Char('j') => current_target.saturating_add(amount).min(len - 1),
+
+                KeyCode::Char('k') => current_target.saturating_sub(amount),
+
+                _ => unreachable!(),
+            };
+
+            self.context_mgr.request_smooth_selection(ctx, target);
+
+            return Ok(());
+        }
         if matches_key(key, &keybindings.universal.toggle_diff_view_layout) {
             self.diff_view.toggle_view_layout();
             self.persist_diff_view_layout();

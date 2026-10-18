@@ -2531,11 +2531,22 @@ fn render_list_with_range_ctx(
     ctx_mgr: &mut ContextManager,
     ctx: ContextId,
 ) {
-    let mut so = ctx_mgr.scroll_offset(ctx);
+    let visible_height = block.inner(rect).height as usize;
     let follow = !ctx_mgr.viewport_manually_scrolled;
+
+    let mut so = ctx_mgr.tick_scroll_animation(ctx);
+
+    if follow && visible_height > 0 {
+        let target = super::scroll::visible_target(selected, so, visible_height);
+
+        ctx_mgr.request_smooth_scroll(ctx, target);
+        so = ctx_mgr.tick_scroll_animation(ctx);
+    }
+
     render_list_with_range_raw(
-        frame, rect, block, items, selected, is_active, theme, range, &mut so, follow,
+        frame, rect, block, items, selected, is_active, theme, range, &mut so, false,
     );
+
     ctx_mgr.set_scroll_offset(ctx, so);
 }
 
@@ -2572,10 +2583,15 @@ fn render_commit_list_ctx(
         return;
     }
 
-    let mut offset = ctx_mgr.scroll_offset(ctx);
+    let mut offset = ctx_mgr.tick_scroll_animation(ctx);
+
     if !ctx_mgr.viewport_manually_scrolled {
-        super::scroll::ensure_visible(selected, &mut offset, visible_height);
+        let target = super::scroll::visible_target(selected, offset, visible_height);
+
+        ctx_mgr.request_smooth_scroll(ctx, target);
+        offset = ctx_mgr.tick_scroll_animation(ctx);
     }
+
     offset = offset.min(total_len.saturating_sub(visible_height));
     ctx_mgr.set_scroll_offset(ctx, offset);
 
