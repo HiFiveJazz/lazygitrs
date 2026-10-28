@@ -169,6 +169,7 @@ const DIFF_PREVIEW_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CACHED_DIFF_BYTES: usize = 8 * 1024 * 1024;
 /// How many diffs below/above the selection to warm in the preview cache.
 const CHECKOUT_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 4;
+const HISTORY_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 4;
 const DIFF_PREFETCH_AHEAD: usize = 3;
 const DIFF_PREFETCH_BEHIND: usize = 1;
 /// At most this many prefetch loads queued or running at once.
@@ -278,6 +279,7 @@ pub(crate) enum RemoteOpKind {
     Pull,
     Fetch,
     FetchAndCheckout,
+    LocalHistory,
     Other,
 }
 
@@ -2399,7 +2401,7 @@ impl Gui {
                                 if !msg.is_empty() {
                                     let message = msg.to_string();
                                     gui.start_remote_op(
-                                        RemoteOpKind::Other,
+                                        RemoteOpKind::LocalHistory,
                                         "Commit",
                                         "Creating commit...",
                                         move |git| {
@@ -2706,6 +2708,9 @@ impl Gui {
                             if !self.start_background_fetch_refresh() {
                                 self.needs_refresh = true;
                             }
+                        }
+                        RemoteOpKind::LocalHistory => {
+                            self.request_history_refresh();
                         }
                         RemoteOpKind::FetchAndCheckout | RemoteOpKind::Other => {
                             self.needs_refresh = true;
@@ -6684,7 +6689,7 @@ impl Gui {
                 key: Some("c".to_string()),
                 action: Some(Box::new(|gui| {
                     gui.git.continue_rebase()?;
-                    gui.needs_refresh = true;
+                    gui.request_history_refresh();
                     Ok(())
                 })),
             });
@@ -6694,7 +6699,7 @@ impl Gui {
                 key: Some("a".to_string()),
                 action: Some(Box::new(|gui| {
                     gui.git.abort_rebase()?;
-                    gui.needs_refresh = true;
+                    gui.request_history_refresh();
                     Ok(())
                 })),
             });
@@ -6704,7 +6709,7 @@ impl Gui {
                 key: Some("s".to_string()),
                 action: Some(Box::new(|gui| {
                     gui.git.rebase_skip()?;
-                    gui.needs_refresh = true;
+                    gui.request_history_refresh();
                     Ok(())
                 })),
             });
@@ -9057,6 +9062,38 @@ impl Gui {
         }
 
         Ok(())
+    }
+
+    fn start_background_history_refresh(&mut self) -> bool {
+        if self.refresh_in_progress || self.initial_load_rx.is_some() {
+            return false;
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        self.initial_load_rx = Some(rx);
+        self.initial_load_received = 0;
+        self.initial_load_expected = HISTORY_MODEL_PART_COUNT;
+        self.refresh_in_progress = true;
+        self.needs_refresh = false;
+
+        self.reset_commit_pagination();
+        self.diff_preview_cache.retain_immutable();
+
+        let git = Arc::clone(&self.git);
+        let commit_filter = self.commit_filter_for_load();
+
+        std::thread::spawn(move || {
+            git.load_model_after_history_change_streaming(&tx, commit_filter);
+        });
+
+        true
+    }
+
+    pub(crate) fn request_history_refresh(&mut self) {
+        if !self.start_background_history_refresh() {
+            self.needs_refresh = true;
+        }
     }
 
     /// Kick off the model refresh required after a successful checkout.

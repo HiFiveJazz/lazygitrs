@@ -129,7 +129,7 @@ fn rebase_remote_branch(gui: &mut Gui) -> Result<()> {
             message: format!("Rebase onto '{}/{}'?", remote, branch),
             on_confirm: Box::new(move |gui| {
                 gui.git.rebase_remote_branch(&remote, &branch)?;
-                gui.needs_refresh = true;
+                gui.request_history_refresh();
                 Ok(())
             }),
         };

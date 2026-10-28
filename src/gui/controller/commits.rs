@@ -213,7 +213,7 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
                     let hash = hash.clone();
                     if is_head {
                         gui.start_remote_op(
-                            RemoteOpKind::Other,
+                            RemoteOpKind::LocalHistory,
                             "Reword",
                             "Rewording commit...",
                             move |git| {
@@ -223,7 +223,7 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
                         );
                     } else {
                         gui.start_remote_op(
-                            RemoteOpKind::Other,
+                            RemoteOpKind::LocalHistory,
                             "Reword",
                             "Rewording commit...",
                             move |git| {
@@ -758,7 +758,7 @@ fn amend_to_commit(gui: &mut Gui) -> Result<()> {
                 message: "Amend staged changes to HEAD commit?".to_string(),
                 on_confirm: Box::new(|gui| {
                     gui.start_remote_op(
-                        RemoteOpKind::Other,
+                        RemoteOpKind::LocalHistory,
                         "Amend",
                         "Amending commit...",
                         |git| {
@@ -781,7 +781,7 @@ fn amend_to_commit(gui: &mut Gui) -> Result<()> {
                 on_confirm: Box::new(move |gui| {
                     let hash = hash.clone();
                     gui.start_remote_op(
-                        RemoteOpKind::Other,
+                        RemoteOpKind::LocalHistory,
                         "Amend",
                         "Amending commit...",
                         move |git| {

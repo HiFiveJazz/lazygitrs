@@ -321,7 +321,7 @@ fn continue_rebase(gui: &mut Gui) -> Result<()> {
             // again, then let refresh() update the rest of the model and
             // detect completion.
             gui.sync_rebase_progress_view();
-            gui.needs_refresh = true;
+            gui.request_history_refresh();
         }
         Err(e) => {
             gui.needs_refresh = true;
@@ -353,7 +353,7 @@ fn skip_rebase(gui: &mut Gui) -> Result<()> {
             match gui.git.rebase_skip() {
                 Ok(()) => {
                     gui.rebase_mode.exit();
-                    gui.needs_refresh = true;
+                    gui.request_history_refresh();
                 }
                 Err(e) => {
                     gui.popup = PopupState::Message {
@@ -377,7 +377,7 @@ fn abort_rebase(gui: &mut Gui) -> Result<()> {
             match gui.git.abort_rebase() {
                 Ok(()) => {
                     gui.rebase_mode.exit();
-                    gui.needs_refresh = true;
+                    gui.request_history_refresh();
                 }
                 Err(e) => {
                     gui.popup = PopupState::Message {
@@ -412,7 +412,7 @@ fn execute_rebase(gui: &mut Gui) -> Result<()> {
             // the first conflict shows the real progress state before the
             // next model refresh lands.
             gui.sync_rebase_progress_view();
-            gui.needs_refresh = true;
+            gui.request_history_refresh();
         }
         Err(e) => {
             gui.rebase_mode.exit();
