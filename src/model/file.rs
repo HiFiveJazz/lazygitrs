@@ -64,14 +64,6 @@ mod tests {
 }
 
 impl File {
-    pub fn is_tracked(&self) -> bool {
-        self.tracked
-    }
-
-    pub fn has_any_changes(&self) -> bool {
-        self.has_staged_changes || self.has_unstaged_changes
-    }
-
     /// Optimistically apply a stage transition in-memory (lazygit-style).
     /// Returns false when the short status isn't a simple map case.
     pub fn optimistic_stage(&mut self) -> bool {
@@ -184,7 +176,6 @@ pub enum FileStatus {
     Renamed,
     Copied,
     Unmerged,
-    Both,
 }
 
 impl fmt::Display for FileStatus {
@@ -197,7 +188,6 @@ impl fmt::Display for FileStatus {
             Self::Renamed => write!(f, "R"),
             Self::Copied => write!(f, "C"),
             Self::Unmerged => write!(f, "U"),
-            Self::Both => write!(f, "B"),
         }
     }
 }

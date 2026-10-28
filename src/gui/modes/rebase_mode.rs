@@ -28,7 +28,6 @@ pub struct RebaseEntry {
     pub short_hash: String,
     pub message: String,
     pub author_name: String,
-    pub unix_timestamp: i64,
     pub action: RebaseAction,
     /// Status during InProgress phase (Done/Current/Pending).
     /// In Planning phase, all entries are Pending.
@@ -110,7 +109,6 @@ impl RebaseModeState {
                 short_hash: c.short_hash().to_string(),
                 message: c.name.clone(),
                 author_name: c.author_name.clone(),
-                unix_timestamp: c.unix_timestamp,
                 action: RebaseAction::Pick,
                 status: EntryStatus::Pending,
             })
@@ -308,7 +306,6 @@ fn entry_from_todo(todo: &TodoEntry, status: EntryStatus) -> RebaseEntry {
         short_hash: todo.short_hash.clone(),
         message: todo.message.clone(),
         author_name: todo.author_name.clone(),
-        unix_timestamp: todo.unix_timestamp,
         action: todo.action,
         status,
     }

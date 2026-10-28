@@ -144,13 +144,6 @@ impl GitCommands {
         Ok(())
     }
 
-    pub fn unstage_file(&self, path: &str) -> Result<()> {
-        self.git()
-            .args(&["--literal-pathspecs", "reset", "HEAD", "--", path])
-            .run_expecting_success()?;
-        Ok(())
-    }
-
     /// Unstage multiple files in a single git command.
     pub fn unstage_files(&self, paths: &[String]) -> Result<()> {
         if paths.is_empty() {

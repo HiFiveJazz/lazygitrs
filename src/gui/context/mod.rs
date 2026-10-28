@@ -18,7 +18,6 @@ pub enum ContextId {
     BranchCommits,
     BranchCommitFiles,
     RemoteBranches,
-    Staging,
 }
 
 /// The 5 side windows, matching lazygit's layout.
@@ -106,7 +105,6 @@ impl SideWindow {
             | ContextId::RemoteBranches => SideWindow::Branches,
             ContextId::Commits | ContextId::Reflog | ContextId::CommitFiles => SideWindow::Commits,
             ContextId::Stash | ContextId::StashFiles => SideWindow::Stash,
-            ContextId::Staging => SideWindow::Files,
         }
     }
 
@@ -141,7 +139,6 @@ impl ContextId {
             Self::BranchCommits => "Branch Commits",
             Self::BranchCommitFiles => "Branch Commit Files",
             Self::RemoteBranches => "Remote Branches",
-            Self::Staging => "Staging",
         }
     }
 }
@@ -328,19 +325,6 @@ impl ContextManager {
         self.active = tabs[next_idx];
     }
 
-    /// Cycle to previous tab within the current window.
-    pub fn prev_tab(&mut self) {
-        let window = self.active_window();
-        let tabs = window.tabs();
-        if tabs.len() <= 1 {
-            return;
-        }
-        let current_idx = self.window_tabs.get(&window).copied().unwrap_or(0);
-        let prev_idx = (current_idx + tabs.len() - 1) % tabs.len();
-        self.window_tabs.insert(window, prev_idx);
-        self.active = tabs[prev_idx];
-    }
-
     pub fn selected(&self, ctx: ContextId) -> usize {
         self.selections.get(&ctx).copied().unwrap_or(0)
     }
@@ -413,6 +397,7 @@ impl ContextManager {
     /// Adjust the scroll offset for a context so that `selected` is visible
     /// within a viewport of `visible_height` rows.  Only scrolls when the
     /// cursor would otherwise be outside the visible window.
+    #[cfg(test)]
     pub fn ensure_scroll_visible(&mut self, ctx: ContextId, visible_height: usize) {
         let selected = self.selected(ctx);
         let mut offset = self.scroll_offset(ctx);
@@ -451,7 +436,6 @@ impl ContextManager {
                 .unwrap_or(model.commit_files.len()),
             ContextId::BranchCommits => model.sub_commits.len(),
             ContextId::RemoteBranches => model.sub_remote_branches.len(),
-            _ => 0,
         }
     }
 

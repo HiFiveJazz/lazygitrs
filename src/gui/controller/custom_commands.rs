@@ -392,7 +392,6 @@ fn context_id_to_name(ctx: ContextId) -> &'static str {
         ContextId::BranchCommits => "branchCommits",
         ContextId::BranchCommitFiles => "branchCommitFiles",
         ContextId::RemoteBranches => "remoteBranches",
-        ContextId::Staging => "staging",
     }
 }
 
@@ -474,11 +473,8 @@ mod tests {
         "#,
         );
         let config = AppConfig {
-            debug: false,
-            version: String::new(),
             user_config: UserConfig::default(),
             app_state: AppState::default(),
-            config_dir: repo.0.clone(),
             state_dir: repo.0.clone(),
             state_path: repo.0.join("state.yml"),
         };

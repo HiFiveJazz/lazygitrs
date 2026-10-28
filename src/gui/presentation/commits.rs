@@ -189,11 +189,7 @@ fn render_commits_window<'a>(
                 match commit.status {
                     CommitStatus::Unpushed => theme.commit_hash_unpushed,
                     CommitStatus::Pushed => theme.commit_hash,
-                    CommitStatus::Merged => Style::default().fg(Color::Green),
-                    CommitStatus::Rebasing
-                    | CommitStatus::Selected
-                    | CommitStatus::Conflicted
-                    | CommitStatus::Reflog => Style::default().fg(Color::Blue),
+                    CommitStatus::Reflog => Style::default().fg(Color::Blue),
                 }
             };
             let hash = commit.short_hash().to_string();
@@ -430,10 +426,8 @@ mod tests {
             hash: hash.to_string(),
             name: hash.to_string(),
             status: CommitStatus::Pushed,
-            action: String::new(),
             tags: Vec::new(),
             refs: Vec::new(),
-            extra_info: String::new(),
             author_name: String::new(),
             author_email: String::new(),
             unix_timestamp: 0,

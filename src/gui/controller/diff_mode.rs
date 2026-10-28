@@ -1239,11 +1239,8 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "{:?}", output);
         let config = AppConfig {
-            debug: false,
-            version: String::new(),
             user_config: UserConfig::default(),
             app_state: AppState::default(),
-            config_dir: repo.0.clone(),
             state_dir: repo.0.clone(),
             state_path: repo.0.join("state.yml"),
         };
@@ -1419,11 +1416,8 @@ mod tests {
         run(&["add", "file.txt"]);
         run(&["commit", "-m", "restore content"]);
         let config = AppConfig {
-            debug: false,
-            version: String::new(),
             user_config: UserConfig::default(),
             app_state: AppState::default(),
-            config_dir: repo.0.clone(),
             state_dir: repo.0.clone(),
             state_path: repo.0.join("state.yml"),
         };

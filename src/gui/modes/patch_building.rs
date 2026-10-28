@@ -33,14 +33,6 @@ impl PatchBuildingState {
         self.selected_hunks.clear();
     }
 
-    pub fn toggle_file(&mut self, file_path: &str) {
-        if self.selected_files.contains(file_path) {
-            self.selected_files.remove(file_path);
-        } else {
-            self.selected_files.insert(file_path.to_string());
-        }
-    }
-
     pub fn has_selections(&self) -> bool {
         !self.selected_files.is_empty()
     }

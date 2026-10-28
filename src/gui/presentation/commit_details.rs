@@ -171,7 +171,6 @@ fn hash_style(commit: &Commit, theme: &Theme) -> Style {
     match commit.status {
         CommitStatus::Unpushed => theme.commit_hash,
         CommitStatus::Pushed => Style::default().fg(theme.commit_hash_pushed),
-        CommitStatus::Merged => Style::default().fg(theme.commit_hash_merged),
         _ => theme.commit_hash,
     }
 }
@@ -432,10 +431,8 @@ mod tests {
             hash: "1234567890abcdef".into(),
             name: "Test commit".into(),
             status: CommitStatus::Pushed,
-            action: String::new(),
             tags: vec![],
             refs: vec![],
-            extra_info: String::new(),
             author_name: "Test Author".into(),
             author_email: String::new(),
             unix_timestamp: 0,

@@ -46,7 +46,6 @@ pub struct Model {
     pub sub_commits_revision: u64,
     pub sub_remote_branches: Vec<RemoteBranch>,
     pub commit_files: Vec<CommitFile>,
-    pub authors: HashMap<String, Author>,
     /// Authors encountered in loaded commit history. Unlike `authors`, this is
     /// retained across filtering so the author palette remains useful.
     pub commit_filter_authors: HashMap<String, Author>,
@@ -85,6 +84,7 @@ impl Model {
     /// staged file jumps to the top).
     /// Wholesale-replace the model with a freshly-loaded one, but keep the
     /// previous file display order via `set_files`.
+    #[cfg(test)]
     pub fn replace_keeping_file_order(&mut self, mut new_model: Model) {
         let commits_revision = self.commits_revision.wrapping_add(1);
         let sub_commits_revision = self.sub_commits_revision.wrapping_add(1);
@@ -212,10 +212,8 @@ mod tests {
             hash: hash.to_string(),
             name: hash.to_string(),
             status: CommitStatus::Pushed,
-            action: String::new(),
             tags: Vec::new(),
             refs: Vec::new(),
-            extra_info: String::new(),
             author_name: String::new(),
             author_email: String::new(),
             unix_timestamp: 0,

@@ -6,7 +6,6 @@ use super::GitCommands;
 pub struct Submodule {
     pub name: String,
     pub path: String,
-    pub url: String,
 }
 
 impl GitCommands {
@@ -39,7 +38,6 @@ impl GitCommands {
                 submodules.push(Submodule {
                     name: path.clone(),
                     path,
-                    url: String::new(),
                 });
             }
         }

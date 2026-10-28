@@ -256,17 +256,6 @@ pub(crate) struct DiffResult {
 }
 
 pub(crate) enum DiffPayload {
-    /// Side-by-side diff from old/new content.
-    Content {
-        filename: String,
-        old: String,
-        new: String,
-    },
-    /// Unified diff output from git.
-    UnifiedDiff {
-        filename: String,
-        diff_output: String,
-    },
     /// Pre-parsed diff ready to apply (parsing done on background thread).
     Parsed(crate::pager::side_by_side::ParsedDiff),
     /// No diff to show.
@@ -1928,20 +1917,6 @@ impl Gui {
             self.stash_displayed_diff();
         }
         match payload {
-            DiffPayload::Content { filename, old, new } => {
-                self.diff_view.load(&filename, &old, &new);
-                self.diff_view.file_exists_on_disk = self.git.repo_path().join(&filename).exists();
-                self.displayed_diff_key = diff_key;
-            }
-            DiffPayload::UnifiedDiff {
-                filename,
-                diff_output,
-            } => {
-                self.diff_view
-                    .load_from_diff_output(&filename, &diff_output);
-                self.diff_view.file_exists_on_disk = self.git.repo_path().join(&filename).exists();
-                self.displayed_diff_key = diff_key;
-            }
             DiffPayload::Parsed(parsed) => {
                 self.diff_view.apply_parsed(parsed);
                 self.displayed_diff_key = diff_key;
@@ -4274,7 +4249,6 @@ impl Gui {
             ContextId::BranchCommits => {
                 controller::branch_commits::handle_key(self, key, &keybindings)?;
             }
-            _ => {}
         }
 
         Ok(())
@@ -4864,7 +4838,7 @@ impl Gui {
             }
             PopupState::Menu {
                 items,
-                selected,
+                selected: _,
                 loading_index,
                 ..
             } => {
@@ -6560,13 +6534,6 @@ impl Gui {
                     CommandEntry::keybinding("<enter>".into(), "Recent repos".into()),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
                     CommandEntry::keybinding("o".into(), "Open in browser menu".into()),
-                ],
-            },
-            _ => CommandSection {
-                title: "Navigation".into(),
-                entries: vec![
-                    CommandEntry::keybinding("<enter>".into(), "Select / Open".into()),
-                    CommandEntry::keybinding("<space>".into(), "Toggle / Confirm".into()),
                 ],
             },
         };
@@ -8952,6 +8919,7 @@ impl Gui {
         })
     }
 
+    #[cfg(test)]
     fn refresh(&mut self) -> Result<()> {
         self.reset_commit_pagination();
         self.diff_preview_cache.retain_immutable();
@@ -9170,28 +9138,6 @@ impl Gui {
         });
 
         true
-    }
-
-    /// Lightweight refresh that only reloads files and diff stats.
-    /// Prefer the async status-only path after stage/unstage; this full
-    /// variant is kept for callers that need numstat immediately.
-    fn refresh_files_only(&mut self) -> Result<()> {
-        self.diff_preview_cache.retain_immutable();
-        // Status-only is enough for staging correctness; skip expensive
-        // numstat/hunk subprocesses on this hot path.
-        let files = self.git.load_files_status_only()?;
-        let mut model = self.model.lock().unwrap();
-        model.set_files(files);
-
-        if self.show_file_tree {
-            self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
-            self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
-        } else {
-            self.file_tree_nodes.clear();
-            self.context_mgr.files_list_len_override = None;
-        }
-
-        Ok(())
     }
 
     /// Rebuild the file tree from the current in-memory model (no git).

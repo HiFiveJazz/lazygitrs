@@ -179,6 +179,7 @@ fn next_events_interruptible(
 }
 
 /// Blocking read of the next logical event(s).
+#[cfg(test)]
 fn next_events(source: &mut impl EventSource) -> io::Result<Vec<Event>> {
     // Both entry points share reassembly and lossless Kitty reply recognition.
     let first = loop {

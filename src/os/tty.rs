@@ -39,11 +39,6 @@ pub fn nested_tty_launch() -> bool {
     NESTED_TTY_LAUNCH.load(Ordering::Relaxed)
 }
 
-/// Back-compat alias used by the GUI keyboard-setup path.
-pub fn reclaimed_controlling_tty() -> bool {
-    nested_tty_launch()
-}
-
 /// Detect a nested/piped launch, then claim the tty foreground so Helix's
 /// EventStream cannot steal keystrokes. Does **not** remap stdout.
 pub fn reclaim_controlling_tty() {
