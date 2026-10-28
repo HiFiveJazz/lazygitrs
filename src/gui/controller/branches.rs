@@ -435,7 +435,7 @@ fn rebase_branch(gui: &mut Gui) -> Result<()> {
                 } else {
                     Some(Box::new(move |gui| {
                         gui.git.rebase_branch(&name_for_simple)?;
-                        gui.needs_refresh = true;
+                        gui.request_history_refresh();
                         Ok(())
                     }))
                 },
@@ -463,7 +463,7 @@ fn rebase_branch(gui: &mut Gui) -> Result<()> {
                 key: Some("b".to_string()),
                 action: Some(Box::new(move |gui| {
                     gui.git.rebase_branch(&name_for_base)?;
-                    gui.needs_refresh = true;
+                    gui.request_history_refresh();
                     Ok(())
                 })),
             },

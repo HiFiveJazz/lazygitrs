@@ -16,22 +16,26 @@ impl GitCommands {
         }
 
         let result = self.git().args(&["submodule", "status"]).run()?;
-        let result = self.git().args(&["submodule", "status"]).run()?;
         if !result.success || result.stdout.trim().is_empty() {
             return Ok(Vec::new());
         }
 
         let mut submodules = Vec::new();
+
         for line in result.stdout.lines() {
             let line = line.trim();
+
             if line.is_empty() {
                 continue;
             }
+
             // Format: " hash path (describe)" or "+hash path (describe)" or "-hash path"
             let line = line.trim_start_matches([' ', '+', '-']);
             let parts: Vec<&str> = line.splitn(3, ' ').collect();
+
             if parts.len() >= 2 {
                 let path = parts[1].to_string();
+
                 submodules.push(Submodule {
                     name: path.clone(),
                     path,
