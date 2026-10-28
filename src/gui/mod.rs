@@ -1460,20 +1460,26 @@ impl Gui {
                 // All parts received — done loading.
                 if self.initial_load_received >= self.initial_load_expected {
                     self.initial_load_rx = None;
+
                     let was_refresh = self.refresh_in_progress;
+                    let was_periodic_refresh =
+                        was_refresh && self.initial_load_expected == PERIODIC_MODEL_PART_COUNT;
+
                     self.refresh_in_progress = false;
+
                     // Leave needs_refresh alone: if another mutation arrived
                     // mid-refresh it will re-queue on the next frame.
                     self.needs_files_refresh = false;
                     self.needs_diff_refresh = true;
                     self.last_refresh_at = Instant::now();
-                    // Re-apply filters / selection-dependent views after stream
-                    // completes (initial load and background refresh). Needed so
-                    // startup `-f/--filter` takes effect once commits arrive.
-                    if was_refresh
-                        || self.commit_path_filter.is_some()
-                        || !self.commit_branch_filter.is_empty()
-                        || !self.commit_author_filter.is_empty()
+
+                    // Periodic refresh only updates Files + Submodules. Those parts are
+                    // applied as they arrive, so don't reload selection-dependent views.
+                    if !was_periodic_refresh
+                        && (was_refresh
+                            || self.commit_path_filter.is_some()
+                            || !self.commit_branch_filter.is_empty()
+                            || !self.commit_author_filter.is_empty())
                     {
                         if let Err(err) = self.after_model_refresh() {
                             self.show_error("Refresh failed", err);
