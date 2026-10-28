@@ -268,6 +268,11 @@ pub(crate) enum RemoteOpKind {
     Pull,
     Fetch,
     FetchAndCheckout,
+    /// A single newly-created commit appended to the current HEAD.
+    ///
+    /// Unlike amend/reword/rebase, this can update the loaded commit
+    /// model incrementally without rebuilding the global --all topo walk.
+    LocalAppend,
     LocalHistory,
     Other,
 }
@@ -2382,7 +2387,7 @@ impl Gui {
                                 if !msg.is_empty() {
                                     let message = msg.to_string();
                                     gui.start_remote_op(
-                                        RemoteOpKind::LocalHistory,
+                                        RemoteOpKind::LocalAppend,
                                         "Commit",
                                         "Creating commit...",
                                         move |git| {
@@ -2689,6 +2694,9 @@ impl Gui {
                             if !self.start_background_fetch_refresh() {
                                 self.needs_refresh = true;
                             }
+                        }
+                        RemoteOpKind::LocalAppend => {
+                            self.request_append_refresh();
                         }
                         RemoteOpKind::LocalHistory => {
                             self.request_history_refresh();
@@ -9036,6 +9044,131 @@ impl Gui {
         }
 
         Ok(())
+    }
+
+    /// Fast refresh after creating exactly one new commit at HEAD.
+    ///
+    /// Returns false whenever the current model cannot be updated safely;
+    /// callers then fall back to the normal full history refresh.
+    fn try_fast_append_refresh(&mut self) -> bool {
+        if self.refresh_in_progress
+            || self.initial_load_rx.is_some()
+            || self.commit_filter_for_load().is_some()
+        {
+            return false;
+        }
+
+        let (old_head, old_first, operation_in_progress) = {
+            let model = self.model.lock().unwrap();
+
+            (
+                model.head_hash.clone(),
+                model.commits.first().map(|commit| commit.hash.clone()),
+                model.is_rebasing
+                    || model.is_merging
+                    || model.is_cherry_picking
+                    || model.is_bisecting,
+            )
+        };
+
+        // Finishing a merge/rebase/cherry-pick can have wider history effects.
+        if operation_in_progress {
+            return false;
+        }
+
+        let new_commit = match self.git.load_head_commit() {
+            Ok(Some(commit)) => commit,
+            _ => return false,
+        };
+
+        let new_hash = new_commit.hash.clone();
+
+        if new_hash == old_head {
+            return false;
+        }
+
+        if old_head.is_empty() {
+            // Unborn repository: only fast-path when the loaded list was empty.
+            if old_first.is_some() {
+                return false;
+            }
+        } else {
+            // The global --all view can have an unrelated branch at the top.
+            // Only prepend when the old HEAD itself was already the first row.
+            if old_first.as_deref() != Some(old_head.as_str()) {
+                return false;
+            }
+
+            // A normal commit must be exactly one new first-parent child.
+            let parent = match self.git.first_parent_hash(&new_hash) {
+                Ok(Some(parent)) => parent,
+                _ => return false,
+            };
+
+            if parent != old_head {
+                return false;
+            }
+        }
+
+        // This is the only substantial command on the fast path (~100 ms on
+        // the Linux kernel tree); the global topo walk is deliberately absent.
+        let files = match self.git.refresh_files_status_only() {
+            Ok(files) => files,
+            Err(_) => return false,
+        };
+
+        let (added, deleted) = self.git.diff_shortstat().unwrap_or((0, 0));
+
+        // Refresh branch tracking metadata as well as the tip hash. This is
+        // cheap, and keeps the current branch's ↑ahead/↓behind indicator
+        // correct immediately after committing.
+        let branches = match self.git.load_branches() {
+            Ok(branches) => branches,
+            Err(_) => return false,
+        };
+
+        {
+            let mut model = self.model.lock().unwrap();
+
+            // Re-check the state after running git commands so a concurrent
+            // refresh cannot make the append decision stale.
+            if model.head_hash != old_head {
+                return false;
+            }
+
+            if !old_head.is_empty()
+                && model.commits.first().map(|commit| commit.hash.as_str())
+                    != Some(old_head.as_str())
+            {
+                return false;
+            }
+
+            model.prepend_commit(new_commit);
+            model.head_hash = new_hash;
+            model.branches = branches;
+
+            model.set_files(files);
+            model.total_additions = added;
+            model.total_deletions = deleted;
+        }
+
+        // Invalidate any in-flight pagination request based on the old list.
+        // We intentionally do NOT truncate the list: if it was 300 rows it is
+        // now 301, so the next page naturally starts at skip=301.
+        self.reset_commit_pagination();
+
+        // Commit diffs are immutable, so existing cached historical previews
+        // remain valid. The selected working-tree diff is not.
+        self.diff_preview_cache.retain_immutable();
+        self.needs_diff_refresh = true;
+
+        true
+    }
+
+    pub(crate) fn request_append_refresh(&mut self) {
+        if !self.try_fast_append_refresh() {
+            self.request_history_refresh();
+        }
     }
 
     fn start_background_history_refresh(&mut self) -> bool {

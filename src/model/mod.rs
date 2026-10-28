@@ -124,6 +124,14 @@ impl Model {
         }
     }
 
+    /// Prepend a newly-created HEAD commit without rebuilding the entire
+    /// globally topologically-sorted commit page.
+    pub fn prepend_commit(&mut self, commit: Commit) {
+        self.remember_commit_authors(std::slice::from_ref(&commit));
+        self.commits.insert(0, commit);
+        self.commits_revision = self.commits_revision.wrapping_add(1);
+    }
+
     pub fn set_sub_commits(&mut self, commits: Vec<Commit>) {
         self.remember_commit_authors(&commits);
         self.sub_commits = commits;
