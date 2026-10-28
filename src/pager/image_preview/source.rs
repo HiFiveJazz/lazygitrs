@@ -33,12 +33,15 @@ pub(crate) struct DecodedImage {
 }
 
 impl DecodedImage {
+    #[cfg(test)]
     pub(super) fn width(&self) -> u32 {
         self.image.width()
     }
+    #[cfg(test)]
     pub(super) fn height(&self) -> u32 {
         self.image.height()
     }
+    #[cfg(test)]
     pub(super) fn format_label(&self) -> &'static str {
         format_label_for(self.format)
     }

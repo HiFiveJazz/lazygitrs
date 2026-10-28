@@ -2,15 +2,6 @@ use anyhow::Result;
 
 use super::GitCommands;
 
-#[derive(Debug, Clone)]
-pub struct BisectInfo {
-    pub started: bool,
-    pub current: String,
-    pub good: Vec<String>,
-    pub bad: Vec<String>,
-    pub remaining: Option<usize>,
-}
-
 impl GitCommands {
     /// Start a bisect session.
     pub fn bisect_start(&self) -> Result<()> {
@@ -70,58 +61,8 @@ impl GitCommands {
         Ok(())
     }
 
-    /// Get bisect log output.
-    pub fn bisect_log(&self) -> Result<String> {
-        let result = self.git().args(&["bisect", "log"]).run()?;
-        if result.success {
-            Ok(result.stdout)
-        } else {
-            Ok(String::new())
-        }
-    }
-
     /// Check if currently in a bisect session.
     pub fn is_bisecting(&self) -> bool {
         self.repo_path().join(".git/BISECT_LOG").exists()
-    }
-
-    /// Parse bisect info from the log.
-    pub fn bisect_info(&self) -> Result<BisectInfo> {
-        let started = self.is_bisecting();
-        if !started {
-            return Ok(BisectInfo {
-                started: false,
-                current: String::new(),
-                good: Vec::new(),
-                bad: Vec::new(),
-                remaining: None,
-            });
-        }
-
-        let log = self.bisect_log()?;
-        let mut good = Vec::new();
-        let mut bad = Vec::new();
-
-        for line in log.lines() {
-            if line.starts_with("# good: ") {
-                if let Some(hash) = line.strip_prefix("# good: ") {
-                    good.push(hash.trim().to_string());
-                }
-            } else if line.starts_with("# bad: ") {
-                if let Some(hash) = line.strip_prefix("# bad: ") {
-                    bad.push(hash.trim().to_string());
-                }
-            }
-        }
-
-        let current = self.head_hash().unwrap_or_default();
-
-        Ok(BisectInfo {
-            started,
-            current,
-            good,
-            bad,
-            remaining: None,
-        })
     }
 }

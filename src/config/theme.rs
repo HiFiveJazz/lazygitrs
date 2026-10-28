@@ -1,4 +1,3 @@
-use super::user_config::ThemeConfig;
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
 
@@ -12,13 +11,10 @@ pub struct Theme {
     pub active_border: Style,
     pub inactive_border: Style,
     pub selected_line: Style,
-    pub options_text: Style,
-    pub title: Style,
 
     // ── Diff ─────────────────────────────────────────────────────────
     pub diff_add: Style,
     pub diff_remove: Style,
-    pub diff_context: Style,
     pub diff_add_bg: Color,
     pub diff_remove_bg: Color,
     pub diff_add_gutter_bg: Color,
@@ -34,11 +30,9 @@ pub struct Theme {
     pub commit_author: Style,
     pub commit_date: Style,
     pub commit_hash_pushed: Color,
-    pub commit_hash_merged: Color,
 
     // ── Branches ─────────────────────────────────────────────────────
     pub branch_local: Style,
-    pub branch_remote: Style,
     pub branch_head: Style,
 
     // ── Files ────────────────────────────────────────────────────────
@@ -51,8 +45,6 @@ pub struct Theme {
     pub search_match: Style,
 
     // ── Status bar ───────────────────────────────────────────────────
-    pub status_bar: Style,
-    pub spinner: Style,
 
     // ── UI chrome colors (popups, dialogs, etc.) ─────────────────────
     /// Primary accent color used for borders, focused elements, section headers.
@@ -137,7 +129,6 @@ pub struct Theme {
 
     // ── Tag list ─────────────────────────────────────────────────────
     pub tag_name: Color,
-    pub tag_hash: Color,
     pub tag_message: Color,
 
     // ── Stash list ───────────────────────────────────────────────────
@@ -162,25 +153,6 @@ impl Default for Theme {
 }
 
 impl Theme {
-    pub fn from_config(config: &ThemeConfig) -> Self {
-        let mut theme = Self::dark();
-
-        if let Some(color) = parse_color_list(&config.active_border_color) {
-            theme.active_border = Style::default().fg(color).add_modifier(Modifier::BOLD);
-        }
-        if let Some(color) = parse_color_list(&config.inactive_border_color) {
-            theme.inactive_border = Style::default().fg(color);
-        }
-        if let Some(color) = parse_color_list(&config.selected_line_bg_color) {
-            theme.selected_line = Style::default().bg(color);
-        }
-        if let Some(color) = parse_color_list(&config.options_text_color) {
-            theme.options_text = Style::default().fg(color);
-        }
-
-        theme
-    }
-
     pub fn dark() -> Self {
         Self {
             active_border: Style::default()
@@ -188,13 +160,8 @@ impl Theme {
                 .add_modifier(Modifier::BOLD),
             inactive_border: Style::default().fg(Color::DarkGray),
             selected_line: Style::default().bg(Color::DarkGray),
-            options_text: Style::default().fg(Color::Blue),
-            title: Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
             diff_add: Style::default().fg(Color::Green),
             diff_remove: Style::default().fg(Color::Red),
-            diff_context: Style::default().fg(Color::Gray),
             diff_add_bg: Color::Rgb(0, 60, 0),
             diff_remove_bg: Color::Rgb(60, 0, 0),
             diff_add_gutter_bg: Color::Rgb(0, 30, 0),
@@ -208,9 +175,7 @@ impl Theme {
             commit_author: Style::default().fg(Color::Green),
             commit_date: Style::default().fg(Color::Blue),
             commit_hash_pushed: Color::Rgb(102, 102, 102),
-            commit_hash_merged: Color::Rgb(80, 80, 80),
             branch_local: Style::default().fg(Color::Green),
-            branch_remote: Style::default().fg(Color::Red),
             branch_head: Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -219,8 +184,6 @@ impl Theme {
             file_untracked: Style::default().fg(Color::LightRed),
             file_conflicted: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             search_match: Style::default().bg(Color::Yellow).fg(Color::Black),
-            status_bar: Style::default().fg(Color::DarkGray),
-            spinner: Style::default().fg(Color::Cyan),
 
             // UI chrome
             accent: Color::Cyan,
@@ -306,7 +269,6 @@ impl Theme {
 
             // Tags
             tag_name: Color::Green,
-            tag_hash: Color::Yellow,
             tag_message: Color::White,
 
             // Stash
@@ -512,7 +474,7 @@ impl ThemeJson {
             .as_deref()
             .and_then(parse_hex)
             .unwrap_or(error);
-        let diff_context = self
+        let _diff_context = self
             .diff_context
             .as_deref()
             .and_then(parse_hex)
@@ -620,14 +582,9 @@ impl ThemeJson {
                 .add_modifier(Modifier::BOLD),
             inactive_border: Style::default().fg(border),
             selected_line: Style::default().bg(selected_bg),
-            options_text: Style::default().fg(info),
-            title: Style::default()
-                .fg(text_strong)
-                .add_modifier(Modifier::BOLD),
 
             diff_add: Style::default().fg(diff_add),
             diff_remove: Style::default().fg(diff_remove),
-            diff_context: Style::default().fg(diff_context),
             diff_add_bg,
             diff_remove_bg,
             diff_add_gutter_bg,
@@ -642,10 +599,8 @@ impl ThemeJson {
             commit_author: Style::default().fg(primary),
             commit_date: Style::default().fg(info),
             commit_hash_pushed: text_dimmed,
-            commit_hash_merged: border,
 
             branch_local: Style::default().fg(success),
-            branch_remote: Style::default().fg(error),
             branch_head: Style::default().fg(primary).add_modifier(Modifier::BOLD),
 
             file_staged: Style::default().fg(success),
@@ -654,8 +609,6 @@ impl ThemeJson {
             file_conflicted: Style::default().fg(error).add_modifier(Modifier::BOLD),
 
             search_match: Style::default().bg(warning).fg(background),
-            status_bar: Style::default().fg(text_dimmed),
-            spinner: Style::default().fg(primary),
 
             accent,
             accent_secondary,
@@ -723,7 +676,6 @@ impl ThemeJson {
             ref_tag: info,
 
             tag_name: success,
-            tag_hash: warning,
             tag_message: text,
 
             stash_index: warning,
@@ -1004,10 +956,6 @@ fn parse_hex(s: &str) -> Option<Color> {
     } else {
         parse_color(s)
     }
-}
-
-fn parse_color_list(colors: &[String]) -> Option<Color> {
-    colors.first().and_then(|s| parse_color(s))
 }
 
 fn parse_color(s: &str) -> Option<Color> {

@@ -9,7 +9,7 @@ use anyhow::Result;
 
 pub use app_state::AppState;
 pub use keybindings::KeybindingConfig;
-pub use theme::{COLOR_THEMES, ColorTheme, Theme, ThemeAppearance};
+pub use theme::{COLOR_THEMES, Theme};
 pub use user_config::UserConfig;
 
 pub fn config_dir_candidates() -> Vec<PathBuf> {
@@ -22,11 +22,8 @@ pub fn config_dir_candidates() -> Vec<PathBuf> {
 
 /// Top-level application configuration.
 pub struct AppConfig {
-    pub debug: bool,
-    pub version: String,
     pub user_config: UserConfig,
     pub app_state: AppState,
-    pub config_dir: PathBuf,
     pub state_dir: PathBuf,
     pub state_path: PathBuf,
 }
@@ -34,11 +31,8 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            debug: false,
-            version: env!("CARGO_PKG_VERSION").to_string(),
             user_config: UserConfig::default(),
             app_state: AppState::default(),
-            config_dir: PathBuf::from("."),
             state_dir: PathBuf::from("."),
             state_path: PathBuf::from("state.yml"),
         }
@@ -46,7 +40,7 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub fn load(debug: bool) -> Result<Self> {
+    pub fn load(_debug: bool) -> Result<Self> {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let candidates = config_dir_candidates();
         let config_dir = candidates
@@ -75,11 +69,8 @@ impl AppConfig {
         let app_state = AppState::load(&state_path)?;
 
         Ok(Self {
-            debug,
-            version: env!("CARGO_PKG_VERSION").to_string(),
             user_config,
             app_state,
-            config_dir,
             state_dir,
             state_path,
         })

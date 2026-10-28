@@ -341,13 +341,6 @@ impl DiffViewLayout {
             Self::Unified => "unified",
         }
     }
-
-    pub fn toggled(self) -> Self {
-        match self {
-            Self::SideBySide => Self::Unified,
-            Self::Unified => Self::SideBySide,
-        }
-    }
 }
 
 /// Which side(s) of the diff to display.
@@ -363,10 +356,6 @@ pub enum DiffSideView {
 pub struct DiffSearchMatch {
     /// Index into `DiffViewState::lines`.
     pub line_idx: usize,
-    /// Which panel the match is on.
-    pub panel: DiffPanel,
-    /// Character (byte) offset within the line text.
-    pub col: usize,
 }
 
 /// One entry in the diff view's revert-hunk undo stack.
@@ -394,6 +383,7 @@ pub struct DiffViewState {
     pub filename: String,
     pub old_content: String,
     pub new_content: String,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub tab_width: usize,
     /// Per-file-section highlighters for multi-file diffs.
     sections: Vec<FileSection>,
@@ -695,11 +685,7 @@ impl DiffViewState {
                 let text_lower = text.to_lowercase();
                 let mut start = 0;
                 while let Some(pos) = text_lower[start..].find(&query_lower) {
-                    self.search_matches.push(DiffSearchMatch {
-                        line_idx,
-                        panel: DiffPanel::Old,
-                        col: start + pos,
-                    });
+                    self.search_matches.push(DiffSearchMatch { line_idx });
                     start += pos + 1;
                 }
             }
@@ -708,11 +694,7 @@ impl DiffViewState {
                 let text_lower = text.to_lowercase();
                 let mut start = 0;
                 while let Some(pos) = text_lower[start..].find(&query_lower) {
-                    self.search_matches.push(DiffSearchMatch {
-                        line_idx,
-                        panel: DiffPanel::New,
-                        col: start + pos,
-                    });
+                    self.search_matches.push(DiffSearchMatch { line_idx });
                     start += pos + 1;
                 }
             }
@@ -1057,6 +1039,7 @@ impl DiffViewState {
     }
 
     /// Load a diff from old/new content (single file).
+    #[cfg(test)]
     pub fn load(&mut self, filename: &str, old: &str, new: &str) {
         self.image_preview = None;
         self.inline_images.clear();
@@ -1101,6 +1084,7 @@ impl DiffViewState {
 
     /// Load from raw diff output (git diff).
     /// Automatically detects multi-file diffs and splits into per-file sections.
+    #[cfg(test)]
     pub fn load_from_diff_output(&mut self, filename: &str, diff_output: &str) {
         self.image_preview = None;
         self.inline_images.clear();

@@ -10,10 +10,6 @@ pub struct Branch {
 }
 
 impl Branch {
-    pub fn display_name(&self) -> &str {
-        &self.name
-    }
-
     pub fn is_tracking(&self) -> bool {
         self.upstream.is_some()
     }

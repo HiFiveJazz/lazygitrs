@@ -752,19 +752,9 @@ impl GitCommands {
         }
     }
 
-    /// Refresh just the working tree files.
-    pub fn refresh_files(&self) -> Result<Vec<crate::model::File>> {
-        self.load_files()
-    }
-
     /// Status-only file refresh (skips numstat/hunk subprocesses).
     pub fn refresh_files_status_only(&self) -> Result<Vec<crate::model::File>> {
         self.load_files_status_only()
-    }
-
-    /// Refresh just branches.
-    pub fn refresh_branches(&self) -> Result<Vec<crate::model::Branch>> {
-        self.load_branches()
     }
 
     /// Get the current branch name.

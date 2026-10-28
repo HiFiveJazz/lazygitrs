@@ -39,7 +39,7 @@ pub fn new_command_log() -> CommandLog {
     Arc::new(Mutex::new(Vec::new()))
 }
 
-/// Thread-local command log reference.
+// Thread-local command log reference.
 thread_local! {
     static CMD_LOG: std::cell::RefCell<Option<CommandLog>> = const { std::cell::RefCell::new(None) };
 }
@@ -84,10 +84,6 @@ impl CmdResult {
 
     pub fn stdout_trimmed(&self) -> &str {
         self.stdout.trim()
-    }
-
-    pub fn lines(&self) -> Vec<&str> {
-        self.stdout.lines().collect()
     }
 
     /// stdout + stderr for error messages. Many git commands (stash pop/apply,
@@ -138,11 +134,6 @@ impl CmdBuilder {
 
     pub fn args(mut self, args: &[&str]) -> Self {
         self.args.extend(args.iter().map(|s| s.to_string()));
-        self
-    }
-
-    pub fn cwd(mut self, dir: &str) -> Self {
-        self.cwd = Some(dir.to_string());
         self
     }
 

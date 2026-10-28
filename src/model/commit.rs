@@ -5,11 +5,9 @@ pub struct Commit {
     pub hash: String,
     pub name: String,
     pub status: CommitStatus,
-    pub action: String,
     pub tags: Vec<String>,
     /// Branch/ref decorations (e.g. "HEAD -> main", "origin/main").
     pub refs: Vec<String>,
-    pub extra_info: String,
     pub author_name: String,
     pub author_email: String,
     pub unix_timestamp: i64,
@@ -25,10 +23,6 @@ impl Commit {
             &self.hash
         }
     }
-
-    pub fn is_merge(&self) -> bool {
-        self.parents.len() > 1
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -36,10 +30,6 @@ pub enum CommitStatus {
     #[default]
     Pushed,
     Unpushed,
-    Merged,
-    Rebasing,
-    Selected,
-    Conflicted,
     Reflog,
 }
 
@@ -48,10 +38,6 @@ impl fmt::Display for CommitStatus {
         match self {
             Self::Pushed => write!(f, "pushed"),
             Self::Unpushed => write!(f, "unpushed"),
-            Self::Merged => write!(f, "merged"),
-            Self::Rebasing => write!(f, "rebasing"),
-            Self::Selected => write!(f, "selected"),
-            Self::Conflicted => write!(f, "conflicted"),
             Self::Reflog => write!(f, "reflog"),
         }
     }

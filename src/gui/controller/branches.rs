@@ -1,6 +1,6 @@
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::popup::{MenuItem, MessageKind, PopupState, make_textarea};
+use crate::gui::popup::{MenuItem, PopupState, make_textarea};
 use crate::gui::{Gui, RemoteOpKind};
 use crate::os::platform::Platform;
 use anyhow::Result;
@@ -216,39 +216,6 @@ fn start_async_checkout(gui: &mut Gui, name: String) {
             Ok(())
         },
     );
-}
-
-fn show_checkout_error_or_refresh(gui: &mut Gui, name: &str) -> Result<()> {
-    // Kept for call sites that still need a synchronous checkout (e.g. picker
-    // confirmations that want an immediate error). Prefer start_async_checkout
-    // on interactive hot paths.
-    match gui.git.checkout_branch(name) {
-        Ok(()) => {
-            gui.needs_refresh = true;
-        }
-        Err(e) => {
-            let err = format!("{}", e);
-            if crate::gui::is_checkout_ref_not_found(&err) {
-                let name = name.to_string();
-                gui.popup = PopupState::Confirm {
-                    title: "Branch not found".to_string(),
-                    message: format!("Branch not found. Create a new branch named {}?", name),
-                    on_confirm: Box::new(move |gui| {
-                        gui.git.create_branch(&name)?;
-                        gui.needs_refresh = true;
-                        Ok(())
-                    }),
-                };
-            } else {
-                gui.popup = PopupState::Message {
-                    title: "Checkout error".to_string(),
-                    message: err,
-                    kind: MessageKind::Error,
-                };
-            }
-        }
-    }
-    Ok(())
 }
 
 fn new_branch(gui: &mut Gui) -> Result<()> {
@@ -548,10 +515,8 @@ pub fn enter_interactive_rebase_onto(gui: &mut Gui, onto_ref: &str) -> Result<()
                 hash: base_hash.clone(),
                 name: msg,
                 status: CommitStatus::Pushed,
-                action: String::new(),
                 tags: Vec::<String>::new(),
                 refs: Vec::<String>::new(),
-                extra_info: String::new(),
                 author_name: author,
                 author_email: String::new(),
                 unix_timestamp: 0,

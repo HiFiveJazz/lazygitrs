@@ -5,8 +5,8 @@ use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
 use crate::git::rebase::RebaseAction;
 use crate::gui::popup::{
-    BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, ListPickerItem, MenuItem,
-    MessageKind, PopupState, make_textarea,
+    BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, MenuItem, MessageKind,
+    PopupState, make_textarea,
 };
 use crate::gui::{Gui, RemoteOpKind};
 use crate::model::Branch;
@@ -681,10 +681,8 @@ fn synthetic_commit(hash: &str, message: &str, author: &str) -> crate::model::Co
         hash: hash.to_string(),
         name: message.to_string(),
         status: CommitStatus::Pushed,
-        action: String::new(),
         tags: Vec::new(),
         refs: Vec::new(),
-        extra_info: String::new(),
         author_name: author.to_string(),
         author_email: String::new(),
         unix_timestamp: 0,

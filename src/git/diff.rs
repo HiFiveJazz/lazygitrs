@@ -26,12 +26,6 @@ impl GitCommands {
         Ok(result.stdout)
     }
 
-    /// Get diff for a specific file (staged changes).
-    pub fn diff_file_staged(&self, path: &str) -> Result<String> {
-        let paths = diff_paths_for_label(path);
-        self.diff_file_staged_paths(&paths)
-    }
-
     /// Get staged diff for one logical file using one or more pathspecs.
     pub fn diff_file_staged_paths(&self, paths: &[&str]) -> Result<String> {
         let mut args = vec![
@@ -53,28 +47,6 @@ impl GitCommands {
             .git()
             .args(&["diff", "HEAD", "--color=never"])
             .run_expecting_success()?;
-        Ok(result.stdout)
-    }
-
-    /// Get the full staged diff (for AI commit generation).
-    pub fn diff_staged(&self) -> Result<String> {
-        self.diff_staged_paths(&[])
-    }
-
-    /// Staged diff limited to pathspecs (empty = all staged).
-    pub fn diff_staged_paths(&self, paths: &[&str]) -> Result<String> {
-        let mut args = vec![
-            "diff",
-            "--cached",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--color=never",
-        ];
-        if !paths.is_empty() {
-            args.push("--");
-            args.extend(paths.iter().copied());
-        }
-        let result = self.git().args(&args).run_expecting_success()?;
         Ok(result.stdout)
     }
 

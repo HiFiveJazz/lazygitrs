@@ -53,32 +53,6 @@ impl RebaseAction {
 }
 
 impl GitCommands {
-    /// Interactive rebase: apply a single action to a specific commit.
-    pub fn rebase_interactive_action(&self, commit_hash: &str, action: RebaseAction) -> Result<()> {
-        let parent = self.commit_parent(commit_hash)?;
-        let range = self.rebase_commit_range(&parent)?;
-        // range is newest-first; convert to oldest-first actions.
-        let mut actions: Vec<(String, RebaseAction)> = range
-            .into_iter()
-            .rev()
-            .map(|hash| {
-                let act = if hash == commit_hash
-                    || hash.starts_with(commit_hash)
-                    || commit_hash.starts_with(&hash)
-                {
-                    action
-                } else {
-                    RebaseAction::Pick
-                };
-                (hash, act)
-            })
-            .collect();
-        if actions.is_empty() {
-            actions.push((commit_hash.to_string(), action));
-        }
-        self.rebase_interactive_batch(&parent, &actions)
-    }
-
     /// Move a commit up in the history (swap with its parent = older commit).
     /// In newest-first UI terms this moves the commit toward HEAD.
     pub fn move_commit_up(&self, commit_hash: &str) -> Result<()> {
@@ -260,11 +234,6 @@ impl GitCommands {
             };
         }
         self.run_interactive_rebase(&[base_hash], actions)
-    }
-
-    /// Interactive rebase from the root (no parent base).
-    pub fn rebase_interactive_batch_root(&self, actions: &[(String, RebaseAction)]) -> Result<()> {
-        self.run_interactive_rebase(&["--root"], actions)
     }
 
     fn run_interactive_rebase(

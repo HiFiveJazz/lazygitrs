@@ -2,82 +2,7 @@ use anyhow::{Context, Result, bail};
 
 use super::GitCommands;
 
-/// Represents a parsed hunk from a diff.
-#[derive(Debug, Clone)]
-pub struct DiffHunk {
-    pub header: String,
-    pub old_start: usize,
-    pub old_count: usize,
-    pub new_start: usize,
-    pub new_count: usize,
-    pub lines: Vec<String>,
-}
-
 impl GitCommands {
-    /// Parse the diff output into hunks.
-    pub fn parse_diff_hunks(&self, diff_output: &str) -> Vec<DiffHunk> {
-        let mut hunks = Vec::new();
-        let mut current_hunk: Option<DiffHunk> = None;
-
-        for line in diff_output.lines() {
-            if line.starts_with("@@") {
-                // Save previous hunk
-                if let Some(hunk) = current_hunk.take() {
-                    hunks.push(hunk);
-                }
-
-                // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-                let (old_start, old_count, new_start, new_count) = parse_hunk_header(line);
-                current_hunk = Some(DiffHunk {
-                    header: line.to_string(),
-                    old_start,
-                    old_count,
-                    new_start,
-                    new_count,
-                    lines: vec![line.to_string()],
-                });
-            } else if let Some(ref mut hunk) = current_hunk {
-                hunk.lines.push(line.to_string());
-            }
-        }
-
-        if let Some(hunk) = current_hunk {
-            hunks.push(hunk);
-        }
-
-        hunks
-    }
-
-    /// Stage a specific hunk by applying it as a patch.
-    pub fn stage_hunk(&self, file_path: &str, hunk: &DiffHunk) -> Result<()> {
-        let patch = build_patch(file_path, hunk);
-        self.git()
-            .args(&["apply", "--cached", "--unidiff-zero", "-"])
-            .stdin(patch)
-            .run_expecting_success()?;
-        Ok(())
-    }
-
-    /// Unstage a specific hunk by reverse-applying it as a patch.
-    pub fn unstage_hunk(&self, file_path: &str, hunk: &DiffHunk) -> Result<()> {
-        let patch = build_patch(file_path, hunk);
-        self.git()
-            .args(&["apply", "--cached", "--reverse", "--unidiff-zero", "-"])
-            .stdin(patch)
-            .run_expecting_success()?;
-        Ok(())
-    }
-
-    /// Get diff for a file and return it split into hunks.
-    pub fn file_hunks(&self, path: &str, staged: bool) -> Result<Vec<DiffHunk>> {
-        let diff = if staged {
-            self.diff_file_staged(path)?
-        } else {
-            self.diff_file(path)?
-        };
-        Ok(self.parse_diff_hunks(&diff))
-    }
-
     /// Reverse-apply only the lines of a single visual change block to the
     /// working tree copy of `file_path`. `want_old` and `want_new` are the
     /// inclusive old-file and new-file line-number ranges the visual block
@@ -283,15 +208,4 @@ fn parse_hunk_header(header: &str) -> (usize, usize, usize, usize) {
     };
 
     (old_start, old_count, new_start, new_count)
-}
-
-fn build_patch(file_path: &str, hunk: &DiffHunk) -> String {
-    let mut patch = String::new();
-    patch.push_str(&format!("--- a/{}\n", file_path));
-    patch.push_str(&format!("+++ b/{}\n", file_path));
-    for line in &hunk.lines {
-        patch.push_str(line);
-        patch.push('\n');
-    }
-    patch
 }

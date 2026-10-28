@@ -171,6 +171,7 @@ impl WrapLayout {
         line.raw_start + col.min(line.char_len)
     }
 
+    #[cfg(test)]
     pub fn as_textarea_text(&self) -> String {
         self.lines
             .iter()
@@ -207,10 +208,6 @@ impl BodySoftWrap {
         Self { raw, cursor }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.raw.is_empty()
-    }
-
     pub fn raw(&self) -> &str {
         &self.raw
     }
@@ -231,11 +228,6 @@ impl BodySoftWrap {
         let raw = text.into();
         self.cursor = raw.chars().count();
         self.raw = raw;
-    }
-
-    pub fn clear(&mut self) {
-        self.raw.clear();
-        self.cursor = 0;
     }
 
     pub fn insert_char(&mut self, c: char) {

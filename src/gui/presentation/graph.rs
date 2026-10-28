@@ -47,7 +47,6 @@ impl Cell {
 
 #[derive(Debug, Clone)]
 pub struct GraphRow {
-    pub commit_col: usize,
     pub cells: Vec<Cell>,
 }
 
@@ -217,7 +216,7 @@ pub fn compute_graph(commits: &[(String, Vec<String>)]) -> Vec<GraphRow> {
             cells.pop();
         }
 
-        rows.push(GraphRow { commit_col, cells });
+        rows.push(GraphRow { cells });
 
         while lanes.last().map_or(false, |l| {
             l.target.is_none() && l.deferred_merges.is_empty()

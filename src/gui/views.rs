@@ -1378,11 +1378,8 @@ mod tests {
                     &super::LayoutState::default(),
                     &PopupState::None,
                     &crate::config::AppConfig {
-                        debug: false,
-                        version: String::new(),
                         user_config: Default::default(),
                         app_state: Default::default(),
-                        config_dir: Default::default(),
                         state_dir: Default::default(),
                         state_path: Default::default(),
                     },
@@ -1671,7 +1668,6 @@ mod tests {
         model.submodules.push(crate::git::submodule::Submodule {
             name: "shared-lib".into(),
             path: "vendor/shared-lib".into(),
-            url: String::new(),
         });
         for mode in [
             super::ScreenMode::Normal,
