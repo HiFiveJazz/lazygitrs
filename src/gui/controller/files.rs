@@ -278,7 +278,7 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                             if !message.is_empty() {
                                 let message = message.to_string();
                                 gui.start_remote_op(
-                                    RemoteOpKind::LocalHistory,
+                                    RemoteOpKind::LocalAppend,
                                     "Empty commit",
                                     "Creating empty commit...",
                                     move |git| {
@@ -317,7 +317,7 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                             if !message.is_empty() {
                                 let message = message.to_string();
                                 gui.start_remote_op(
-                                    RemoteOpKind::LocalHistory,
+                                    RemoteOpKind::LocalAppend,
                                     "Commit",
                                     "Creating commit...",
                                     move |git| {
@@ -351,7 +351,7 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
             if !message.is_empty() {
                 let message = message.to_string();
                 gui.start_remote_op(
-                    RemoteOpKind::LocalHistory,
+                    RemoteOpKind::LocalAppend,
                     "Commit",
                     "Creating commit...",
                     move |git| {
@@ -402,7 +402,7 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
                         if !message.is_empty() {
                             let message = message.to_string();
                             gui.start_remote_op(
-                                RemoteOpKind::LocalHistory,
+                                RemoteOpKind::LocalAppend,
                                 "Commit",
                                 "Creating commit...",
                                 move |git| {
@@ -431,7 +431,7 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
             if !message.is_empty() {
                 let message = message.to_string();
                 gui.start_remote_op(
-                    RemoteOpKind::LocalHistory,
+                    RemoteOpKind::LocalAppend,
                     "Commit",
                     "Creating commit...",
                     move |git| {
@@ -966,7 +966,7 @@ fn commit_with_editor(gui: &mut Gui) -> Result<()> {
             if !message.is_empty() {
                 let message = message.to_string();
                 gui.start_remote_op(
-                    RemoteOpKind::LocalHistory,
+                    RemoteOpKind::LocalAppend,
                     "Commit",
                     "Creating commit...",
                     move |git| {

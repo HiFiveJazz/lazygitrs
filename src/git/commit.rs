@@ -301,6 +301,30 @@ impl GitCommands {
         self.load_commits_for_branches(&[branch.to_string()], limit)
     }
 
+    /// Load only the current HEAD commit.
+    ///
+    /// This intentionally avoids the expensive global `--all --topo-order`
+    /// traversal used by the main commit list.
+    pub fn load_head_commit(&self) -> Result<Option<Commit>> {
+        let unpushed = self.unpushed_commit_hashes().unwrap_or_default();
+        let mut commits = self.load_commits_for_branch("HEAD", 1)?;
+        Self::apply_unpushed_status(&mut commits, &unpushed);
+        Ok(commits.into_iter().next())
+    }
+
+    /// Return the first parent of a commit, or None for a root commit.
+    pub fn first_parent_hash(&self, hash: &str) -> Result<Option<String>> {
+        let rev = format!("{hash}^1");
+        let result = self.git().args(&["rev-parse", &rev]).run()?;
+
+        if !result.success {
+            return Ok(None);
+        }
+
+        let parent = result.stdout.trim().to_string();
+        Ok((!parent.is_empty()).then_some(parent))
+    }
+
     /// Load commits reachable from any of the given branches.
     pub fn load_commits_for_branches(
         &self,
