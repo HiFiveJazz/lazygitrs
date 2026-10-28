@@ -11,6 +11,11 @@ pub struct Submodule {
 
 impl GitCommands {
     pub fn load_submodules(&self) -> Result<Vec<Submodule>> {
+        if !self.repo_path().join(".gitmodules").is_file() {
+            return Ok(Vec::new());
+        }
+
+        let result = self.git().args(&["submodule", "status"]).run()?;
         let result = self.git().args(&["submodule", "status"]).run()?;
         if !result.success || result.stdout.trim().is_empty() {
             return Ok(Vec::new());
