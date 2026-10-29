@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use super::HeadState;
 
@@ -58,6 +58,19 @@ pub(crate) struct ReflogRead {
     pub author_email: String,
     pub unix_timestamp: i64,
     pub parents: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StatusRead {
+    /// Current repository-relative path.
+    pub path: String,
+    /// Source path for a staged rename/copy.
+    pub source_path: Option<String>,
+    /// Porcelain-v1 compatible index/HEAD status column.
+    pub index_status: char,
+    /// Porcelain-v1 compatible worktree/index status column.
+    pub worktree_status: char,
+    pub tracked: bool,
 }
 
 /// Paths discovered while opening a repository with gix.
@@ -412,6 +425,181 @@ impl ReadRepository {
 
         tags.sort_by(|a, b| b.creation_time.cmp(&a.creation_time));
         Ok(tags)
+    }
+
+    /// Return a porcelain-v1-compatible status snapshot using gix.
+    ///
+    /// Individual untracked files are requested to preserve the existing
+    /// `git status --porcelain -uall` behavior.  Complex conflict states and
+    /// worktree-side rewrite detection deliberately return an error so the
+    /// caller can fall back to Git's porcelain parser rather than risk
+    /// changing staging/discard semantics.
+    pub fn status_untracked_all(&self) -> Result<Vec<StatusRead>> {
+        use gix::bstr::ByteSlice;
+
+        let repo = self.repo.lock().expect("gix read repository poisoned");
+        let platform = repo
+            .status(gix::progress::Discard)?
+            .untracked_files(gix::status::UntrackedFiles::Files);
+        let mut iter = platform.into_iter(None::<gix::bstr::BString>)?;
+
+        let mut tracked: HashMap<String, StatusRead> = HashMap::new();
+        let mut untracked = Vec::new();
+        let mut untracked_paths = HashSet::new();
+        let mut intent_to_add_paths = HashSet::new();
+
+        for item in iter.by_ref() {
+            match item? {
+                gix::status::Item::TreeIndex(change) => {
+                    use gix::diff::index::Change;
+
+                    let (path, source_path, code) = match change {
+                        Change::Addition { location, .. } => {
+                            (location.as_ref().to_str_lossy().into_owned(), None, 'A')
+                        }
+                        Change::Deletion { location, .. } => {
+                            (location.as_ref().to_str_lossy().into_owned(), None, 'D')
+                        }
+                        Change::Modification {
+                            location,
+                            previous_entry_mode,
+                            entry_mode,
+                            ..
+                        } => (
+                            location.as_ref().to_str_lossy().into_owned(),
+                            None,
+                            if previous_entry_mode == entry_mode { 'M' } else { 'T' },
+                        ),
+                        Change::Rewrite {
+                            source_location,
+                            location,
+                            copy,
+                            ..
+                        } => (
+                            location.as_ref().to_str_lossy().into_owned(),
+                            Some(source_location.as_ref().to_str_lossy().into_owned()),
+                            if copy { 'C' } else { 'R' },
+                        ),
+                    };
+
+                    if untracked_paths.contains(&path) {
+                        return Err(anyhow!(
+                            "gix tracked/untracked collision for {path} requires porcelain fallback"
+                        ));
+                    }
+                    let effective_code = if code == 'A' && intent_to_add_paths.contains(&path) {
+                        ' '
+                    } else {
+                        code
+                    };
+                    let status = tracked.entry(path.clone()).or_insert_with(|| StatusRead {
+                        path,
+                        source_path: None,
+                        index_status: ' ',
+                        worktree_status: ' ',
+                        tracked: true,
+                    });
+                    if effective_code != ' ' {
+                        if status.index_status != ' ' && status.index_status != effective_code {
+                            return Err(anyhow!(
+                                "gix produced multiple staged status codes for {}",
+                                status.path
+                            ));
+                        }
+                        status.index_status = effective_code;
+                        status.source_path = source_path;
+                    }
+                }
+                gix::status::Item::IndexWorktree(change) => {
+                    use gix::status::index_worktree::Item;
+                    use gix::status::plumbing::index_as_worktree::{
+                        Change as WorktreeChange, EntryStatus,
+                    };
+
+                    match change {
+                        Item::Modification {
+                            rela_path, status, ..
+                        } => {
+                            let path = rela_path.to_str_lossy().into_owned();
+                            let intent_to_add = matches!(&status, EntryStatus::IntentToAdd);
+                            let code = match status {
+                                EntryStatus::Conflict { .. } => {
+                                    return Err(anyhow!(
+                                        "gix conflict status for {path} requires porcelain fallback"
+                                    ));
+                                }
+                                EntryStatus::Change(WorktreeChange::Removed) => 'D',
+                                EntryStatus::Change(WorktreeChange::Type { .. }) => 'T',
+                                EntryStatus::Change(
+                                    WorktreeChange::Modification { .. }
+                                    | WorktreeChange::SubmoduleModification(_),
+                                ) => 'M',
+                                EntryStatus::NeedsUpdate(_) => continue,
+                                // Git porcelain intentionally suppresses the
+                                // staged-add column for intent-to-add entries.
+                                EntryStatus::IntentToAdd => 'A',
+                            };
+
+                            let entry = tracked.entry(path.clone()).or_insert_with(|| StatusRead {
+                                path,
+                                source_path: None,
+                                index_status: ' ',
+                                worktree_status: ' ',
+                                tracked: true,
+                            });
+                            if intent_to_add {
+                                intent_to_add_paths.insert(path.clone());
+                                entry.index_status = ' ';
+                            }
+                            entry.worktree_status = code;
+                        }
+                        Item::DirectoryContents { entry, .. } => {
+                            if entry.status != gix::dir::entry::Status::Untracked {
+                                continue;
+                            }
+                            let path = entry.rela_path.to_str_lossy().into_owned();
+                            // A staged deletion followed by a new untracked
+                            // file at the same path is represented by two
+                            // porcelain records. Keep that rare case exact by
+                            // falling back instead of merging the records.
+                            if tracked.contains_key(&path) {
+                                return Err(anyhow!(
+                                    "gix tracked/untracked collision for {path} requires porcelain fallback"
+                                ));
+                            }
+                            untracked_paths.insert(path.clone());
+                            untracked.push(StatusRead {
+                                path,
+                                source_path: None,
+                                index_status: '?',
+                                worktree_status: '?',
+                                tracked: false,
+                            });
+                        }
+                        Item::Rewrite { .. } => {
+                            return Err(anyhow!(
+                                "gix worktree rewrite status requires porcelain fallback"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Like `git status`, opportunistically refresh cached index stat data.
+        // gix documents these changes as safe bookkeeping that avoids paying
+        // the same work on subsequent status calls. A failure to persist them
+        // does not invalidate the status snapshot we already produced.
+        if let Some(mut outcome) = iter.into_outcome()
+            && let Some(write_result) = outcome.write_changes()
+        {
+            let _ = write_result;
+        }
+
+        let mut out: Vec<_> = tracked.into_values().collect();
+        out.extend(untracked);
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
     }
 
     pub fn reflog(&self, limit: usize) -> Result<Vec<ReflogRead>> {

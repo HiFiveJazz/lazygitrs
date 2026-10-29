@@ -9,7 +9,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
-gix = { version = "0.89", default-features = false, features = ["anyhow", "max-performance-safe", "revision", "sha1", "sha256"] }
+gix = { version = "0.89", default-features = false, features = ["anyhow", "max-performance-safe", "revision", "sha1", "sha256", "status"] }
 clap = { version = "4", features = ["derive"] }
 # `use-dev-tty` switches crossterm off mio/kqueue onto filedescriptor's
 # select()-based reader. Required on macOS under Helix `:insert-output`,
