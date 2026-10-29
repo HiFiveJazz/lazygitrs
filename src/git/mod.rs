@@ -6,6 +6,7 @@ pub mod diff;
 pub(crate) mod diff_paths;
 pub mod file;
 pub mod loader;
+mod read_backend;
 pub mod rebase;
 pub mod remote;
 pub mod staging;
@@ -22,6 +23,8 @@ use anyhow::Result;
 
 use crate::model::{self, Model};
 use crate::os::cmd::CmdBuilder;
+
+use read_backend::{ReadRepository, RefSnapshot};
 
 /// A single piece of model data loaded from git. Each variant arrives
 /// independently so the UI can display whichever data is ready first.
@@ -66,6 +69,7 @@ pub const DEFAULT_COMMIT_LIMIT: usize = 300;
 pub const MODEL_PART_COUNT: usize = 14;
 
 /// Confirmed HEAD identity, read after a successful checkout.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeadState {
     pub hash: String,
     /// Empty when HEAD is detached.
@@ -81,6 +85,7 @@ struct RepoPaths {
 pub struct GitCommands {
     repo_path: PathBuf,
     repo_name: String,
+    read_repo: Option<ReadRepository>,
 }
 
 impl GitCommands {
@@ -92,9 +97,15 @@ impl GitCommands {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
+        // gix is the fast read path, not a compatibility requirement. Keep
+        // the system-Git implementation available for repositories/features
+        // gix cannot read yet.
+        let read_repo = ReadRepository::open(&paths.worktree_path).ok();
+
         Ok(Self {
             repo_path: paths.worktree_path,
             repo_name,
+            read_repo,
         })
     }
 
@@ -148,6 +159,105 @@ impl GitCommands {
 
     pub fn repo_path(&self) -> &Path {
         &self.repo_path
+    }
+
+    /// Snapshot refs that can affect the global commit model. This is an
+    /// in-process gix read and is used to avoid unnecessary post-network
+    /// history walks when fetch/pull changed no relevant refs.
+    pub(crate) fn ref_snapshot(&self) -> Result<RefSnapshot> {
+        if let Some(repo) = &self.read_repo
+            && let Ok(snapshot) = repo.ref_snapshot()
+        {
+            return Ok(snapshot);
+        }
+
+        // Compatibility fallback. This is still far cheaper than rebuilding
+        // the global topological history and is only used if gix cannot read
+        // this repository.
+        let head = self
+            .git()
+            .args(&["rev-parse", "-q", "--verify", "HEAD"])
+            .run()?;
+        let head = head
+            .success
+            .then(|| head.stdout_trimmed().to_string())
+            .filter(|hash| !hash.is_empty());
+        let mut refs = self
+            .git()
+            .args(&[
+                "for-each-ref",
+                "--format=%(refname)|%(objectname)|%(symref)",
+                "refs/",
+            ])
+            .run_expecting_success()?
+            .stdout
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(3, '|');
+                let name = parts.next()?;
+                let hash = parts.next()?;
+                let symref = parts.next().unwrap_or_default();
+                let target = if symref.is_empty() {
+                    format!("id:{hash}")
+                } else {
+                    format!("sym:{symref}")
+                };
+                Some((name.to_string(), target))
+            })
+            .collect::<Vec<_>>();
+        refs.sort_unstable();
+
+        Ok(RefSnapshot { head, refs })
+    }
+
+    /// Read HEAD through the persistent gix repository, falling back to Git
+    /// for compatibility with repository layouts gix cannot handle yet.
+    pub(crate) fn read_head_state(&self) -> Result<HeadState> {
+        if let Some(repo) = &self.read_repo
+            && let Ok(head) = repo.head_state()
+        {
+            return Ok(head);
+        }
+
+        let result = self
+            .git()
+            .args(&["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"])
+            .run_expecting_success()?;
+        let mut lines = result.stdout.lines();
+        let hash = lines
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Git did not return a HEAD hash"))?;
+        let reference = lines
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Git did not return a HEAD ref"))?;
+        let branch_name = if reference == "HEAD" {
+            ""
+        } else {
+            reference
+                .strip_prefix("refs/heads/")
+                .ok_or_else(|| anyhow::anyhow!("Unexpected HEAD ref: {reference}"))?
+        };
+        Ok(HeadState {
+            hash: hash.to_string(),
+            branch_name: branch_name.to_string(),
+        })
+    }
+
+    /// Read a commit's first parent through gix with a Git CLI fallback.
+    pub(crate) fn read_first_parent_hash(&self, hash: &str) -> Result<Option<String>> {
+        if let Some(repo) = &self.read_repo
+            && let Ok(parent) = repo.first_parent_hash(hash)
+        {
+            return Ok(parent);
+        }
+
+        let rev = format!("{hash}^1");
+        let result = self.git().args(&["rev-parse", &rev]).run()?;
+        if !result.success {
+            return Ok(None);
+        }
+        let parent = result.stdout_trimmed().to_string();
+        Ok((!parent.is_empty()).then_some(parent))
     }
 
     fn git(&self) -> CmdBuilder {
@@ -757,36 +867,14 @@ impl GitCommands {
         self.load_files_status_only()
     }
 
-    /// Get the current branch name.
+    /// Get the current branch name without spawning Git.
     pub fn current_branch_name(&self) -> Result<String> {
-        let result = self.git().args(&["branch", "--show-current"]).run()?;
-        Ok(result.stdout_trimmed().to_string())
+        Ok(self.read_head_state()?.branch_name)
     }
 
-    /// Read the full HEAD hash and symbolic ref with one Git subprocess.
+    /// Read the full HEAD hash and symbolic ref in-process through gix.
     pub fn head_state(&self) -> Result<HeadState> {
-        let result = self
-            .git()
-            .args(&["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"])
-            .run_expecting_success()?;
-        let mut lines = result.stdout.lines();
-        let hash = lines
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("Git did not return a HEAD hash"))?;
-        let reference = lines
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("Git did not return a HEAD ref"))?;
-        let branch_name = if reference == "HEAD" {
-            ""
-        } else {
-            reference
-                .strip_prefix("refs/heads/")
-                .ok_or_else(|| anyhow::anyhow!("Unexpected HEAD ref: {reference}"))?
-        };
-        Ok(HeadState {
-            hash: hash.to_string(),
-            branch_name: branch_name.to_string(),
-        })
+        self.read_head_state()
     }
 
     /// Resolve a revision to a verified commit, peeling annotated tags.
@@ -837,13 +925,13 @@ impl GitCommands {
             .unwrap_or(false)
     }
 
-    /// Get the HEAD commit hash.
+    /// Get the HEAD commit hash without spawning Git.
     pub fn head_hash(&self) -> Result<String> {
-        let result = self
-            .git()
-            .args(&["rev-parse", "HEAD"])
-            .run_expecting_success()?;
-        Ok(result.stdout_trimmed().to_string())
+        let hash = self.read_head_state()?.hash;
+        if hash.is_empty() {
+            anyhow::bail!("HEAD does not point to a commit");
+        }
+        Ok(hash)
     }
 
     /// Resolve a ref (branch name, tag, hash) to a full commit hash.

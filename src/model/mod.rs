@@ -132,6 +132,18 @@ impl Model {
         self.commits_revision = self.commits_revision.wrapping_add(1);
     }
 
+    /// Replace the loaded HEAD row after an amend/reword without rebuilding
+    /// the global commit page. Returns false if there is no loaded head row.
+    pub fn replace_head_commit(&mut self, commit: Commit) -> bool {
+        if self.commits.is_empty() {
+            return false;
+        }
+        self.remember_commit_authors(std::slice::from_ref(&commit));
+        self.commits[0] = commit;
+        self.commits_revision = self.commits_revision.wrapping_add(1);
+        true
+    }
+
     pub fn set_sub_commits(&mut self, commits: Vec<Commit>) {
         self.remember_commit_authors(&commits);
         self.sub_commits = commits;
@@ -240,6 +252,9 @@ mod tests {
         assert_eq!(model.commits_revision, 2);
         model.extend_commits(Vec::new());
         assert_eq!(model.commits_revision, 2);
+        assert!(model.replace_head_commit(commit("replacement")));
+        assert_eq!(model.commits[0].hash, "replacement");
+        assert_eq!(model.commits_revision, 3);
 
         model.set_sub_commits(vec![commit("sub")]);
         assert_eq!(model.sub_commits_revision, 1);

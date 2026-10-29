@@ -942,7 +942,7 @@ fn amend_commit(gui: &mut Gui) -> Result<()> {
         message: "Amend last commit with staged changes?".to_string(),
         on_confirm: Box::new(|gui| {
             gui.start_remote_op(
-                RemoteOpKind::LocalHistory,
+                RemoteOpKind::LocalRewriteHead,
                 "Amend",
                 "Amending commit...",
                 |git| {
