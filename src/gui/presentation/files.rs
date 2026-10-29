@@ -290,7 +290,10 @@ mod tests {
         model.files.clear();
 
         let rendered = render_file_tree(&model, &Theme::default(), &nodes, &HashSet::new(), 80);
-        assert_eq!(rendered.len(), 1, "only the stale-safe root node remains");
+        assert!(
+            rendered.is_empty(),
+            "the stale file node is skipped instead of indexing an empty file list"
+        );
     }
 
     #[test]
