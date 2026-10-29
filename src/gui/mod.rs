@@ -9234,6 +9234,11 @@ impl Gui {
             model.total_deletions = deleted;
         }
 
+        // `set_files()` above may have removed the last working-tree file.
+        // Keep the cached tree and its list-length override in lockstep with
+        // the model before the next frame renders it.
+        self.rebuild_file_tree_from_model();
+
         // Invalidate any in-flight pagination request based on the old list.
         // We intentionally do NOT truncate the list: if it was 300 rows it is
         // now 301, so the next page naturally starts at skip=301.
@@ -9329,6 +9334,9 @@ impl Gui {
             model.total_deletions = deleted;
         }
 
+        // Amend/rewrite can also consume the final staged working-tree file,
+        // so refresh the cached file tree before the next render.
+        self.rebuild_file_tree_from_model();
         self.reset_commit_pagination();
         self.diff_preview_cache.retain_immutable();
         self.needs_diff_refresh = true;
@@ -11220,6 +11228,29 @@ mod terminal_mouse_tests {
     }
 
     #[test]
+    fn append_refresh_clears_stale_file_tree_after_committing_last_file() {
+        let repo = TempRepo::new("append-refresh-file-tree");
+        let mut gui = checkout_test_gui(&repo);
+        gui.show_file_tree = true;
+
+        std::fs::write(repo.path().join("file"), "committed contents").unwrap();
+        repo.git(&["add", "file"]);
+        {
+            let files = gui.git.refresh_files_status_only().unwrap();
+            gui.model.lock().unwrap().set_files(files);
+        }
+        gui.rebuild_file_tree_from_model();
+        assert!(!gui.file_tree_nodes.is_empty());
+
+        repo.git(&["commit", "-m", "consume final staged file"]);
+        assert!(gui.try_fast_append_refresh());
+
+        assert!(gui.model.lock().unwrap().files.is_empty());
+        assert!(gui.file_tree_nodes.is_empty());
+        assert_eq!(gui.context_mgr.files_list_len_override, Some(0));
+    }
+
+    #[test]
     fn append_refresh_moves_head_decoration_without_global_reload() {
         let repo = TempRepo::new("append-refresh");
         let mut gui = checkout_test_gui(&repo);
@@ -11246,6 +11277,29 @@ mod terminal_mouse_tests {
                 .iter()
                 .any(|reference| reference == "HEAD -> feature")
         );
+    }
+
+    #[test]
+    fn head_rewrite_refresh_clears_stale_file_tree_after_amend() {
+        let repo = TempRepo::new("head-rewrite-file-tree");
+        let mut gui = checkout_test_gui(&repo);
+        gui.show_file_tree = true;
+
+        std::fs::write(repo.path().join("file"), "amended contents").unwrap();
+        repo.git(&["add", "file"]);
+        {
+            let files = gui.git.refresh_files_status_only().unwrap();
+            gui.model.lock().unwrap().set_files(files);
+        }
+        gui.rebuild_file_tree_from_model();
+        assert!(!gui.file_tree_nodes.is_empty());
+
+        repo.git(&["commit", "--amend", "-m", "rewritten with file"]);
+        assert!(gui.try_fast_head_rewrite_refresh());
+
+        assert!(gui.model.lock().unwrap().files.is_empty());
+        assert!(gui.file_tree_nodes.is_empty());
+        assert_eq!(gui.context_mgr.files_list_len_override, Some(0));
     }
 
     #[test]

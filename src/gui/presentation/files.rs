@@ -139,7 +139,7 @@ pub fn render_file_tree<'a>(
 ) -> Vec<ListItem<'a>> {
     nodes
         .iter()
-        .map(|node| {
+        .filter_map(|node| {
             let indent = "  ".repeat(node.depth);
 
             if node.is_dir {
@@ -170,9 +170,12 @@ pub fn render_file_tree<'a>(
                         Span::styled(node.name.clone(), dir_style),
                     ])
                 };
-                ListItem::new(line)
+                Some(ListItem::new(line))
             } else if let Some(file_idx) = node.file_index {
-                let file = &model.files[file_idx];
+                // The file list and cached tree are normally rebuilt together.
+                // Async model refreshes can briefly make a cached node stale,
+                // though, so never index directly into `model.files` here.
+                let file = model.files.get(file_idx)?;
                 let name_style = file_name_style(file, theme);
 
                 let mut spans = vec![Span::raw(format!(" {}", indent))];
@@ -187,9 +190,9 @@ pub fn render_file_tree<'a>(
                     theme,
                     width,
                 ));
-                ListItem::new(line)
+                Some(ListItem::new(line))
             } else {
-                ListItem::new(Line::raw(""))
+                Some(ListItem::new(Line::raw("")))
             }
         })
         .collect()
@@ -261,6 +264,34 @@ fn file_status_spans(file: &crate::model::File, theme: &Theme) -> Vec<Span<'stat
 mod tests {
     use super::*;
     use crate::model::{File, FileStatus};
+
+    #[test]
+    fn stale_file_tree_node_is_ignored_instead_of_panicking() {
+        let mut model = Model::default();
+        model.files.push(File {
+            name: "file.txt".into(),
+            display_name: "file.txt".into(),
+            status: FileStatus::Modified,
+            has_staged_changes: true,
+            has_unstaged_changes: false,
+            tracked: true,
+            added: false,
+            deleted: false,
+            has_merge_conflicts: false,
+            short_status: "M ".into(),
+            hunk_count: 1,
+            additions: 1,
+            deletions: 0,
+        });
+        let nodes = crate::model::file_tree::build_file_tree(&model.files, &HashSet::new());
+
+        // Simulate an async model refresh arriving one frame before the cached
+        // file tree is rebuilt. This used to index model.files[0] and panic.
+        model.files.clear();
+
+        let rendered = render_file_tree(&model, &Theme::default(), &nodes, &HashSet::new(), 80);
+        assert_eq!(rendered.len(), 1, "only the stale-safe root node remains");
+    }
 
     #[test]
     fn file_stats_are_right_aligned_and_preserved_when_name_is_truncated() {
