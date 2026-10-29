@@ -2706,8 +2706,7 @@ impl Gui {
                         }
 
                         if checked_out_branch_moved {
-                            self.context_mgr
-                                .snap_selection_to(ContextId::Branches, 0);
+                            self.context_mgr.snap_selection_to(ContextId::Branches, 0);
                         }
                         self.needs_diff_refresh = true;
                     }
