@@ -156,12 +156,7 @@ impl GitCommands {
     /// path is prohibitively slow on large trees like node_modules.
     pub fn diff_shortstat(&self) -> Result<(usize, usize)> {
         // Unborn HEAD (no commits yet): fall back to index vs empty tree / worktree.
-        let result = if self
-            .git()
-            .args(&["rev-parse", "--verify", "HEAD"])
-            .run()
-            .is_ok_and(|r| r.success)
-        {
+        let result = if self.head_state().is_ok() {
             self.git().args(&["diff", "HEAD", "--shortstat"]).run()?
         } else {
             // No HEAD: only staged changes have a meaningful shortstat.

@@ -9155,7 +9155,11 @@ impl Gui {
             Err(_) => return false,
         };
 
-        let (added, deleted) = self.git.diff_shortstat().unwrap_or((0, 0));
+        let (added, deleted) = if files.iter().any(|file| file.tracked) {
+            self.git.diff_shortstat().unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
 
         // Refresh branch tracking metadata as well as the tip hash. This is
         // cheap, and keeps the current branch's ↑ahead/↓behind indicator
@@ -9270,7 +9274,11 @@ impl Gui {
             Ok(files) => files,
             Err(_) => return false,
         };
-        let (added, deleted) = self.git.diff_shortstat().unwrap_or((0, 0));
+        let (added, deleted) = if files.iter().any(|file| file.tracked) {
+            self.git.diff_shortstat().unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
         let branches = match self.git.load_branches() {
             Ok(branches) => branches,
             Err(_) => return false,
