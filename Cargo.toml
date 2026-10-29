@@ -60,7 +60,15 @@ opt-level = 3 # Optimize for speed
 lto = true
 panic = "abort"
 
+[profile.size]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "thin"
+lto = true
