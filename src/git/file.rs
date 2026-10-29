@@ -10,7 +10,12 @@ impl GitCommands {
     /// Prefer [`load_files_status_only`] on the Space-toggle hot path.
     pub fn load_files(&self) -> Result<Vec<File>> {
         let mut files = self.load_files_status_only()?;
-        self.populate_file_diff_stats(&mut files);
+        // Untracked files do not receive numstat/hunk counts, and a clean
+        // worktree has nothing to enrich. Avoid two full-tree `git diff`
+        // subprocesses in both cases.
+        if files.iter().any(|file| file.tracked) {
+            self.populate_file_diff_stats(&mut files);
+        }
         Ok(files)
     }
 
@@ -74,12 +79,7 @@ impl GitCommands {
     /// intentionally non-fatal: status remains useful even when a diff cannot
     /// be produced (for example, during unusual index states).
     fn populate_file_diff_stats(&self, files: &mut [File]) {
-        let diff_base = if self
-            .git()
-            .args(&["rev-parse", "--verify", "HEAD"])
-            .run()
-            .is_ok_and(|result| result.success)
-        {
+        let diff_base = if self.head_state().is_ok() {
             vec!["diff", "HEAD"]
         } else {
             vec!["diff", "--cached"]

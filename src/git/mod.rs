@@ -326,6 +326,58 @@ impl GitCommands {
         })
     }
 
+    /// Stream working-tree files first, then compute the aggregate shortstat on
+    /// the same worker.
+    ///
+    /// `git status -uall` and `git diff --shortstat` both walk a large portion
+    /// of the worktree/index. Running them concurrently caused measurable I/O
+    /// contention on large repositories (notably the Linux kernel tree).
+    ///
+    /// `include_file_stats` keeps full-refresh behavior intact by enriching
+    /// per-file numstat/hunk counts before the Files part is sent. Targeted
+    /// refreshes pass `false` so the latency-critical status reaches the UI
+    /// without those extra scans.
+    fn stream_files_then_diff_stats(
+        self: &Arc<Self>,
+        tx: &mpsc::Sender<ModelPart>,
+        include_file_stats: bool,
+    ) {
+        let tx = tx.clone();
+        let git = Arc::clone(self);
+        std::thread::spawn(move || {
+            let files = if include_file_stats {
+                git.load_files()
+            } else {
+                git.load_files_status_only()
+            };
+
+            if let Ok(files) = files {
+                let has_tracked_changes = files.iter().any(|file| file.tracked);
+                // If the GUI dropped this stream (for example because checkout
+                // superseded an in-flight refresh), do not launch the next
+                // expensive worktree scan for a result nobody can use.
+                if tx.send(ModelPart::Files(files)).is_err() {
+                    return;
+                }
+
+                // shortstat intentionally omits untracked files. A clean tree
+                // (or one containing only untracked files) therefore has an
+                // exact 0/0 answer without another full-tree Git process.
+                if !has_tracked_changes {
+                    let _ = tx.send(ModelPart::DiffStats {
+                        added: 0,
+                        deleted: 0,
+                    });
+                    return;
+                }
+            }
+
+            if let Ok((added, deleted)) = git.diff_shortstat() {
+                let _ = tx.send(ModelPart::DiffStats { added, deleted });
+            }
+        });
+    }
+
     /// Load model data by spawning one thread per data type. Each thread
     /// sends its result through `tx` as soon as it finishes, so the UI can
     /// waterfall-display whichever data arrives first.
@@ -353,7 +405,9 @@ impl GitCommands {
             }};
         }
 
-        spawn_part!(tx, self, Files, |g: &GitCommands| g.load_files());
+        // Preserve full-refresh per-file stats, but avoid racing the aggregate
+        // shortstat against the same status/diff work.
+        self.stream_files_then_diff_stats(tx, true);
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
         if let Some(filter) = commit_filter {
             let tx = tx.clone();
@@ -384,17 +438,8 @@ impl GitCommands {
             .load_reflog(100)
             .or_else(|_| Ok::<_, anyhow::Error>(Vec::new())));
 
-        // DiffStats, Head, RepoUrl, Contributors, RepoStatus have different
-        // shapes — spawn them directly.
-        {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-            std::thread::spawn(move || {
-                if let Ok((added, deleted)) = git.diff_shortstat() {
-                    let _ = tx.send(ModelPart::DiffStats { added, deleted });
-                }
-            });
-        }
+        // Head, RepoUrl, Contributors, RepoStatus have different shapes —
+        // spawn them directly. DiffStats is serialized behind Files above.
         {
             let tx = tx.clone();
             let git = Arc::clone(self);
@@ -541,10 +586,9 @@ impl GitCommands {
 
         // Pull can change HEAD-relative file status, but we don't need the
         // expensive per-file numstat/hunk scans immediately. The selected diff
-        // is refreshed separately by the GUI.
-        spawn_part!(tx, self, Files, |g: &GitCommands| {
-            g.load_files_status_only()
-        });
+        // is refreshed separately by the GUI. Serialize shortstat behind status
+        // so the two full-tree scans do not compete with each other.
+        self.stream_files_then_diff_stats(tx, false);
 
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
 
@@ -591,16 +635,6 @@ impl GitCommands {
             g.load_reflog(100)
                 .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
         });
-
-        {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-            std::thread::spawn(move || {
-                if let Ok((added, deleted)) = git.diff_shortstat() {
-                    let _ = tx.send(ModelPart::DiffStats { added, deleted });
-                }
-            });
-        }
 
         {
             let tx = tx.clone();
@@ -664,10 +698,9 @@ impl GitCommands {
 
         // Checkout can change HEAD-relative file status, but we don't need the
         // expensive per-file numstat/hunk scans immediately. The selected diff
-        // is refreshed separately by the GUI.
-        spawn_part!(tx, self, Files, |g: &GitCommands| {
-            g.load_files_status_only()
-        });
+        // is refreshed separately by the GUI. Serialize shortstat behind status
+        // so the latency-critical status scan gets the filesystem to itself.
+        self.stream_files_then_diff_stats(tx, false);
 
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
 
@@ -682,10 +715,15 @@ impl GitCommands {
                 if let Ok(head) = git.head_state() {
                     GitCommands::apply_checkout_head_state(&mut commits, &head);
 
-                    let _ = tx.send(ModelPart::Head {
-                        hash: head.hash,
-                        branch_name: head.branch_name,
-                    });
+                    if tx
+                        .send(ModelPart::Head {
+                            hash: head.hash,
+                            branch_name: head.branch_name,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
 
                 let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
@@ -712,16 +750,6 @@ impl GitCommands {
             g.load_reflog(100)
                 .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
         });
-
-        {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-            std::thread::spawn(move || {
-                if let Ok((added, deleted)) = git.diff_shortstat() {
-                    let _ = tx.send(ModelPart::DiffStats { added, deleted });
-                }
-            });
-        }
 
         {
             let tx = tx.clone();
@@ -767,9 +795,8 @@ impl GitCommands {
 
         // Local history changes can affect working-tree status, but the selected
         // diff is refreshed separately by the GUI, so avoid per-file diff stats.
-        spawn_part!(tx, self, Files, |g: &GitCommands| {
-            g.load_files_status_only()
-        });
+        // Serialize shortstat behind status to avoid two competing worktree scans.
+        self.stream_files_then_diff_stats(tx, false);
 
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
 
@@ -809,17 +836,6 @@ impl GitCommands {
             g.load_reflog(100)
                 .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
         });
-
-        {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-
-            std::thread::spawn(move || {
-                if let Ok((added, deleted)) = git.diff_shortstat() {
-                    let _ = tx.send(ModelPart::DiffStats { added, deleted });
-                }
-            });
-        }
 
         {
             let tx = tx.clone();
