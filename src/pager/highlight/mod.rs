@@ -62,7 +62,9 @@ impl FileHighlighter {
 
         let mut highlighter = Highlighter::new();
         let highlights =
-            highlighter.highlight(&lang_config.config, content.as_bytes(), None, |_| None);
+            highlighter.highlight(&lang_config.config, content.as_bytes(), None, None, |_| {
+                None
+            });
 
         let Ok(highlights) = highlights else {
             return Self::default();
