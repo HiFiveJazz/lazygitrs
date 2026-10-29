@@ -2677,12 +2677,38 @@ impl Gui {
                 Ok(completion) => {
                     let was_checkout = self.pending_checkout_by_name.take().is_some();
                     if let Some(head) = completion.head {
-                        let mut model = self.model.lock().unwrap();
-                        for branch in &mut model.branches {
-                            branch.head = branch.name == head.branch_name;
+                        let mut checked_out_branch_moved = false;
+                        {
+                            let mut model = self.model.lock().unwrap();
+                            for branch in &mut model.branches {
+                                branch.head = branch.name == head.branch_name;
+                            }
+
+                            // The full branch refresh also puts HEAD first, but it can
+                            // finish noticeably after checkout. Reflect the confirmed
+                            // checkout immediately using the branch data we already have.
+                            if !head.branch_name.is_empty() {
+                                if let Some(index) = model
+                                    .branches
+                                    .iter()
+                                    .position(|branch| branch.name == head.branch_name)
+                                {
+                                    if index != 0 {
+                                        let branch = model.branches.remove(index);
+                                        model.branches.insert(0, branch);
+                                    }
+                                    checked_out_branch_moved = true;
+                                }
+                            }
+
+                            model.head_hash = head.hash;
+                            model.head_branch_name = head.branch_name;
                         }
-                        model.head_hash = head.hash;
-                        model.head_branch_name = head.branch_name;
+
+                        if checked_out_branch_moved {
+                            self.context_mgr
+                                .snap_selection_to(ContextId::Branches, 0);
+                        }
                         self.needs_diff_refresh = true;
                     }
                     match kind {
@@ -10883,7 +10909,10 @@ mod terminal_mouse_tests {
                     {
                         let model = gui.model.lock().unwrap();
                         if model.head_branch_name == target
-                            && model.branches.iter().any(|b| b.head && b.name == target)
+                            && model
+                                .branches
+                                .first()
+                                .is_some_and(|b| b.head && b.name == target)
                         {
                             samples.push(start.elapsed().as_secs_f64() * 1000.0);
                             break;
@@ -11021,6 +11050,15 @@ mod terminal_mouse_tests {
             assert!(gui.initial_load_rx.is_some());
             assert!(matches!(gui.popup, PopupState::None));
             assert!(gui.pending_checkout_by_name.is_none());
+            {
+                let model = gui.model.lock().unwrap();
+                assert_eq!(
+                    model.branches.first().map(|branch| branch.name.as_str()),
+                    Some("main")
+                );
+            }
+            assert_eq!(gui.context_mgr.selected(ContextId::Branches), 0);
+            assert_eq!(gui.context_mgr.scroll_offset(ContextId::Branches), 0);
             assert_checkout_head(&gui, "main", &repo.git(&["rev-parse", "main"]));
             gui.refresh().unwrap();
             assert_checkout_head(&gui, "main", &repo.git(&["rev-parse", "main"]));

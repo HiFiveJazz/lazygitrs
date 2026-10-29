@@ -342,6 +342,16 @@ impl ContextManager {
         self.selections.insert(ctx, idx);
     }
 
+    /// Immediately move a list context to a specific row without leaving any
+    /// in-flight selection/scroll animation pointing at the old ordering.
+    pub fn snap_selection_to(&mut self, ctx: ContextId, idx: usize) {
+        self.selections.insert(ctx, idx);
+        self.scroll_offsets.insert(ctx, idx);
+        self.selection_animations.remove(&ctx);
+        self.scroll_animations.remove(&ctx);
+        self.viewport_manually_scrolled = false;
+    }
+
     pub fn scroll_offset(&self, ctx: ContextId) -> usize {
         self.scroll_offsets.get(&ctx).copied().unwrap_or(0)
     }
