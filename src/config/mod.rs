@@ -40,7 +40,7 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub fn load(_debug: bool) -> Result<Self> {
+    pub fn load() -> Result<Self> {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let candidates = config_dir_candidates();
         let config_dir = candidates

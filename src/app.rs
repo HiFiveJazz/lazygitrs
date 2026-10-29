@@ -16,11 +16,10 @@ pub struct App {
 impl App {
     pub fn new(
         repo_path: PathBuf,
-        debug: bool,
         filter_path: Option<PathBuf>,
         start_in_commits: bool,
     ) -> Result<Self> {
-        let config = AppConfig::load(debug)?;
+        let config = AppConfig::load()?;
 
         // Validate git repo
         if !GitCommands::is_valid_repo(&repo_path) {

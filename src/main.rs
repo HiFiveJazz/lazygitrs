@@ -106,20 +106,15 @@ fn main() {
         return;
     }
 
-    // Set up logging if debug mode
-    if cli.debug {
-        tracing_subscriber::fmt()
-            .with_env_filter("lazygitrs=debug")
-            .with_writer(std::io::stderr)
-            .init();
-    }
+    // Keep lightweight debug diagnostics dependency-free.
+    os::tty::set_debug_logging(cli.debug);
 
     let repo_path = cli
         .path
         .or(cli.work_tree)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    match app::App::new(repo_path, cli.debug, cli.filter_path, cli.commits) {
+    match app::App::new(repo_path, cli.filter_path, cli.commits) {
         Ok(app) => {
             if let Err(e) = app.run() {
                 eprintln!("Error: {:#}", e);

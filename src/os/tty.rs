@@ -19,11 +19,15 @@
 //! 3. On exit, restore Helix as foreground and `SIGCONT` it — and do **not**
 //!    leave the alt-screen / disable raw mode / drop mouse: Helix still owns
 //!    those for the rest of the session.
-//! 4. Build with crossterm `use-dev-tty` (+ `libc`) so input is readable from
-//!    `/dev/tty` under Helix's redirected stdio.
+//! 4. Build with crossterm `use-dev-tty` so input is readable from `/dev/tty`
+//!    under Helix's redirected stdio.
 
+use std::fmt;
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+/// Whether dependency-free debug diagnostics should be written to stderr.
+static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 
 /// Set when stdin/stdout are not both TTYs at startup (Helix `:insert-output`).
 static NESTED_TTY_LAUNCH: AtomicBool = AtomicBool::new(false);
@@ -33,6 +37,17 @@ static PREV_FOREGROUND_PGID: AtomicI32 = AtomicI32::new(-1);
 
 /// Writer used for ratatui / crossterm screen output.
 pub type TuiOutput = Box<dyn Write + Send>;
+
+/// Enable or disable lightweight debug diagnostics.
+pub fn set_debug_logging(enabled: bool) {
+    DEBUG_LOGGING.store(enabled, Ordering::Relaxed);
+}
+
+fn debug_log(args: fmt::Arguments<'_>) {
+    if DEBUG_LOGGING.load(Ordering::Relaxed) {
+        eprintln!("[debug] {args}");
+    }
+}
 
 /// True when launched with redirected stdin/stdout (Helix `:insert-output`).
 pub fn nested_tty_launch() -> bool {
@@ -67,7 +82,7 @@ pub fn open_tui_output() -> io::Result<TuiOutput> {
             match OpenOptions::new().read(true).write(true).open("/dev/tty") {
                 Ok(tty) => return Ok(Box::new(tty)),
                 Err(err) => {
-                    tracing::debug!("open /dev/tty for TUI output failed: {err}");
+                    debug_log(format_args!("open /dev/tty for TUI output failed: {err}"));
                 }
             }
         }
@@ -109,7 +124,9 @@ fn claim_foreground_tty() {
     let tty = match OpenOptions::new().read(true).write(true).open("/dev/tty") {
         Ok(tty) => tty,
         Err(err) => {
-            tracing::debug!("open /dev/tty to claim foreground failed: {err}");
+            debug_log(format_args!(
+                "open /dev/tty to claim foreground failed: {err}"
+            ));
             return;
         }
     };
@@ -119,10 +136,10 @@ fn claim_foreground_tty() {
         // Own process group, then make it the tty foreground.
         let pid = libc::getpid();
         if libc::setpgid(0, 0) < 0 {
-            tracing::debug!(
+            debug_log(format_args!(
                 "setpgid for nested TUI failed: {}",
                 io::Error::last_os_error()
-            );
+            ));
             return;
         }
         let pgid = libc::getpgid(0);
@@ -132,10 +149,10 @@ fn claim_foreground_tty() {
             PREV_FOREGROUND_PGID.store(prev, Ordering::Relaxed);
         }
         if libc::tcsetpgrp(tty_fd, pgid) < 0 {
-            tracing::debug!(
+            debug_log(format_args!(
                 "tcsetpgrp for nested TUI failed: {}",
                 io::Error::last_os_error()
-            );
+            ));
             // Roll back process-group change best-effort if we never claimed.
             if prev > 0 {
                 let _ = libc::setpgid(0, prev);
