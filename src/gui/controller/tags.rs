@@ -83,7 +83,10 @@ fn delete_tag(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     if let Some(tag) = model.tags.get(selected) {
         let name = tag.name.clone();
-        let on_remote = tag.on_remote;
+        // Initial tag loading is deliberately local-only now, so `on_remote`
+        // can be unknown until the first fetch/pull. Keep remote deletion
+        // available whenever the repository has at least one remote.
+        let can_delete_remote = tag.on_remote || !model.remotes.is_empty();
         drop(model);
 
         let name_local = name.clone();
@@ -98,7 +101,7 @@ fn delete_tag(gui: &mut Gui) -> Result<()> {
             })),
         }];
 
-        if on_remote {
+        if can_delete_remote {
             let name_remote = name.clone();
             let name_both = name.clone();
             items.push(MenuItem {

@@ -16,8 +16,9 @@ pub mod submodule;
 pub mod tag;
 pub mod worktree;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::Result;
 
@@ -86,26 +87,39 @@ pub struct GitCommands {
     repo_path: PathBuf,
     repo_name: String,
     read_repo: Option<ReadRepository>,
+    contributor_cache: Mutex<HashMap<(String, usize, usize), Vec<(String, usize)>>>,
 }
 
 impl GitCommands {
     pub fn new(repo_path: &Path) -> Result<Self> {
-        let paths = Self::resolve_repo_paths(repo_path)?;
+        // Prefer gix discovery so startup doesn't need to spawn Git just to
+        // validate the repository and resolve its worktree/common directory.
+        // Keep the existing CLI path resolver as a compatibility fallback.
+        let (paths, read_repo) = match ReadRepository::discover(repo_path) {
+            Ok(discovered) => (
+                RepoPaths {
+                    worktree_path: discovered.worktree_path,
+                    repo_path: discovered.repo_path,
+                },
+                Some(discovered.read_repo),
+            ),
+            Err(_) => {
+                let paths = Self::resolve_repo_paths(repo_path)?;
+                let read_repo = ReadRepository::open(&paths.worktree_path).ok();
+                (paths, read_repo)
+            }
+        };
         let repo_name = paths
             .repo_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // gix is the fast read path, not a compatibility requirement. Keep
-        // the system-Git implementation available for repositories/features
-        // gix cannot read yet.
-        let read_repo = ReadRepository::open(&paths.worktree_path).ok();
-
         Ok(Self {
             repo_path: paths.worktree_path,
             repo_name,
             read_repo,
+            contributor_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -612,8 +626,9 @@ impl GitCommands {
 
         spawn_part!(tx, self, Remotes, |g: &GitCommands| g.load_remotes());
 
-        // A pull may auto-follow tags, so keep tags correct for now.
-        // We can remove the redundant ls-remote calls separately once measured.
+        // A pull may auto-follow tags. Refresh local refs immediately and merge
+        // the remote-state information we already know without another network
+        // round-trip.
         spawn_part!(tx, self, Tags, move |g: &GitCommands| {
             g.load_tags_after_remote_update(&previous_tag_remote_state)
         });
@@ -677,8 +692,10 @@ impl GitCommands {
     /// Refresh model state that can be affected by a successful checkout.
     ///
     /// Checkout can change HEAD-relative files, branch state, commit decorations,
-    /// worktree state, submodule state, reflog, diff stats, contributors, and
-    /// repository status. It cannot change stash, remotes, tags, or the repo URL.
+    /// worktree state, submodule state, reflog, diff stats, and repository status.
+    /// Contributors are intentionally not recomputed on every checkout; the
+    /// informational list is refreshed by full/history-changing model refreshes.
+    /// Checkout cannot change stash, remotes, tags, or the repo URL.
     pub fn load_model_after_checkout_streaming(
         self: &Arc<Self>,
         tx: &mpsc::Sender<ModelPart>,
@@ -750,14 +767,6 @@ impl GitCommands {
             g.load_reflog(100)
                 .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
         });
-
-        {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-            std::thread::spawn(move || {
-                let _ = tx.send(ModelPart::Contributors(git.load_contributors(500, 10)));
-            });
-        }
 
         {
             let tx = tx.clone();
@@ -933,12 +942,17 @@ impl GitCommands {
 
     /// Check if the working directory is a valid git repo.
     pub fn is_valid_repo(path: &Path) -> bool {
+        if gix::discover(path).is_ok() {
+            return true;
+        }
+
+        // Preserve compatibility for repositories gix cannot discover even
+        // though the installed Git can (unusual layouts/configurations).
         CmdBuilder::git()
             .cwd_path(path)
             .args(&["rev-parse", "--git-dir"])
             .run()
-            .map(|r| r.success)
-            .unwrap_or(false)
+            .is_ok_and(|result| result.success)
     }
 
     /// Get the HEAD commit hash without spawning Git.
