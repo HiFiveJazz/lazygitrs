@@ -43,7 +43,7 @@ impl Branch {
 
 #[cfg(test)]
 mod tests {
-    use super::{sort_branches_for_display, Branch};
+    use super::{Branch, sort_branches_for_display};
 
     fn branch(name: &str, commit_time: i64, head: bool) -> Branch {
         Branch {

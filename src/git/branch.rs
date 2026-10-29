@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::GitCommands;
-use crate::model::{sort_branches_for_display, Branch};
+use crate::model::{Branch, sort_branches_for_display};
 
 impl GitCommands {
     pub fn load_branches(&self) -> Result<Vec<Branch>> {
