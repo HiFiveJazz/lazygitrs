@@ -15,6 +15,14 @@ const FALLBACK_KITTY_FONT: (u16, u16) = (8, 16);
 
 static GLOBAL_PICKER: OnceLock<Option<Picker>> = OnceLock::new();
 
+#[allow(deprecated)]
+fn picker_from_known_font_size(font: (u16, u16)) -> Picker {
+    // We intentionally do our own bounded capability probe above, so the
+    // deprecated constructor is the only public API that preserves the
+    // detected cell size without querying stdio again.
+    Picker::from_fontsize(font.into())
+}
+
 pub(super) fn global_picker_ref() -> Option<&'static Picker> {
     GLOBAL_PICKER.get().and_then(|o| o.as_ref())
 }
@@ -291,7 +299,11 @@ fn interpret_probed(
                 }
             }
             Response::CellSize(None) => {}
-            Response::RectangularOps | Response::CursorPositionReport(..) | Response::Status => {}
+            Response::RectangularOps
+            | Response::KittyCompression
+            | Response::Background(..)
+            | Response::CursorPositionReport(..)
+            | Response::Status => {}
         }
     }
     (proto, font)
@@ -328,7 +340,7 @@ fn detect_picker() -> Option<Picker> {
             // No terminal query under nested launches; hints + ioctl only.
             if experimental && iterm2_hint_from_env() {
                 let fs = winsize_font?;
-                let mut p = Picker::from_fontsize(fs);
+                let mut p = picker_from_known_font_size(fs);
                 p.set_protocol_type(ProtocolType::Iterm2);
                 return Some(p);
             }
@@ -337,7 +349,7 @@ fn detect_picker() -> Option<Picker> {
                 if fs.0 == 0 || fs.1 == 0 {
                     return None;
                 }
-                let mut p = Picker::from_fontsize(fs);
+                let mut p = picker_from_known_font_size(fs);
                 p.set_protocol_type(ProtocolType::Kitty);
                 return Some(p);
             }
@@ -395,7 +407,7 @@ fn detect_picker() -> Option<Picker> {
             return None;
         }
 
-        let mut picker = Picker::from_fontsize(font);
+        let mut picker = picker_from_known_font_size(font);
         picker.set_protocol_type(proto);
         if picker.protocol_type() == ProtocolType::Halfblocks {
             return None;

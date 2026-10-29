@@ -2,9 +2,9 @@
 //!
 //! Draws a centered, aspect-preserving image per pane inside the diff panel.
 //! The caller owns the outer border/title and hides the preview under
-//! overlays via `image_preview_hidden`. Only scoped Kitty deletes are
-//! supported here (`ImagePreview::cleanup`); Sixel/iTerm2 have no scoped
-//! delete in ratatui-image 8.0.1 and persist once drawn.
+//! overlays via `image_preview_hidden`. ratatui-image 11 uses Kitty virtual
+//! placements tied to unicode placeholders, so Kitty placements disappear
+//! automatically when those placeholder cells are no longer rendered.
 //!
 //! Private modules own capability probing, bounded source loading, and inline
 //! diff eligibility. This module owns rendering and graphics lifetimes.
@@ -38,15 +38,16 @@ use source::{DecodedImage, format_label_for, load_one_side};
 use super::side_by_side::DiffSideView;
 use crate::config::Theme;
 
-static PENDING_DELETES: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+#[allow(deprecated)]
+fn picker_from_known_font_size(font: (u16, u16)) -> Picker {
+    Picker::from_fontsize(font.into())
+}
 
-/// Flush scoped deletes on the UI thread, never on decoding/resize workers.
+/// Compatibility hook for terminal transitions. ratatui-image 11's Kitty
+/// virtual placements are removed automatically when their unicode placeholder
+/// cells disappear, so there are no explicit image IDs to flush anymore.
 pub fn flush_cleanup(out: &mut dyn Write) {
-    if let Ok(mut pending) = PENDING_DELETES.lock() {
-        for id in pending.drain(..) {
-            let _ = write!(out, "\x1b_Ga=d,d=I,i={id}\x1b\\");
-        }
-    }
     let _ = out.flush();
 }
 
@@ -59,9 +60,10 @@ struct PreviewSide {
     thread: ThreadProtocol,
     rx: Receiver<ResizeResponse>,
     created: Instant,
-    // Stored before the protocol moves into the worker so scoped Kitty
-    // deletes stay possible while a resize is inflight.
-    kitty_id: Option<u32>,
+    // Kitty uses unicode placeholders in ratatui-image 11; unlike Sixel/iTerm2,
+    // overlays can safely replace these cells and the terminal removes the
+    // virtual placement automatically.
+    uses_placeholders: bool,
 }
 
 impl PreviewSide {
@@ -76,10 +78,7 @@ impl PreviewSide {
         let orig_height = decoded.orig_height;
         let format = decoded.format;
         let proto = picker.new_resize_protocol(decoded.image);
-        let kitty_id = match proto.protocol_type() {
-            StatefulProtocolType::Kitty(k) => Some(k.unique_id),
-            _ => None,
-        };
+        let uses_placeholders = matches!(proto.protocol_type(), StatefulProtocolType::Kitty(_));
         let thread = ThreadProtocol::new(tx_req, Some(proto));
         // Worker only resize+encodes (CPU); it never touches the terminal.
         // It exits when the preview is dropped (sender disconnect).
@@ -109,7 +108,7 @@ impl PreviewSide {
             thread,
             rx: rx_resp,
             created: Instant::now(),
-            kitty_id,
+            uses_placeholders,
         }
     }
 
@@ -137,19 +136,6 @@ pub struct ImagePreview {
     old: Option<PreviewSide>,
     new: Option<PreviewSide>,
     font_size: (u16, u16),
-}
-
-impl Drop for ImagePreview {
-    fn drop(&mut self) {
-        if let Ok(mut pending) = PENDING_DELETES.lock() {
-            pending.extend(
-                [&self.old, &self.new]
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|s| s.kitty_id),
-            );
-        }
-    }
 }
 
 const _: fn() = || {
@@ -199,6 +185,7 @@ impl ImagePreview {
             return None;
         }
         let font_size = picker.font_size();
+        let font_size = (font_size.width, font_size.height);
         Some(Self {
             old: old.map(|d| PreviewSide::new(picker, d)),
             new: new.map(|d| PreviewSide::new(picker, d)),
@@ -222,22 +209,7 @@ impl ImagePreview {
         [&self.old, &self.new]
             .into_iter()
             .flatten()
-            .all(|side| side.kitty_id.is_some())
-    }
-
-    /// Scoped cleanup: deletes only this preview's Kitty image ids. Safe on
-    /// any output; non-Kitty sides are ignored. Never issues a global
-    /// delete-all. Call on the UI thread (never from a worker).
-    #[cfg(test)]
-    fn cleanup(&self, out: &mut dyn Write) {
-        for id in [&self.old, &self.new]
-            .into_iter()
-            .flatten()
-            .filter_map(|s| s.kitty_id)
-        {
-            let _ = write!(out, "\x1b_Ga=d,d=I,i={id}\x1b\\");
-        }
-        let _ = out.flush();
+            .all(|side| side.uses_placeholders)
     }
 }
 
@@ -429,7 +401,7 @@ fn render_side(
 
     let fitted: Option<Rect> = state
         .thread
-        .size_for(Resize::Fit(None), img_area)
+        .size_for(Resize::Fit(None), img_area.into())
         .map(|r| centered_rect(img_area, r.width, r.height))
         .or_else(|| {
             let (cw, ch) = fit_cells(
@@ -468,7 +440,7 @@ fn render_side(
             ))),
             msg_area,
         );
-        state.thread.resize_encode(&Resize::Fit(None), dst);
+        state.thread.resize_encode(&Resize::Fit(None), dst.into());
         frame.render_stateful_widget(
             StatefulImage::new().resize(Resize::Fit(None)),
             dst,
@@ -576,7 +548,7 @@ impl InlineImagePreview {
 
     #[cfg(test)]
     pub(crate) fn from_preview_for_test(preview: ImagePreview) -> Self {
-        let mut picker = Picker::from_fontsize((8, 16));
+        let mut picker = picker_from_known_font_size((8, 16));
         picker.set_protocol_type(ProtocolType::Kitty);
         let mut inline = Self::with_picker(
             Path::new("."),
@@ -696,13 +668,13 @@ mod tests {
     use std::path::PathBuf;
 
     fn halfblocks_picker() -> Picker {
-        let mut p = Picker::from_fontsize((8, 16));
+        let mut p = picker_from_known_font_size((8, 16));
         p.set_protocol_type(ProtocolType::Halfblocks);
         p
     }
 
     fn graphics_picker() -> Picker {
-        let mut p = Picker::from_fontsize((8, 16));
+        let mut p = picker_from_known_font_size((8, 16));
         p.set_protocol_type(ProtocolType::Kitty);
         p
     }
@@ -870,17 +842,12 @@ mod tests {
     }
 
     #[test]
-    fn kitty_id_stored_for_inflight_cleanup() {
+    fn kitty_protocol_uses_placeholder_lifecycle() {
         let picker = graphics_picker();
         let d = decode_bytes(&png_bytes(8, 8)).unwrap();
         let p = ImagePreview::from_decoded(Some(d), None, &picker).unwrap();
-        // Stored id is available even before any encode completes.
-        let id = p.old.as_ref().unwrap().kitty_id.expect("kitty id stored");
-        let mut buf = Vec::new();
-        p.cleanup(&mut buf);
-        let out = String::from_utf8(buf).expect("cleanup writes ascii");
-        assert!(out.contains("\x1b_Ga=d,d=I"), "scoped delete, got {out:?}");
-        assert!(out.contains(&format!("i={id}")), "own id only, got {out:?}");
+        assert!(p.old.as_ref().unwrap().uses_placeholders);
+        assert!(p.uses_placeholders());
     }
 
     #[test]
@@ -1010,7 +977,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     fn iterm2_picker() -> Picker {
-        let mut p = Picker::from_fontsize((8, 16));
+        let mut p = picker_from_known_font_size((8, 16));
         p.set_protocol_type(ProtocolType::Iterm2);
         p
     }
