@@ -50,7 +50,7 @@ impl GitCommands {
             let y = line.chars().nth(1).unwrap_or(' ');
             let raw = &line[3..];
 
-            let (has_staged, has_unstaged, tracked, status) = parse_status_codes(x, y);
+            let (_, _, tracked, status) = parse_status_codes(x, y);
 
             let name = if raw.contains(" -> ") {
                 let parts: Vec<&str> = raw.splitn(2, " -> ").collect();

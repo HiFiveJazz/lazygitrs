@@ -468,7 +468,11 @@ impl ReadRepository {
                         } => (
                             location.as_ref().to_str_lossy().into_owned(),
                             None,
-                            if previous_entry_mode == entry_mode { 'M' } else { 'T' },
+                            if previous_entry_mode == entry_mode {
+                                'M'
+                            } else {
+                                'T'
+                            },
                         ),
                         Change::Rewrite {
                             source_location,
@@ -541,7 +545,7 @@ impl ReadRepository {
                             };
 
                             let entry = tracked.entry(path.clone()).or_insert_with(|| StatusRead {
-                                path,
+                                path: path.clone(),
                                 source_path: None,
                                 index_status: ' ',
                                 worktree_status: ' ',
