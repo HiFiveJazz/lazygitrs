@@ -404,6 +404,26 @@ impl GitCommands {
 
     /// Load reflog entries using `git log -g`.
     pub fn load_reflog(&self, limit: usize) -> Result<Vec<Commit>> {
+        if let Some(repo) = &self.read_repo
+            && let Ok(entries) = repo.reflog(limit)
+        {
+            return Ok(entries
+                .into_iter()
+                .map(|entry| Commit {
+                    hash: entry.hash,
+                    name: entry.name,
+                    status: CommitStatus::Reflog,
+                    tags: Vec::new(),
+                    refs: Vec::new(),
+                    author_name: entry.author_name,
+                    author_email: entry.author_email,
+                    unix_timestamp: entry.unix_timestamp,
+                    parents: entry.parents,
+                    divergence: Divergence::None,
+                })
+                .collect());
+        }
+
         let format = "%H|%gs|%an|%ae|%at|%P";
         let result = self
             .git()
@@ -458,6 +478,12 @@ impl GitCommands {
     /// Hashes of commits ahead of upstream (`@{u}..HEAD`). Cheap enough to call
     /// once per filter/page load; avoid calling from every `parse_commit_log`.
     pub fn unpushed_commit_hashes(&self) -> Result<Vec<String>> {
+        if let Some(repo) = &self.read_repo
+            && let Ok(hashes) = repo.unpushed_commit_hashes()
+        {
+            return Ok(hashes);
+        }
+
         let result = self
             .git()
             .args(&["log", "@{u}..HEAD", "--format=%H"])

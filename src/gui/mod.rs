@@ -168,7 +168,7 @@ const DIFF_PREVIEW_CACHE_ENTRIES: usize = 24;
 const DIFF_PREVIEW_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CACHED_DIFF_BYTES: usize = 8 * 1024 * 1024;
 /// How many diffs below/above the selection to warm in the preview cache.
-const CHECKOUT_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 4;
+const CHECKOUT_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 5;
 const HISTORY_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 4;
 const DIFF_PREFETCH_AHEAD: usize = 3;
 const DIFF_PREFETCH_BEHIND: usize = 1;

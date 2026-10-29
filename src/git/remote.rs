@@ -13,6 +13,31 @@ struct GithubRemoteRepo {
 
 impl GitCommands {
     pub fn load_remotes(&self) -> Result<Vec<Remote>> {
+        if let Some(repo) = &self.read_repo
+            && let Ok(remotes) = repo.remotes()
+        {
+            return Ok(remotes
+                .into_iter()
+                .map(|remote| Remote {
+                    name: remote.name,
+                    urls: remote.urls,
+                    branches: remote
+                        .branches
+                        .into_iter()
+                        .map(|branch| RemoteBranch {
+                            name: branch.name,
+                            remote_name: branch.remote_name,
+                            hash: branch.hash,
+                        })
+                        .collect(),
+                })
+                .collect());
+        }
+
+        self.load_remotes_cli()
+    }
+
+    fn load_remotes_cli(&self) -> Result<Vec<Remote>> {
         let result = self.git().args(&["remote", "-v"]).run()?;
 
         if !result.success {
@@ -42,7 +67,6 @@ impl GitCommands {
             }
         }
 
-        // Load remote branches
         for remote in &mut remotes {
             remote.branches = self.load_remote_branches(&remote.name)?;
         }
@@ -97,6 +121,9 @@ impl GitCommands {
         self.git()
             .args(&["remote", "add", name, url])
             .run_expecting_success()?;
+        if let Some(repo) = &self.read_repo {
+            let _ = repo.reload();
+        }
         Ok(())
     }
 
@@ -104,6 +131,9 @@ impl GitCommands {
         self.git()
             .args(&["remote", "remove", name])
             .run_expecting_success()?;
+        if let Some(repo) = &self.read_repo {
+            let _ = repo.reload();
+        }
         Ok(())
     }
 
@@ -111,6 +141,9 @@ impl GitCommands {
         self.git()
             .args(&["remote", "rename", old_name, new_name])
             .run_expecting_success()?;
+        if let Some(repo) = &self.read_repo {
+            let _ = repo.reload();
+        }
         Ok(())
     }
 
@@ -118,6 +151,9 @@ impl GitCommands {
         self.git()
             .args(&["remote", "set-url", name, url])
             .run_expecting_success()?;
+        if let Some(repo) = &self.read_repo {
+            let _ = repo.reload();
+        }
         Ok(())
     }
 
@@ -178,10 +214,13 @@ impl GitCommands {
     }
 
     pub fn checkout_remote_branch(&self, remote: &str, branch: &str) -> Result<()> {
-        // Creates a local branch tracking the remote branch and checks it out
+        // Creates a local branch tracking the remote branch and checks it out.
         self.git()
             .args(&["checkout", "-b", branch, &format!("{}/{}", remote, branch)])
             .run_expecting_success()?;
+        if let Some(repo) = &self.read_repo {
+            let _ = repo.reload();
+        }
         Ok(())
     }
 
@@ -216,22 +255,26 @@ impl GitCommands {
         self.git()
             .args(&["push", "-u", remote, branch])
             .run_expecting_success()?;
+        if let Some(repo) = &self.read_repo {
+            let _ = repo.reload();
+        }
         Ok(())
     }
 
     /// Build a web URL for a commit from the origin remote URL.
     pub fn get_commit_url(&self, hash: &str) -> Result<String> {
-        let result = self
-            .git()
-            .args(&["remote", "get-url", "origin"])
-            .run_expecting_success()?;
-        let remote_url = result.stdout.trim().to_string();
-        let base = remote_url_to_https(&remote_url);
+        let base = self.get_repo_url()?;
         Ok(format!("{}/commit/{}", base, hash))
     }
 
     /// Get the HTTPS URL for the origin remote repository.
     pub fn get_repo_url(&self) -> Result<String> {
+        if let Some(repo) = &self.read_repo
+            && let Ok(Some(remote_url)) = repo.origin_url()
+        {
+            return Ok(remote_url_to_https(&remote_url));
+        }
+
         let result = self
             .git()
             .args(&["remote", "get-url", "origin"])
@@ -298,12 +341,29 @@ impl GitCommands {
     }
 
     fn load_github_remote_repos(&self) -> Result<Vec<GithubRemoteRepo>> {
-        let result = self.git().args(&["remote", "-v"]).run()?;
-        if !result.success {
-            return Ok(Vec::new());
+        let mut repos = Vec::new();
+        for remote in self.load_remotes()? {
+            for url in remote.urls {
+                let Some(repo) = github_repo_slug_from_remote_url(&url) else {
+                    continue;
+                };
+                let Some(owner) = repo.split('/').next().map(str::to_string) else {
+                    continue;
+                };
+                if repos
+                    .iter()
+                    .any(|existing: &GithubRemoteRepo| existing.repo == repo)
+                {
+                    continue;
+                }
+                repos.push(GithubRemoteRepo {
+                    remote_name: remote.name.clone(),
+                    repo,
+                    owner,
+                });
+            }
         }
-
-        Ok(github_remote_repos_from_remote_v_output(&result.stdout))
+        Ok(repos)
     }
 
     fn branch_upstream_remote(&self, branch: &str) -> Option<String> {
@@ -332,9 +392,39 @@ impl GitCommands {
         self.get_repo_url().unwrap_or_default()
     }
 
-    /// Load top contributors using `git shortlog -sn` capped to recent commits
-    /// to avoid traversing the entire history on large repos.
+    /// Load top contributors using `git shortlog -sn` capped to recent commits.
+    ///
+    /// Contributor data is informational and relatively expensive to rebuild on
+    /// large histories. Cache the exact Git result by HEAD and, importantly,
+    /// checkout refreshes no longer request it at all. Keeping Git as the source
+    /// here preserves shortlog/mailmap semantics while still removing the hot-path
+    /// recomputation that showed up in the checkout trace.
     pub fn load_contributors(&self, max_commits: usize, top_n: usize) -> Vec<(String, usize)> {
+        let head = self.read_head_state().ok().map(|head| head.hash);
+        if let Some(head) = head.as_ref() {
+            let key = (head.clone(), max_commits, top_n);
+            if let Some(cached) = self
+                .contributor_cache
+                .lock()
+                .expect("contributor cache poisoned")
+                .get(&key)
+                .cloned()
+            {
+                return cached;
+            }
+        }
+
+        let contributors = self.load_contributors_cli(max_commits, top_n);
+        if let Some(head) = head {
+            self.contributor_cache
+                .lock()
+                .expect("contributor cache poisoned")
+                .insert((head, max_commits, top_n), contributors.clone());
+        }
+        contributors
+    }
+
+    fn load_contributors_cli(&self, max_commits: usize, top_n: usize) -> Vec<(String, usize)> {
         let max_arg = format!("--max-count={}", max_commits);
         let result = self
             .git()
@@ -357,7 +447,6 @@ impl GitCommands {
             let Ok(count) = count_str.parse::<usize>() else {
                 continue;
             };
-            // Strip "<email>" suffix if present.
             let name = match rest.rfind('<') {
                 Some(i) => rest[..i].trim().to_string(),
                 None => rest.to_string(),

@@ -5,6 +5,27 @@ use crate::model::Branch;
 
 impl GitCommands {
     pub fn load_branches(&self) -> Result<Vec<Branch>> {
+        if let Some(repo) = &self.read_repo
+            && let Ok(branches) = repo.branches()
+        {
+            return Ok(branches
+                .into_iter()
+                .map(|branch| Branch {
+                    name: branch.name,
+                    hash: branch.hash,
+                    recency: relative_recency(branch.commit_time),
+                    pushables: branch.ahead.to_string(),
+                    pullables: branch.behind.to_string(),
+                    upstream: branch.upstream,
+                    head: branch.head,
+                })
+                .collect());
+        }
+
+        self.load_branches_cli()
+    }
+
+    fn load_branches_cli(&self) -> Result<Vec<Branch>> {
         let format = "%(HEAD)|%(refname:short)|%(objectname:short)|%(upstream:short)|%(upstream:track)|%(committerdate:relative)";
         let result = self
             .git()
@@ -86,6 +107,9 @@ impl GitCommands {
         self.git()
             .args(&["branch", flag, name])
             .run_expecting_success()?;
+        if let Some(repo) = &self.read_repo {
+            let _ = repo.reload();
+        }
         Ok(())
     }
 
@@ -93,6 +117,9 @@ impl GitCommands {
         self.git()
             .args(&["branch", "-m", old_name, new_name])
             .run_expecting_success()?;
+        if let Some(repo) = &self.read_repo {
+            let _ = repo.reload();
+        }
         Ok(())
     }
 
@@ -162,4 +189,33 @@ fn shorten_recency(recency: &str) -> String {
     } else {
         recency.to_string()
     }
+}
+
+fn relative_recency(timestamp: i64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    if timestamp <= 0 {
+        return String::new();
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(timestamp);
+    let seconds = now.saturating_sub(timestamp).max(0);
+    let (value, unit) = if seconds < 60 {
+        (seconds.max(1), "s")
+    } else if seconds < 60 * 60 {
+        (seconds / 60, "m")
+    } else if seconds < 60 * 60 * 24 {
+        (seconds / (60 * 60), "h")
+    } else if seconds < 60 * 60 * 24 * 7 {
+        (seconds / (60 * 60 * 24), "d")
+    } else if seconds < 60 * 60 * 24 * 30 {
+        (seconds / (60 * 60 * 24 * 7), "w")
+    } else if seconds < 60 * 60 * 24 * 365 {
+        (seconds / (60 * 60 * 24 * 30), "mo")
+    } else {
+        (seconds / (60 * 60 * 24 * 365), "y")
+    };
+    format!("{value}{unit}")
 }

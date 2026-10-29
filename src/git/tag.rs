@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use anyhow::Result;
 
@@ -7,14 +7,11 @@ use crate::model::Tag;
 
 impl GitCommands {
     pub fn load_tags(&self) -> Result<Vec<Tag>> {
-        let mut tags = self.load_local_tags()?;
-        let remote_tags = self.remote_tag_names();
-
-        for tag in &mut tags {
-            tag.on_remote = remote_tags.contains(&tag.name);
-        }
-
-        Ok(tags)
+        // Remote tag presence is intentionally not queried during normal model
+        // loading. A network `ls-remote` made startup latency depend on the
+        // remote; after a real fetch/pull we preserve/merge remote state via
+        // `load_tags_after_remote_update()` instead.
+        self.load_local_tags()
     }
 
     /// Refresh tags after a successful remote update without querying every remote.
@@ -32,6 +29,24 @@ impl GitCommands {
 
     /// Load local tag refs without querying any remotes.
     fn load_local_tags(&self) -> Result<Vec<Tag>> {
+        if let Some(repo) = &self.read_repo
+            && let Ok(tags) = repo.tags()
+        {
+            return Ok(tags
+                .into_iter()
+                .map(|tag| Tag {
+                    name: tag.name,
+                    hash: tag.hash,
+                    message: tag.message,
+                    on_remote: false,
+                })
+                .collect());
+        }
+
+        self.load_local_tags_cli()
+    }
+
+    fn load_local_tags_cli(&self) -> Result<Vec<Tag>> {
         // Peel annotated tags to the commit they point at.
         let format = "%(refname:short)|%(if)%(*objectname)%(then)%(*objectname:short)%(else)%(objectname:short)%(end)|%(subject)";
         let result = self
@@ -67,65 +82,6 @@ impl GitCommands {
             .collect();
 
         Ok(tags)
-    }
-
-    /// Tag names known to exist on any configured remote (best-effort via ls-remote).
-    ///
-    /// Each remote is queried with a short wall-clock budget so an offline
-    /// remote cannot block tag loading indefinitely.
-    fn remote_tag_names(&self) -> HashSet<String> {
-        let remotes = match self.git().args(&["remote"]).run() {
-            Ok(r) if r.success => r
-                .stdout
-                .lines()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>(),
-            _ => return HashSet::new(),
-        };
-
-        let mut names = HashSet::new();
-        for remote in remotes {
-            let Some(stdout) = self.ls_remote_tags(&remote) else {
-                continue;
-            };
-            for line in stdout.lines() {
-                // "<hash>\trefs/tags/<name>" or "...\trefs/tags/<name>^{}"
-                let Some(refname) = line.split_whitespace().nth(1) else {
-                    continue;
-                };
-                let Some(name) = refname.strip_prefix("refs/tags/") else {
-                    continue;
-                };
-                let name = name.strip_suffix("^{}").unwrap_or(name);
-                if !name.is_empty() {
-                    names.insert(name.to_string());
-                }
-            }
-        }
-        names
-    }
-
-    fn ls_remote_tags(&self, remote: &str) -> Option<String> {
-        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-        let repo_path = self.repo_path.clone();
-        let remote = remote.to_string();
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        std::thread::spawn(move || {
-            let result = crate::os::cmd::CmdBuilder::git_no_optional_locks()
-                .cwd_path(&repo_path)
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .args(&["ls-remote", "--tags", &remote])
-                .run();
-            let _ = tx.send(result);
-        });
-
-        match rx.recv_timeout(TIMEOUT) {
-            Ok(Ok(result)) if result.success => Some(result.stdout),
-            _ => None,
-        }
     }
 
     pub fn create_tag(&self, name: &str, message: &str) -> Result<()> {
