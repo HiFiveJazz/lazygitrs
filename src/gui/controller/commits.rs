@@ -1544,6 +1544,7 @@ mod tests {
             name: name.to_string(),
             hash: hash.to_string(),
             recency: String::new(),
+            commit_time: 0,
             pushables: String::new(),
             pullables: String::new(),
             upstream: None,

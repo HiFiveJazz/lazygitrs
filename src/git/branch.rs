@@ -1,32 +1,35 @@
 use anyhow::Result;
 
 use super::GitCommands;
-use crate::model::Branch;
+use crate::model::{sort_branches_for_display, Branch};
 
 impl GitCommands {
     pub fn load_branches(&self) -> Result<Vec<Branch>> {
         if let Some(repo) = &self.read_repo
             && let Ok(branches) = repo.branches()
         {
-            return Ok(branches
+            let mut branches: Vec<_> = branches
                 .into_iter()
                 .map(|branch| Branch {
                     name: branch.name,
                     hash: branch.hash,
                     recency: relative_recency(branch.commit_time),
+                    commit_time: branch.commit_time,
                     pushables: branch.ahead.to_string(),
                     pullables: branch.behind.to_string(),
                     upstream: branch.upstream,
                     head: branch.head,
                 })
-                .collect());
+                .collect();
+            sort_branches_for_display(&mut branches);
+            return Ok(branches);
         }
 
         self.load_branches_cli()
     }
 
     fn load_branches_cli(&self) -> Result<Vec<Branch>> {
-        let format = "%(HEAD)|%(refname:short)|%(objectname:short)|%(upstream:short)|%(upstream:track)|%(committerdate:relative)";
+        let format = "%(HEAD)|%(refname:short)|%(objectname:short)|%(upstream:short)|%(upstream:track)|%(committerdate:unix)|%(committerdate:relative)";
         let result = self
             .git()
             .args(&[
@@ -39,7 +42,7 @@ impl GitCommands {
 
         let mut branches = Vec::new();
         for line in result.stdout.lines() {
-            let parts: Vec<&str> = line.splitn(6, '|').collect();
+            let parts: Vec<&str> = line.splitn(7, '|').collect();
             if parts.len() < 3 {
                 continue;
             }
@@ -59,8 +62,12 @@ impl GitCommands {
                 ("0".to_string(), "0".to_string())
             };
 
-            let recency = if parts.len() > 5 {
-                shorten_recency(parts[5])
+            let commit_time = parts
+                .get(5)
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or_default();
+            let recency = if parts.len() > 6 {
+                shorten_recency(parts[6])
             } else {
                 String::new()
             };
@@ -69,6 +76,7 @@ impl GitCommands {
                 name,
                 hash,
                 recency,
+                commit_time,
                 pushables,
                 pullables,
                 upstream,
@@ -76,15 +84,7 @@ impl GitCommands {
             });
         }
 
-        // Put HEAD branch first, keep the rest sorted by recency (committerdate)
-        let head_idx = branches.iter().position(|b| b.head);
-        if let Some(idx) = head_idx {
-            if idx > 0 {
-                let head_branch = branches.remove(idx);
-                branches.insert(0, head_branch);
-            }
-        }
-
+        sort_branches_for_display(&mut branches);
         Ok(branches)
     }
 

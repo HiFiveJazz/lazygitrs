@@ -2684,21 +2684,18 @@ impl Gui {
                                 branch.head = branch.name == head.branch_name;
                             }
 
-                            // The full branch refresh also puts HEAD first, but it can
-                            // finish noticeably after checkout. Reflect the confirmed
-                            // checkout immediately using the branch data we already have.
-                            if !head.branch_name.is_empty() {
-                                if let Some(index) = model
+                            // Match the exact ordering used by the eventual full branch
+                            // refresh now, while we still have the cached branch metadata.
+                            // This makes checkout one atomic visual reorder instead of moving
+                            // HEAD first and reshuffling the remaining branches a moment later.
+                            if !head.branch_name.is_empty()
+                                && model
                                     .branches
                                     .iter()
-                                    .position(|branch| branch.name == head.branch_name)
-                                {
-                                    if index != 0 {
-                                        let branch = model.branches.remove(index);
-                                        model.branches.insert(0, branch);
-                                    }
-                                    checked_out_branch_moved = true;
-                                }
+                                    .any(|branch| branch.name == head.branch_name)
+                            {
+                                crate::model::sort_branches_for_display(&mut model.branches);
+                                checked_out_branch_moved = true;
                             }
 
                             model.head_hash = head.hash;

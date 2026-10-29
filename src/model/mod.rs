@@ -9,7 +9,7 @@ pub mod tag;
 pub mod worktree;
 
 pub use author::Author;
-pub use branch::Branch;
+pub use branch::{sort_branches_for_display, Branch};
 pub use commit::{Commit, CommitStatus};
 pub use file::{File, FileStatus};
 pub use remote::{Remote, RemoteBranch};
