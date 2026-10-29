@@ -142,12 +142,24 @@ impl GitCommands {
     /// terminal/credential prompts so a missing SSH passphrase or stored
     /// credential can't hang the TUI.
     pub fn fetch_all_background(&self) -> Result<bool> {
-        let result = self
-            .git()
+        // Git's fetch progress output is not a reliable signal that refs moved.
+        // Compare the exact ref set instead so a no-op auto-fetch does zero model
+        // refresh work. If gix cannot snapshot refs, conservatively report a
+        // change and keep the existing refresh behavior.
+        let before = self.ref_snapshot().ok();
+
+        self.git()
             .args(&["fetch", "--all", "--no-write-fetch-head"])
             .env("GIT_TERMINAL_PROMPT", "0")
             .run_expecting_success()?;
-        Ok(!result.stdout.trim().is_empty() || !result.stderr.trim().is_empty())
+
+        let Some(before) = before else {
+            return Ok(true);
+        };
+        Ok(self
+            .ref_snapshot()
+            .map(|after| after != before)
+            .unwrap_or(true))
     }
 
     pub fn pull(&self) -> Result<()> {

@@ -273,8 +273,18 @@ pub(crate) enum RemoteOpKind {
     /// Unlike amend/reword/rebase, this can update the loaded commit
     /// model incrementally without rebuilding the global --all topo walk.
     LocalAppend,
+    /// HEAD was rewritten in place (amend or reword).
+    LocalRewriteHead,
     LocalHistory,
     Other,
+}
+
+struct RemoteOpCompletion {
+    head: Option<HeadState>,
+    /// Some(false) proves that no refs affecting `git log --all` changed.
+    /// None means the operation does not use ref-change short-circuiting or
+    /// the pre-operation snapshot could not be captured.
+    refs_changed: Option<bool>,
 }
 
 struct DiffJob {
@@ -676,9 +686,9 @@ pub struct Gui {
     /// Diff source for the next AI commit message generation.
     ai_commit_source: AiCommitSource,
     /// Receiver for background remote operations (push, pull, fetch).
-    remote_op_rx: mpsc::Receiver<(RemoteOpKind, Result<Option<HeadState>>)>,
+    remote_op_rx: mpsc::Receiver<(RemoteOpKind, Result<RemoteOpCompletion>)>,
     /// Sender cloned into background threads for remote operations.
-    remote_op_tx: mpsc::Sender<(RemoteOpKind, Result<Option<HeadState>>)>,
+    remote_op_tx: mpsc::Sender<(RemoteOpKind, Result<RemoteOpCompletion>)>,
     /// Async light files refresh (status-only) so Space-spam doesn't freeze.
     files_refresh_rx: Option<mpsc::Receiver<Result<Vec<crate::model::File>>>>,
     files_refresh_in_progress: bool,
@@ -2664,9 +2674,9 @@ impl Gui {
         if let Ok((kind, result)) = self.remote_op_rx.try_recv() {
             self.remote_op_label = None;
             match result {
-                Ok(head) => {
+                Ok(completion) => {
                     let was_checkout = self.pending_checkout_by_name.take().is_some();
-                    if let Some(head) = head {
+                    if let Some(head) = completion.head {
                         let mut model = self.model.lock().unwrap();
                         for branch in &mut model.branches {
                             branch.head = branch.name == head.branch_name;
@@ -2684,19 +2694,31 @@ impl Gui {
                             }
                         }
                         RemoteOpKind::Pull => {
-                            if !self.start_background_pull_refresh() {
+                            // If neither HEAD nor any ref moved, the pull cannot
+                            // have changed the global commit model.
+                            // Avoid the ~O(global graph) --all topo walk entirely.
+                            if completion.refs_changed != Some(false)
+                                && !self.start_background_pull_refresh()
+                            {
                                 // Another model refresh is already in flight. Queue the
                                 // normal refresh rather than risk leaving stale state.
                                 self.needs_refresh = true;
                             }
                         }
                         RemoteOpKind::Fetch => {
-                            if !self.start_background_fetch_refresh() {
+                            // A fetch that changed no relevant refs changed none of
+                            // the data shown by the targeted fetch refresh.
+                            if completion.refs_changed != Some(false)
+                                && !self.start_background_fetch_refresh()
+                            {
                                 self.needs_refresh = true;
                             }
                         }
                         RemoteOpKind::LocalAppend => {
                             self.request_append_refresh();
+                        }
+                        RemoteOpKind::LocalRewriteHead => {
+                            self.request_head_rewrite_refresh();
                         }
                         RemoteOpKind::LocalHistory => {
                             self.request_history_refresh();
@@ -3038,14 +3060,29 @@ impl Gui {
         let is_checkout = self.pending_checkout_by_name.is_some();
 
         std::thread::spawn(move || {
+            // Capture refs before network operations so an up-to-date pull/fetch
+            // can prove that the expensive global history refresh is unnecessary.
+            let before_refs = if matches!(kind, RemoteOpKind::Pull | RemoteOpKind::Fetch) {
+                git.ref_snapshot().ok()
+            } else {
+                None
+            };
+
             let result = op(&git).map(|()| {
-                if is_checkout {
+                let head = if is_checkout {
                     // Read on the worker, never on the UI thread. If this read
                     // fails, checkout still succeeded; the refresh is the fallback.
                     git.head_state().ok()
                 } else {
                     None
-                }
+                };
+                let refs_changed = before_refs.as_ref().map(|before| {
+                    git.ref_snapshot()
+                        .map(|after| after != *before)
+                        .unwrap_or(true)
+                });
+
+                RemoteOpCompletion { head, refs_changed }
             });
 
             let _ = tx.send((kind, result));
@@ -9058,12 +9095,13 @@ impl Gui {
             return false;
         }
 
-        let (old_head, old_first, operation_in_progress) = {
+        let (old_head, old_first, head_branch, operation_in_progress) = {
             let model = self.model.lock().unwrap();
 
             (
                 model.head_hash.clone(),
                 model.commits.first().map(|commit| commit.hash.clone()),
+                model.head_branch_name.clone(),
                 model.is_rebasing
                     || model.is_merging
                     || model.is_cherry_picking
@@ -9143,6 +9181,20 @@ impl Gui {
                 return false;
             }
 
+            // The old HEAD remains in the list, but the local HEAD/branch
+            // decoration moved to the new commit. Keep unrelated decorations
+            // (for example origin/main when it still points at the old tip).
+            if let Some(old_commit) = model.commits.first_mut() {
+                if head_branch.is_empty() {
+                    old_commit.refs.retain(|reference| reference != "HEAD");
+                } else {
+                    let head_ref = format!("HEAD -> {head_branch}");
+                    old_commit
+                        .refs
+                        .retain(|reference| reference != &head_ref && reference != &head_branch);
+                }
+            }
+
             model.prepend_commit(new_commit);
             model.head_hash = new_hash;
             model.branches = branches;
@@ -9167,6 +9219,90 @@ impl Gui {
 
     pub(crate) fn request_append_refresh(&mut self) {
         if !self.try_fast_append_refresh() {
+            self.request_history_refresh();
+        }
+    }
+
+    /// Fast refresh after rewriting only the current HEAD commit (amend/reword).
+    /// Falls back unless the old HEAD was the first visible global-history row
+    /// and the rewrite preserved its complete parent list.
+    fn try_fast_head_rewrite_refresh(&mut self) -> bool {
+        if self.refresh_in_progress
+            || self.initial_load_rx.is_some()
+            || self.commit_filter_for_load().is_some()
+        {
+            return false;
+        }
+
+        let (old_head, old_first, old_parents, operation_in_progress) = {
+            let model = self.model.lock().unwrap();
+            let first = model.commits.first();
+            (
+                model.head_hash.clone(),
+                first.map(|commit| commit.hash.clone()),
+                first
+                    .map(|commit| commit.parents.clone())
+                    .unwrap_or_default(),
+                model.is_rebasing
+                    || model.is_merging
+                    || model.is_cherry_picking
+                    || model.is_bisecting,
+            )
+        };
+
+        if operation_in_progress
+            || old_head.is_empty()
+            || old_first.as_deref() != Some(old_head.as_str())
+        {
+            return false;
+        }
+
+        let new_commit = match self.git.load_head_commit() {
+            Ok(Some(commit)) => commit,
+            _ => return false,
+        };
+        let new_hash = new_commit.hash.clone();
+        if new_hash == old_head || new_commit.parents != old_parents {
+            return false;
+        }
+
+        let files = match self.git.refresh_files_status_only() {
+            Ok(files) => files,
+            Err(_) => return false,
+        };
+        let (added, deleted) = self.git.diff_shortstat().unwrap_or((0, 0));
+        let branches = match self.git.load_branches() {
+            Ok(branches) => branches,
+            Err(_) => return false,
+        };
+
+        {
+            let mut model = self.model.lock().unwrap();
+            if model.head_hash != old_head
+                || model.commits.first().map(|commit| commit.hash.as_str())
+                    != Some(old_head.as_str())
+            {
+                return false;
+            }
+
+            if !model.replace_head_commit(new_commit) {
+                return false;
+            }
+            model.head_hash = new_hash;
+            model.branches = branches;
+            model.set_files(files);
+            model.total_additions = added;
+            model.total_deletions = deleted;
+        }
+
+        self.reset_commit_pagination();
+        self.diff_preview_cache.retain_immutable();
+        self.needs_diff_refresh = true;
+        true
+    }
+
+    pub(crate) fn request_head_rewrite_refresh(&mut self) {
+        if !self.try_fast_head_rewrite_refresh() {
             self.request_history_refresh();
         }
     }
@@ -11038,12 +11174,73 @@ mod terminal_mouse_tests {
     }
 
     #[test]
+    fn append_refresh_moves_head_decoration_without_global_reload() {
+        let repo = TempRepo::new("append-refresh");
+        let mut gui = checkout_test_gui(&repo);
+        let old_head = gui.model.lock().unwrap().head_hash.clone();
+
+        repo.git(&["commit", "--allow-empty", "-m", "appended head"]);
+        let new_head = repo.git(&["rev-parse", "HEAD"]);
+
+        assert!(gui.try_fast_append_refresh());
+
+        let model = gui.model.lock().unwrap();
+        assert_eq!(model.head_hash, new_head);
+        assert_eq!(
+            model.commits.first().map(|commit| commit.hash.as_str()),
+            Some(new_head.as_str())
+        );
+        let old = model
+            .commits
+            .iter()
+            .find(|commit| commit.hash == old_head)
+            .expect("old HEAD stays in loaded history");
+        assert!(
+            !old.refs
+                .iter()
+                .any(|reference| reference == "HEAD -> feature")
+        );
+    }
+
+    #[test]
+    fn head_rewrite_refresh_replaces_only_first_commit() {
+        let repo = TempRepo::new("head-rewrite-refresh");
+        let mut gui = checkout_test_gui(&repo);
+        let old_head = gui.model.lock().unwrap().head_hash.clone();
+        let old_len = gui.model.lock().unwrap().commits.len();
+
+        repo.git(&["commit", "--amend", "-m", "rewritten head"]);
+        let new_head = repo.git(&["rev-parse", "HEAD"]);
+        assert_ne!(old_head, new_head);
+
+        assert!(gui.try_fast_head_rewrite_refresh());
+
+        let model = gui.model.lock().unwrap();
+        assert_eq!(model.head_hash, new_head);
+        assert_eq!(
+            model.commits.first().map(|commit| commit.hash.as_str()),
+            Some(new_head.as_str())
+        );
+        assert_eq!(model.commits.len(), old_len);
+        assert_eq!(model.commits[0].name, "rewritten head");
+    }
+
+    #[test]
     fn fetch_uses_targeted_background_refresh() {
         let repo = TempRepo::new("fetch-targeted-refresh");
         let mut gui = checkout_test_gui(&repo);
 
-        gui.start_remote_op(RemoteOpKind::Fetch, "Fetch", "", |_| Ok(()));
-        wait_for_test_checkout(&mut gui);
+        gui.remote_op_label = Some("Fetching".into());
+        gui.remote_op_tx
+            .send((
+                RemoteOpKind::Fetch,
+                Ok(RemoteOpCompletion {
+                    head: None,
+                    refs_changed: Some(true),
+                }),
+            ))
+            .unwrap();
+        gui.receive_remote_op_results();
 
         assert!(!gui.needs_refresh);
         assert!(gui.refresh_in_progress);
@@ -11085,6 +11282,32 @@ mod terminal_mouse_tests {
     }
 
     #[test]
+    fn no_op_fetch_skips_model_refresh() {
+        let repo = TempRepo::new("fetch-no-op-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.start_remote_op(RemoteOpKind::Fetch, "Fetch", "", |_| Ok(()));
+        wait_for_test_checkout(&mut gui);
+
+        assert!(!gui.needs_refresh);
+        assert!(!gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_none());
+    }
+
+    #[test]
+    fn no_op_pull_skips_model_refresh() {
+        let repo = TempRepo::new("pull-no-op-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.start_remote_op(RemoteOpKind::Pull, "Pull", "", |_| Ok(()));
+        wait_for_test_checkout(&mut gui);
+
+        assert!(!gui.needs_refresh);
+        assert!(!gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_none());
+    }
+
+    #[test]
     fn auto_fetch_uses_targeted_background_refresh() {
         let repo = TempRepo::new("auto-fetch-targeted-refresh");
         let mut gui = checkout_test_gui(&repo);
@@ -11112,8 +11335,17 @@ mod terminal_mouse_tests {
         let repo = TempRepo::new("pull-targeted-refresh");
         let mut gui = checkout_test_gui(&repo);
 
-        gui.start_remote_op(RemoteOpKind::Pull, "Pull", "", |_| Ok(()));
-        wait_for_test_checkout(&mut gui);
+        gui.remote_op_label = Some("Pulling".into());
+        gui.remote_op_tx
+            .send((
+                RemoteOpKind::Pull,
+                Ok(RemoteOpCompletion {
+                    head: None,
+                    refs_changed: Some(true),
+                }),
+            ))
+            .unwrap();
+        gui.receive_remote_op_results();
 
         // Pull should start the targeted streaming refresh instead of queueing
         // the normal full-model refresh.
@@ -11146,7 +11378,13 @@ mod terminal_mouse_tests {
         gui.remote_op_label = Some("Checking out".into());
         gui.pending_checkout_by_name = Some("main".into());
         gui.remote_op_tx
-            .send((RemoteOpKind::Other, Ok(None)))
+            .send((
+                RemoteOpKind::Other,
+                Ok(RemoteOpCompletion {
+                    head: None,
+                    refs_changed: None,
+                }),
+            ))
             .unwrap();
         gui.receive_remote_op_results();
         assert!(matches!(gui.popup, PopupState::None));

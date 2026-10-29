@@ -213,7 +213,7 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
                     let hash = hash.clone();
                     if is_head {
                         gui.start_remote_op(
-                            RemoteOpKind::LocalHistory,
+                            RemoteOpKind::LocalRewriteHead,
                             "Reword",
                             "Rewording commit...",
                             move |git| {
@@ -735,8 +735,16 @@ fn create_fixup_commit(gui: &mut Gui) -> Result<()> {
             title: "Create fixup commit".to_string(),
             message: format!("Create fixup commit for {}?", short),
             on_confirm: Box::new(move |gui| {
-                gui.git.create_fixup_commit(&hash)?;
-                gui.needs_refresh = true;
+                let hash = hash.clone();
+                gui.start_remote_op(
+                    RemoteOpKind::LocalAppend,
+                    "Fixup",
+                    "Creating fixup commit...",
+                    move |git| {
+                        git.create_fixup_commit(&hash)?;
+                        Ok(())
+                    },
+                );
                 Ok(())
             }),
         };
@@ -756,7 +764,7 @@ fn amend_to_commit(gui: &mut Gui) -> Result<()> {
                 message: "Amend staged changes to HEAD commit?".to_string(),
                 on_confirm: Box::new(|gui| {
                     gui.start_remote_op(
-                        RemoteOpKind::LocalHistory,
+                        RemoteOpKind::LocalRewriteHead,
                         "Amend",
                         "Amending commit...",
                         |git| {

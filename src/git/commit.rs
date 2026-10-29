@@ -313,16 +313,11 @@ impl GitCommands {
     }
 
     /// Return the first parent of a commit, or None for a root commit.
+    ///
+    /// This is a hot post-commit query, so use the persistent gix object store
+    /// rather than spawning `git rev-parse`.
     pub fn first_parent_hash(&self, hash: &str) -> Result<Option<String>> {
-        let rev = format!("{hash}^1");
-        let result = self.git().args(&["rev-parse", &rev]).run()?;
-
-        if !result.success {
-            return Ok(None);
-        }
-
-        let parent = result.stdout.trim().to_string();
-        Ok((!parent.is_empty()).then_some(parent))
+        self.read_first_parent_hash(hash)
     }
 
     /// Load commits reachable from any of the given branches.
