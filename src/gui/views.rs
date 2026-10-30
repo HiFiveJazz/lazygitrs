@@ -3024,6 +3024,7 @@ fn render_status_bar(
 ) {
     let mut hints: Vec<(&str, &str)> = Vec::new();
     let mut emphasized: Vec<&str> = Vec::new();
+    let active = ctx_mgr.active();
     let open_log_menu_key = format_key_hint(&keybindings.commits.open_log_menu);
     let fold_key = format_key_hint(&keybindings.universal.fold_directory);
     let shell_key = format_key_hint(&keybindings.universal.custom_command_prompt);
@@ -3046,7 +3047,7 @@ fn render_status_bar(
         // Revert-related keys are grouped together at the front so users see
         // enter right next to its cycle keys. enter itself only appears when a
         // hunk is actually selected (pressing it otherwise is a no-op).
-        if ctx_mgr.active() == ContextId::Files {
+        if active == ContextId::Files {
             let has_selection = diff_view.selected_revert_hunk.is_some();
             let has_undo = !diff_view.revert_undo_stack.is_empty();
             let mut idx = 0;
@@ -3075,7 +3076,7 @@ fn render_status_bar(
             DiffViewLayout::SideBySide => "unified view",
             DiffViewLayout::Unified => "split view",
         };
-        match ctx_mgr.active() {
+        match active {
             ContextId::Files => {
                 hints.extend([
                     ("c", "commit"),
