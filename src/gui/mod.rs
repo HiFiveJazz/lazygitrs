@@ -9817,20 +9817,7 @@ fn auto_wrap_textarea(textarea: &mut tui_textarea::TextArea<'static>, wrap_width
 
 /// Read text from the system clipboard.
 fn read_clipboard() -> Option<String> {
-    let cmd = if cfg!(target_os = "macos") {
-        "pbpaste"
-    } else if cfg!(target_os = "windows") {
-        "powershell.exe -command Get-Clipboard"
-    } else {
-        "xclip -selection clipboard -o"
-    };
-
-    std::process::Command::new("sh")
-        .args(["-c", cmd])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    Platform::read_from_clipboard().ok()
 }
 
 fn matches_key(key: KeyEvent, binding: &str) -> bool {
