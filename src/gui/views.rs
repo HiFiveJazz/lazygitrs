@@ -3095,6 +3095,12 @@ fn render_status_bar(
                 if has_active_filters {
                     hints.push(("esc", "reset filter"));
                 }
+                // Keep branch filtering near the front: it is a primary commit-list
+                // navigation action and should not disappear merely because later
+                // contextual hints do not fit in a narrower terminal.
+                if !open_log_menu_key.is_empty() {
+                    hints.push((open_log_menu_key.as_str(), "filter branch"));
+                }
                 if has_copied_commits {
                     hints.push(("V", "paste (cherry-pick)"));
                 }
@@ -3102,16 +3108,13 @@ fn render_status_bar(
                     ("C", "copy (cherry-pick)"),
                     ("d", "drop"),
                     ("p", "patch"),
-                    ("<c-j>", "scroll preview down"),
-                    ("<c-k>", "scroll preview up"),
+                    ("<c-j>", "scroll down"),
+                    ("<c-k>", "scroll up"),
                     ("r", "reword"),
                     ("g", "reset"),
                     ("t", "revert"),
                     ("\\", view_layout_hint),
                 ]);
-                if !open_log_menu_key.is_empty() {
-                    hints.push((open_log_menu_key.as_str(), "filter branch"));
-                }
             }
             ContextId::Stash => {
                 hints.extend([
