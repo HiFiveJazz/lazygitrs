@@ -134,7 +134,7 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
 
     // Open commit in browser
     if key.code == crossterm::event::KeyCode::Char('o') {
-        return open_commit_in_browser_menu(gui);
+        return open_commit_in_browser(gui);
     }
 
     // Copy to clipboard menu
@@ -875,33 +875,23 @@ fn checkout_branch_key(index: usize) -> Option<String> {
     (index < 9).then(|| (index + 1).to_string())
 }
 
-fn open_commit_in_browser_menu(gui: &mut Gui) -> Result<()> {
+fn open_commit_in_browser(gui: &mut Gui) -> Result<()> {
     let selected = gui.context_mgr.selected_active();
     let model = gui.model.lock().unwrap();
     if let Some(commit) = model.commits.get(selected) {
         let hash = commit.hash.clone();
         drop(model);
-        open_commit_in_browser_menu_for(gui, hash);
+        return open_commit_in_browser_for(gui, hash);
     }
     Ok(())
 }
 
-pub fn open_commit_in_browser_menu_for(gui: &mut Gui, hash: String) {
-    gui.popup = PopupState::Menu {
-        title: "Open in browser".to_string(),
-        items: vec![MenuItem {
-            label: "Open commit URL".to_string(),
-            description: String::new(),
-            key: Some("c".to_string()),
-            action: Some(Box::new(move |gui| {
-                let url = gui.git.get_commit_url(&hash)?;
-                Platform::open_file(&url)?;
-                Ok(())
-            })),
-        }],
-        selected: 0,
-        loading_index: None,
-    };
+pub fn open_commit_in_browser_for(gui: &mut Gui, hash: String) -> Result<()> {
+    let url = gui
+        .git
+        .get_commit_url(&hash, &gui.config.user_config.services)?;
+    Platform::open_file(&url)?;
+    Ok(())
 }
 
 fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
@@ -994,7 +984,10 @@ pub fn copy_commit_to_clipboard_menu_for(
                     description: String::new(),
                     key: Some("u".to_string()),
                     action: Some(Box::new(move |gui| {
-                        if let Ok(url) = gui.git.get_commit_url(&hash_for_url) {
+                        if let Ok(url) = gui
+                            .git
+                            .get_commit_url(&hash_for_url, &gui.config.user_config.services)
+                        {
                             Platform::copy_to_clipboard(&url)?;
                         }
                         Ok(())

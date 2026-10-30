@@ -47,7 +47,7 @@ fn open_in_browser(gui: &mut Gui) -> Result<()> {
     if let Some(commit) = model.reflog_commits.get(selected) {
         let hash = commit.hash.clone();
         drop(model);
-        super::commits::open_commit_in_browser_menu_for(gui, hash);
+        return super::commits::open_commit_in_browser_for(gui, hash);
     }
     Ok(())
 }

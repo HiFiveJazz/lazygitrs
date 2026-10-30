@@ -1,4 +1,6 @@
-use anyhow::Result;
+use std::collections::HashMap;
+
+use anyhow::{Result, anyhow};
 
 use super::GitCommands;
 use crate::model::{Remote, RemoteBranch};
@@ -261,26 +263,48 @@ impl GitCommands {
         Ok(())
     }
 
-    /// Build a web URL for a commit from the origin remote URL.
-    pub fn get_commit_url(&self, hash: &str) -> Result<String> {
-        let base = self.get_repo_url()?;
-        Ok(format!("{}/commit/{}", base, hash))
+    /// Build a provider-aware web URL for a commit from the origin remote URL.
+    ///
+    /// `services` mirrors lazygit's services map (`gitDomain: provider:webDomain`)
+    /// so self-hosted GitLab/Gitea/etc. instances can override auto-detection.
+    pub fn get_commit_url(
+        &self,
+        hash: &str,
+        services: &HashMap<String, String>,
+    ) -> Result<String> {
+        let remote_url = self.origin_remote_url()?;
+        commit_web_url(&remote_url, hash, services)
+            .ok_or_else(|| anyhow!("unsupported remote URL: {remote_url}"))
     }
 
-    /// Get the HTTPS URL for the origin remote repository.
+    /// Get a browser-friendly URL for the origin remote repository.
     pub fn get_repo_url(&self) -> Result<String> {
+        self.get_repo_url_with_services(&HashMap::new())
+    }
+
+    /// Get a browser-friendly repository URL, honoring self-hosted service
+    /// mappings from the user's lazygit-compatible `services` config.
+    pub fn get_repo_url_with_services(
+        &self,
+        services: &HashMap<String, String>,
+    ) -> Result<String> {
+        let remote_url = self.origin_remote_url()?;
+        repo_web_url(&remote_url, services)
+            .ok_or_else(|| anyhow!("unsupported remote URL: {remote_url}"))
+    }
+
+    fn origin_remote_url(&self) -> Result<String> {
         if let Some(repo) = &self.read_repo
             && let Ok(Some(remote_url)) = repo.origin_url()
         {
-            return Ok(remote_url_to_https(&remote_url));
+            return Ok(remote_url);
         }
 
         let result = self
             .git()
             .args(&["remote", "get-url", "origin"])
             .run_expecting_success()?;
-        let remote_url = result.stdout.trim().to_string();
-        Ok(remote_url_to_https(&remote_url))
+        Ok(result.stdout.trim().to_string())
     }
 
     /// Build a PR creation URL for a branch (GitHub compare URL).
@@ -463,19 +487,185 @@ impl GitCommands {
     }
 }
 
-/// Convert a git remote URL (SSH or HTTPS) to a plain HTTPS base URL.
-fn remote_url_to_https(url: &str) -> String {
-    let mut u = url.to_string();
-    // git@github.com:user/repo.git -> https://github.com/user/repo
-    if u.starts_with("git@") {
-        u = u.replacen("git@", "https://", 1);
-        u = u.replacen(':', "/", 1);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebProvider {
+    GithubLike,
+    Gitlab,
+    Bitbucket,
+    Cgit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteLocation {
+    host: String,
+    web_authority: String,
+    web_scheme: String,
+    path: String,
+}
+
+/// Turn common Git transport URLs into enough information to construct a web URL.
+/// SSH/git transports intentionally switch to HTTPS; HTTP(S) remotes keep their
+/// original scheme so local/self-hosted HTTP instances continue to work.
+fn parse_remote_location(url: &str) -> Option<RemoteLocation> {
+    let url = url.trim().trim_end_matches('/');
+    if url.is_empty() {
+        return None;
     }
-    // Strip .git suffix
-    if u.ends_with(".git") {
-        u.truncate(u.len() - 4);
+
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let (authority, path) = rest.split_once('/')?;
+        let authority = authority.rsplit('@').next().unwrap_or(authority);
+        let path = path.trim_start_matches('/').to_string();
+        if authority.is_empty() || path.is_empty() {
+            return None;
+        }
+
+        let (host, web_authority) = match scheme {
+            "http" | "https" => {
+                let host = authority_host(authority).to_string();
+                (host, authority.to_string())
+            }
+            "ssh" | "git" | "git+ssh" => {
+                let host = authority_host(authority).to_string();
+                (host.clone(), host)
+            }
+            _ => return None,
+        };
+        if host.is_empty() {
+            return None;
+        }
+
+        let web_scheme = if matches!(scheme, "http" | "https") {
+            scheme.to_string()
+        } else {
+            "https".to_string()
+        };
+
+        return Some(RemoteLocation {
+            host,
+            web_authority,
+            web_scheme,
+            path,
+        });
     }
-    u.trim_end_matches('/').to_string()
+
+    // SCP-style SSH URL: git@host:owner/repo.git (also supports host:path).
+    let (authority, path) = url.split_once(':')?;
+    if authority.contains('/') || path.is_empty() {
+        return None;
+    }
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    if host.is_empty() {
+        return None;
+    }
+
+    Some(RemoteLocation {
+        host: host.to_string(),
+        web_authority: host.to_string(),
+        web_scheme: "https".to_string(),
+        path: path.trim_start_matches('/').to_string(),
+    })
+}
+
+fn authority_host(authority: &str) -> &str {
+    if authority.starts_with('[') {
+        return authority
+            .split_once(']')
+            .map(|(host, _)| host.trim_start_matches('['))
+            .unwrap_or(authority);
+    }
+    authority.split_once(':').map(|(host, _)| host).unwrap_or(authority)
+}
+
+fn auto_provider(host: &str) -> WebProvider {
+    let host = host.to_ascii_lowercase();
+    if host == "git.kernel.org" {
+        WebProvider::Cgit
+    } else if host == "gitlab.com" || host.contains("gitlab") {
+        WebProvider::Gitlab
+    } else if host == "bitbucket.org" {
+        WebProvider::Bitbucket
+    } else {
+        // GitHub, Gitea, Forgejo, Codeberg, SourceHut and many lightweight
+        // self-hosted forges use /commit/<oid>. Unknown hosts get this common
+        // convention, while `services` can override providers that differ.
+        WebProvider::GithubLike
+    }
+}
+
+fn configured_service(
+    host: &str,
+    services: &HashMap<String, String>,
+) -> Option<(WebProvider, String)> {
+    let value = services.get(host)?;
+    let (provider, web_domain) = value.split_once(':')?;
+    let provider = match provider.trim().to_ascii_lowercase().as_str() {
+        "github" | "gitea" | "codeberg" | "forgejo" | "gogs" => WebProvider::GithubLike,
+        "gitlab" => WebProvider::Gitlab,
+        "bitbucket" => WebProvider::Bitbucket,
+        "cgit" => WebProvider::Cgit,
+        _ => return None,
+    };
+    let web_domain = web_domain.trim().trim_end_matches('/');
+    if web_domain.is_empty() {
+        return None;
+    }
+    Some((provider, web_domain.to_string()))
+}
+
+fn web_root(location: &RemoteLocation, configured_domain: Option<&str>) -> String {
+    if let Some(domain) = configured_domain {
+        if domain.starts_with("http://") || domain.starts_with("https://") {
+            return domain.trim_end_matches('/').to_string();
+        }
+        return format!("https://{}", domain.trim_end_matches('/'));
+    }
+    format!("{}://{}", location.web_scheme, location.web_authority)
+}
+
+fn repo_web_url(url: &str, services: &HashMap<String, String>) -> Option<String> {
+    let location = parse_remote_location(url)?;
+    let configured = configured_service(&location.host, services);
+    let provider = configured
+        .as_ref()
+        .map(|(provider, _)| *provider)
+        .unwrap_or_else(|| auto_provider(&location.host));
+    let root = web_root(
+        &location,
+        configured.as_ref().map(|(_, domain)| domain.as_str()),
+    );
+
+    let mut path = location.path.trim_matches('/').to_string();
+    if provider == WebProvider::Cgit {
+        // kernel.org's cgit web path includes the .git suffix even though many
+        // clone URLs/tools normalize it away.
+        if location.host == "git.kernel.org" && !path.ends_with(".git") {
+            path.push_str(".git");
+        }
+    } else if path.ends_with(".git") {
+        path.truncate(path.len() - 4);
+    }
+
+    Some(format!("{}/{}", root.trim_end_matches('/'), path))
+}
+
+fn commit_web_url(
+    url: &str,
+    hash: &str,
+    services: &HashMap<String, String>,
+) -> Option<String> {
+    let location = parse_remote_location(url)?;
+    let provider = configured_service(&location.host, services)
+        .map(|(provider, _)| provider)
+        .unwrap_or_else(|| auto_provider(&location.host));
+    let base = repo_web_url(url, services)?;
+
+    Some(match provider {
+        WebProvider::GithubLike => format!("{base}/commit/{hash}"),
+        WebProvider::Gitlab => format!("{base}/-/commit/{hash}"),
+        WebProvider::Bitbucket => format!("{base}/commits/{hash}"),
+        WebProvider::Cgit => format!("{base}/commit/?id={hash}"),
+    })
 }
 
 fn gh_url_from_result(result: &CmdResult) -> Option<String> {
@@ -605,6 +795,61 @@ fn github_pr_head_selectors(branch: &str, repos: &[GithubRemoteRepo]) -> Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_browser_urls_for_common_git_transports_and_forges() {
+        let services = HashMap::new();
+
+        assert_eq!(
+            repo_web_url("git@github.com:owner/repo.git", &services),
+            Some("https://github.com/owner/repo".to_string())
+        );
+        assert_eq!(
+            commit_web_url(
+                "ssh://git@gitlab.com/group/project.git",
+                "deadbeef",
+                &services,
+            ),
+            Some("https://gitlab.com/group/project/-/commit/deadbeef".to_string())
+        );
+        assert_eq!(
+            commit_web_url(
+                "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+                "4feafef66a0f7b071e8aea653ca441b94769296f",
+                &services,
+            ),
+            Some(
+                "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=4feafef66a0f7b071e8aea653ca441b94769296f"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            commit_web_url(
+                "https://bitbucket.org/workspace/repo.git",
+                "deadbeef",
+                &services,
+            ),
+            Some("https://bitbucket.org/workspace/repo/commits/deadbeef".to_string())
+        );
+    }
+
+    #[test]
+    fn services_override_provider_and_web_domain_for_self_hosted_forges() {
+        let mut services = HashMap::new();
+        services.insert(
+            "git.internal.example".to_string(),
+            "gitlab:code.example.com".to_string(),
+        );
+
+        assert_eq!(
+            commit_web_url(
+                "ssh://git@git.internal.example/team/project.git",
+                "cafebabe",
+                &services,
+            ),
+            Some("https://code.example.com/team/project/-/commit/cafebabe".to_string())
+        );
+    }
 
     #[test]
     fn parses_github_repo_slugs_from_common_remote_urls() {

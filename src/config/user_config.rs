@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
@@ -13,6 +14,7 @@ pub struct UserConfig {
     pub refresher: RefresherConfig,
     pub keybinding: KeybindingConfig,
     pub os: OsConfig,
+    pub services: HashMap<String, String>,
     #[serde(rename = "customCommands")]
     pub custom_commands: Vec<CustomCommand>,
 }
@@ -25,6 +27,7 @@ impl Default for UserConfig {
             refresher: RefresherConfig::default(),
             keybinding: KeybindingConfig::default(),
             os: OsConfig::default(),
+            services: HashMap::new(),
             custom_commands: Vec::new(),
         }
     }
