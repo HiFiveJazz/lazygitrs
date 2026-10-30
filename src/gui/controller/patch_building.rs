@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::gui::Gui;
 use crate::gui::popup::{MenuItem, MessageKind, PopupState};
 
-/// Show patch options menu (from commits panel, <c-p>).
+/// Show the custom patch builder (legacy/global <c-p>, also reachable from Commit → Patch).
 pub fn show_patch_menu(gui: &mut Gui) -> Result<()> {
     if gui.patch_building.active {
         // Already in patch building mode — show apply options

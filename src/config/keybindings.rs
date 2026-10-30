@@ -172,8 +172,8 @@ impl Default for UniversalKeybinding {
             open_file: "o".into(),
             scroll_up_main: "<pgup>".into(),
             scroll_down_main: "<pgdown>".into(),
-            scroll_up_main_alt1: "K".into(),
-            scroll_down_main_alt1: "J".into(),
+            scroll_up_main_alt1: "<c-k>".into(),
+            scroll_down_main_alt1: "<c-j>".into(),
             undo: "z".into(),
             redo: "<c-z>".into(),
             filtering_menu: "<c-s>".into(),
@@ -332,6 +332,8 @@ pub struct CommitsKeybinding {
     pub amend_to_commit: String,
     #[serde(rename = "pickCommit")]
     pub pick_commit: String,
+    #[serde(rename = "patchOptions")]
+    pub patch_options: String,
     #[serde(rename = "revertCommit")]
     pub revert_commit: String,
     #[serde(rename = "cherryPickCopy")]
@@ -362,10 +364,11 @@ impl Default for CommitsKeybinding {
             mark_commit_as_fixup: "f".into(),
             create_fixup_commit: "F".into(),
             squash_above_commits: "S".into(),
-            move_down_commit: "<c-j>".into(),
-            move_up_commit: "<c-k>".into(),
+            move_down_commit: "}".into(),
+            move_up_commit: "{".into(),
             amend_to_commit: "A".into(),
-            pick_commit: "p".into(),
+            pick_commit: "d".into(),
+            patch_options: "p".into(),
             revert_commit: "t".into(),
             cherry_pick_copy: "C".into(),
             paste_commits: "V".into(),
@@ -470,6 +473,26 @@ pub fn parse_key(s: &str) -> Option<KeyEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commit_patch_and_preview_scroll_defaults_do_not_collide() {
+        let config = KeybindingConfig::default();
+        assert_eq!(config.commits.pick_commit, "d");
+        assert_eq!(config.commits.patch_options, "p");
+        assert_eq!(config.commits.move_up_commit, "{");
+        assert_eq!(config.commits.move_down_commit, "}");
+        assert_eq!(config.universal.scroll_up_main_alt1, "<c-k>");
+        assert_eq!(config.universal.scroll_down_main_alt1, "<c-j>");
+
+        assert_eq!(
+            parse_key(&config.commits.patch_options),
+            Some(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_key(&config.universal.scroll_down_main_alt1),
+            Some(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
+        );
+    }
 
     #[test]
     fn custom_command_prompt_defaults_when_omitted() {

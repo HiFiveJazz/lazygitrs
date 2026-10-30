@@ -80,7 +80,7 @@ fn context_claims_global_repo_key(
     key: KeyEvent,
     kb: &crate::config::KeybindingConfig,
 ) -> bool {
-    matches!(active, ContextId::Commits) && matches_key(key, &kb.commits.pick_commit)
+    matches!(active, ContextId::Commits) && matches_key(key, &kb.commits.patch_options)
         || matches!(active, ContextId::Tags) && key.code == KeyCode::Char('P')
 }
 
@@ -4090,9 +4090,9 @@ impl Gui {
         let kb = self.config.user_config.keybinding.clone();
 
         // Context-specific bindings take precedence over universal push/pull.
-        // In particular, the commits view uses `p` for Pick / Drop commit, while
-        // universal pull also defaults to `p`.  Let the commits controller see
-        // that key instead of consuming it here.  Likewise, `P` in Tags pushes
+        // In particular, the commits view uses `p` for Patch actions, while
+        // universal pull also defaults to `p`. Let the commits controller see
+        // that key instead of consuming it here. Likewise, `P` in Tags pushes
         // the selected tag rather than the current branch.
         if context_claims_global_repo_key(self.context_mgr.active(), key, &kb) {
             return Ok(false);
@@ -6547,11 +6547,11 @@ impl Gui {
                 ),
                 CommandEntry::keybinding(
                     kb.universal.scroll_up_main_alt1.clone(),
-                    "Scroll diff up".into(),
+                    "Scroll preview up".into(),
                 ),
                 CommandEntry::keybinding(
                     kb.universal.scroll_down_main_alt1.clone(),
-                    "Scroll diff down".into(),
+                    "Scroll preview down".into(),
                 ),
                 CommandEntry::keybinding(kb.universal.scroll_left.clone(), "Scroll left".into()),
                 CommandEntry::keybinding(kb.universal.scroll_right.clone(), "Scroll right".into()),
@@ -6574,7 +6574,7 @@ impl Gui {
                 ),
                 CommandEntry::keybinding(
                     kb.universal.create_patch_options_menu.clone(),
-                    "Patch options".into(),
+                    "Custom patch builder".into(),
                 ),
                 CommandEntry::keybinding("{/}".into(), "Previous/next hunk".into()),
                 CommandEntry::keybinding(";".into(), "Toggle command log".into()),
@@ -6781,7 +6781,11 @@ impl Gui {
                     ),
                     CommandEntry::keybinding(
                         kb.commits.pick_commit.clone(),
-                        "Pick / Drop commit".into(),
+                        "Drop commit".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.patch_options.clone(),
+                        "Patch actions".into(),
                     ),
                     CommandEntry::keybinding(
                         kb.commits.revert_commit.clone(),
@@ -10326,9 +10330,9 @@ mod terminal_mouse_tests {
     use std::sync::atomic::AtomicUsize;
 
     #[test]
-    fn contextual_commit_pick_wins_over_global_pull() {
+    fn contextual_commit_patch_wins_over_global_pull() {
         let kb = crate::config::KeybindingConfig::default();
-        let key = crate::config::keybindings::parse_key(&kb.commits.pick_commit).unwrap();
+        let key = crate::config::keybindings::parse_key(&kb.commits.patch_options).unwrap();
         assert!(context_claims_global_repo_key(ContextId::Commits, key, &kb));
         assert!(!context_claims_global_repo_key(ContextId::Files, key, &kb));
     }

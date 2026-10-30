@@ -3100,6 +3100,10 @@ fn render_status_bar(
                 }
                 hints.extend([
                     ("C", "copy (cherry-pick)"),
+                    ("d", "drop"),
+                    ("p", "patch"),
+                    ("<c-j>", "scroll preview down"),
+                    ("<c-k>", "scroll preview up"),
                     ("r", "reword"),
                     ("g", "reset"),
                     ("t", "revert"),

@@ -87,6 +87,11 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return fixup_commit(gui);
     }
 
+    // Patch actions
+    if matches_key(key, &keybindings.commits.patch_options) {
+        return show_patch_actions_menu(gui);
+    }
+
     // Drop commit
     if matches_key(key, &keybindings.commits.pick_commit) {
         return drop_commit(gui);
@@ -120,11 +125,6 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
     // Checkout commit
     if matches_key(key, &keybindings.commits.checkout_commit) {
         return checkout_commit(gui);
-    }
-
-    // Drop commit(s) — opens interactive rebase planner with Drop pre-marked
-    if key.code == crossterm::event::KeyCode::Char('d') {
-        return apply_action_to_selection(gui, RebaseAction::Drop);
     }
 
     // Edit commit(s) — opens interactive rebase planner with Edit pre-marked
@@ -1029,6 +1029,113 @@ pub fn open_commit_in_browser_for(gui: &mut Gui, hash: String) -> Result<()> {
         .git
         .get_commit_url(&hash, &gui.config.user_config.services)?;
     Platform::open_file(&url)?;
+    Ok(())
+}
+
+fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    let Some(commit) = model.commits.get(selected) else {
+        return Ok(());
+    };
+    let hash = commit.hash.clone();
+    let short = commit.short_hash().to_string();
+    drop(model);
+
+    let preview_hash = hash.clone();
+    let copy_hash = hash.clone();
+    let save_hash = hash.clone();
+
+    gui.popup = PopupState::Menu {
+        title: format!("Patch actions — {short}"),
+        items: vec![
+            MenuItem {
+                label: "Preview patch".to_string(),
+                description: "Show git format-patch output for this commit".to_string(),
+                key: Some("v".to_string()),
+                action: Some(Box::new(move |gui| {
+                    let patch = gui
+                        .git
+                        .git_cmd()
+                        .args(&["format-patch", "-1", "--stdout", &preview_hash])
+                        .run_expecting_success()?
+                        .stdout;
+                    gui.popup = PopupState::CommandOutput {
+                        title: "Patch preview".to_string(),
+                        message: patch,
+                        kind: MessageKind::Info,
+                        scroll: 0,
+                    };
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Copy patch".to_string(),
+                description: "Copy git format-patch output to the clipboard".to_string(),
+                key: Some("y".to_string()),
+                action: Some(Box::new(move |gui| {
+                    let patch = gui
+                        .git
+                        .git_cmd()
+                        .args(&["format-patch", "-1", "--stdout", &copy_hash])
+                        .run_expecting_success()?
+                        .stdout;
+                    Platform::copy_to_clipboard(&patch)?;
+                    gui.popup = PopupState::Message {
+                        title: "Patch copied".to_string(),
+                        message: "Patch copied to clipboard.".to_string(),
+                        kind: MessageKind::Info,
+                    };
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Save patch to repository root".to_string(),
+                description: "Write a numbered .patch file with git format-patch".to_string(),
+                key: Some("s".to_string()),
+                action: Some(Box::new(move |gui| {
+                    let result = gui
+                        .git
+                        .git_cmd()
+                        .args(&[
+                            "format-patch",
+                            "-1",
+                            "--output-directory",
+                            ".",
+                            &save_hash,
+                        ])
+                        .run_expecting_success()?;
+                    let path = result.stdout.trim();
+                    gui.popup = PopupState::Message {
+                        title: "Patch saved".to_string(),
+                        message: if path.is_empty() {
+                            "Patch written to the repository root.".to_string()
+                        } else {
+                            format!("Wrote {path}")
+                        },
+                        kind: MessageKind::Info,
+                    };
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Build custom patch".to_string(),
+                description: "Select files from this commit and apply them to the index".to_string(),
+                key: Some("b".to_string()),
+                action: Some(Box::new(move |gui| {
+                    super::patch_building::show_patch_menu(gui)
+                })),
+            },
+            MenuItem {
+                label: "Email patch".to_string(),
+                description: "git send-email integration is not implemented yet".to_string(),
+                key: None,
+                action: None,
+            },
+        ],
+        selected: 0,
+        loading_index: None,
+    };
     Ok(())
 }
 
