@@ -80,22 +80,31 @@ fn apply_patch(gui: &mut Gui, reverse: bool) -> Result<()> {
     let commit = gui.patch_building.source_commit.clone();
     let files: Vec<String> = gui.patch_building.selected_files.iter().cloned().collect();
 
+    // Build one patch for the full selection. The previous implementation ran
+    // one `git diff` + one `git apply` per file and silently ignored apply
+    // failures, which was both slow and capable of leaving a partially applied
+    // selection. `git apply` without --reject is atomic across this combined
+    // patch, so either all selected paths apply or none do.
+    let parent = format!("{}^", commit);
+    let mut diff = gui.git.git_cmd().args(&["diff", &parent, &commit, "--"]);
     for file in &files {
-        let mut cmd = gui.git.git_cmd();
-        cmd = cmd.args(&["diff", &format!("{}^", commit), &commit, "--", file]);
-        let diff_result = cmd.run()?;
-
-        if diff_result.success && !diff_result.stdout.is_empty() {
-            let mut apply = gui.git.git_cmd();
-            apply = apply.arg("apply");
-            if reverse {
-                apply = apply.arg("--reverse");
-            }
-            apply = apply.arg("--cached").arg("-");
-            apply = apply.stdin(diff_result.stdout);
-            let _ = apply.run(); // Best effort
-        }
+        diff = diff.arg(file);
     }
+    let diff_result = diff.run_expecting_success()?;
+    if diff_result.stdout.is_empty() {
+        gui.patch_building.exit();
+        return Ok(());
+    }
+
+    let mut apply = gui.git.git_cmd().arg("apply");
+    if reverse {
+        apply = apply.arg("--reverse");
+    }
+    apply
+        .arg("--cached")
+        .arg("-")
+        .stdin(diff_result.stdout)
+        .run_expecting_success()?;
 
     gui.patch_building.exit();
     gui.needs_refresh = true;
