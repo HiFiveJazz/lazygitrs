@@ -379,10 +379,6 @@ pub struct DiffViewState {
     smooth_scroll_from: f64,
     smooth_scroll_target: f64,
     smooth_scroll_started_at: Option<Instant>,
-    /// Show a lightweight focus marker on the diff border after keyboard
-    /// preview scrolling has been used. This is intentionally visual-only: it
-    /// does not change hunk/search/text-selection semantics.
-    preview_cursor_visible: bool,
     pub horizontal_scroll: usize,
     pub lines: Vec<DiffLine>,
     pub hunk_starts: Vec<usize>,
@@ -449,7 +445,6 @@ impl Default for DiffViewState {
             smooth_scroll_from: 0.0,
             smooth_scroll_target: 0.0,
             smooth_scroll_started_at: None,
-            preview_cursor_visible: false,
             horizontal_scroll: 0,
             lines: Vec::new(),
             hunk_starts: Vec::new(),
@@ -1047,7 +1042,6 @@ impl DiffViewState {
         } else {
             self.scroll_offset = 0;
             self.horizontal_scroll = 0;
-            self.preview_cursor_visible = false;
             self.selection = None;
             self.clear_search();
         }
@@ -1225,7 +1219,6 @@ impl DiffViewState {
     /// keypresses retarget from the pending destination so fast J/K input
     /// accumulates naturally instead of restarting from each intermediate frame.
     pub fn request_smooth_scroll(&mut self, delta: isize) {
-        self.preview_cursor_visible = true;
         let max = self.max_scroll();
         let base = if self.smooth_scroll_started_at.is_some() {
             self.smooth_scroll_target.round() as usize
@@ -2035,7 +2028,6 @@ pub fn render_diff(
             );
         }
         render_inline_image_regions(frame, area, inner, state, theme);
-        render_preview_cursor(frame, area, inner, state, theme);
         return;
     }
     let buf = frame.buffer_mut();
@@ -2596,52 +2588,8 @@ pub fn render_diff(
         }
     }
     render_inline_image_regions(frame, area, inner, state, theme);
-    render_preview_cursor(frame, area, inner, state, theme);
 }
 
-/// Draw a lightweight keyboard-scroll cursor on the diff's left border.
-///
-/// The marker deliberately does not select a semantic diff line: that would
-/// overlap with hunk navigation, search matches and mouse text selection. It
-/// instead gives J/K preview scrolling the same visual anchor that list
-/// navigation has, while remaining compatible with split, unified and wrapped
-/// layouts.
-fn render_preview_cursor(
-    frame: &mut Frame,
-    area: Rect,
-    inner: Rect,
-    state: &DiffViewState,
-    theme: &Theme,
-) {
-    if !state.preview_cursor_visible || inner.height == 0 || inner.width == 0 {
-        return;
-    }
-
-    let layout = DiffPanelLayout::compute(area, state);
-    let center = inner.y + inner.height / 2;
-
-    // Prefer the center row, then walk upward until we find an actual rendered
-    // diff row. This keeps the marker out of empty space near EOF.
-    let mut cursor_y = None;
-    for y in (inner.y..=center).rev() {
-        if state.is_sticky_row(y, &layout) || state.line_chunk_at_row(y, &layout).is_some() {
-            cursor_y = Some(y);
-            break;
-        }
-    }
-    let Some(y) = cursor_y else {
-        return;
-    };
-
-    if let Some(cell) = frame.buffer_mut().cell_mut((area.x, y)) {
-        cell.set_char('┃');
-        cell.set_style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        );
-    }
-}
 
 /// Overlay inline images onto their placeholder rows (viewport only).
 ///
