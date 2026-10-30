@@ -521,6 +521,15 @@ pub struct EmailRecipientEditor {
     pub textarea: TextArea<'static>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DeletedEmailRecipient {
+    pub field: EmailPatchFocus,
+    pub index: usize,
+    pub value: String,
+}
+
+pub const EMAIL_RECIPIENT_UNDO_LIMIT: usize = 32;
+
 /// Split a Git send-email recipient header into individual addresses while
 /// preserving quoted display names such as `"Doe, Jane" <jane@example.com>`.
 pub fn split_email_recipients(value: &str) -> Vec<String> {
@@ -617,6 +626,7 @@ pub enum PopupState {
         to_selected: usize,
         cc_selected: usize,
         recipient_editor: Option<EmailRecipientEditor>,
+        deleted_recipients: Vec<DeletedEmailRecipient>,
         dry_run: bool,
         /// True while the final, editable recipient list is being reviewed.
         reviewing: bool,

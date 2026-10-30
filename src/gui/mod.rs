@@ -5913,17 +5913,49 @@ impl Gui {
                         cc_recipients,
                         to_selected,
                         cc_selected,
+                        deleted_recipients,
                         ..
                     } = &mut self.popup
                     {
-                        let (recipients, selected) = match *focus {
+                        let field = *focus;
+                        let (recipients, selected) = match field {
                             popup::EmailPatchFocus::To => (to_recipients, to_selected),
                             popup::EmailPatchFocus::Cc => (cc_recipients, cc_selected),
                         };
                         if !recipients.is_empty() {
                             let index = (*selected).min(recipients.len() - 1);
-                            recipients.remove(index);
+                            let value = recipients.remove(index);
+                            deleted_recipients.push(popup::DeletedEmailRecipient {
+                                field,
+                                index,
+                                value,
+                            });
+                            if deleted_recipients.len() > popup::EMAIL_RECIPIENT_UNDO_LIMIT {
+                                deleted_recipients.remove(0);
+                            }
                             *selected = index.min(recipients.len().saturating_sub(1));
+                        }
+                    }
+                } else if key.code == KeyCode::Char('u') && key.modifiers.is_empty() {
+                    if let PopupState::EmailPatch {
+                        focus,
+                        to_recipients,
+                        cc_recipients,
+                        to_selected,
+                        cc_selected,
+                        deleted_recipients,
+                        ..
+                    } = &mut self.popup
+                    {
+                        if let Some(deleted) = deleted_recipients.pop() {
+                            *focus = deleted.field;
+                            let (recipients, selected) = match deleted.field {
+                                popup::EmailPatchFocus::To => (to_recipients, to_selected),
+                                popup::EmailPatchFocus::Cc => (cc_recipients, cc_selected),
+                            };
+                            let index = deleted.index.min(recipients.len());
+                            recipients.insert(index, deleted.value);
+                            *selected = index;
                         }
                     }
                 } else if key.code == KeyCode::Char('a') || key.code == KeyCode::Char('e') {

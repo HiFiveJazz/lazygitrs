@@ -246,12 +246,177 @@ fn parse_send_email_header(output: &str, header: &str) -> Option<String> {
         }
     }
 
-    value.map(|value| value.trim_end_matches(',').trim().to_string())
+    value.map(|value| decode_rfc2047_words(value.trim_end_matches(',').trim()))
+}
+
+/// Decode RFC 2047 encoded-words used in mail header display names.
+///
+/// `git send-email --dry-run` prints the final RFC-formatted To/Cc headers,
+/// so non-ASCII names can arrive as e.g.
+/// `=?UTF-8?q?J=C3=A9r=C3=A9mie=20Rodon?=`.  Decode those before exposing
+/// recipients to the TUI so the compose/review UI always works with the
+/// human-readable form. Unsupported/malformed encoded-words are preserved.
+fn decode_rfc2047_words(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(start) = rest.find("=?") {
+        out.push_str(&rest[..start]);
+        let encoded = &rest[start..];
+
+        let Some(charset_end_rel) = encoded[2..].find('?') else {
+            out.push_str(encoded);
+            return out;
+        };
+        let charset_end = 2 + charset_end_rel;
+        let charset = &encoded[2..charset_end];
+        let after_charset = charset_end + 1;
+
+        let Some(encoding_end_rel) = encoded[after_charset..].find('?') else {
+            out.push_str(encoded);
+            return out;
+        };
+        let encoding_end = after_charset + encoding_end_rel;
+        let encoding = &encoded[after_charset..encoding_end];
+        let text_start = encoding_end + 1;
+
+        let Some(text_end_rel) = encoded[text_start..].find("?=") else {
+            out.push_str(encoded);
+            return out;
+        };
+        let text_end = text_start + text_end_rel;
+        let encoded_text = &encoded[text_start..text_end];
+        let word_end = text_end + 2;
+
+        let bytes = if encoding.eq_ignore_ascii_case("q") {
+            decode_rfc2047_q(encoded_text)
+        } else if encoding.eq_ignore_ascii_case("b") {
+            decode_rfc2047_base64(encoded_text)
+        } else {
+            None
+        };
+
+        let decoded = bytes.and_then(|bytes| decode_rfc2047_charset(charset, &bytes));
+        if let Some(decoded) = decoded {
+            out.push_str(&decoded);
+        } else {
+            out.push_str(&encoded[..word_end]);
+        }
+
+        rest = &encoded[word_end..];
+    }
+
+    out.push_str(rest);
+    out
+}
+
+fn decode_rfc2047_q(input: &str) -> Option<Vec<u8>> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'_' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'=' => {
+                if i + 2 >= bytes.len() {
+                    return None;
+                }
+                let hi = hex_nibble(bytes[i + 1])?;
+                let lo = hex_nibble(bytes[i + 2])?;
+                out.push((hi << 4) | lo);
+                i += 3;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+
+    Some(out)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_rfc2047_base64(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut quartet = [0u8; 4];
+    let mut len = 0usize;
+    let mut padding = 0usize;
+
+    for byte in input.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => {
+                padding += 1;
+                0
+            }
+            _ => return None,
+        };
+
+        if padding > 0 && byte != b'=' {
+            return None;
+        }
+
+        quartet[len] = value;
+        len += 1;
+
+        if len == 4 {
+            out.push((quartet[0] << 2) | (quartet[1] >> 4));
+            if padding < 2 {
+                out.push((quartet[1] << 4) | (quartet[2] >> 2));
+            }
+            if padding == 0 {
+                out.push((quartet[2] << 6) | quartet[3]);
+            }
+            len = 0;
+            padding = 0;
+        }
+    }
+
+    if len != 0 {
+        return None;
+    }
+
+    Some(out)
+}
+
+fn decode_rfc2047_charset(charset: &str, bytes: &[u8]) -> Option<String> {
+    if charset.eq_ignore_ascii_case("utf-8") || charset.eq_ignore_ascii_case("utf8") {
+        String::from_utf8(bytes.to_vec()).ok()
+    } else if charset.eq_ignore_ascii_case("us-ascii") || charset.eq_ignore_ascii_case("ascii") {
+        bytes
+            .is_ascii()
+            .then(|| String::from_utf8_lossy(bytes).into_owned())
+    } else if charset.eq_ignore_ascii_case("iso-8859-1") || charset.eq_ignore_ascii_case("latin1") {
+        Some(bytes.iter().map(|byte| char::from(*byte)).collect())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TempPatchDir, parse_send_email_recipients};
+    use super::{TempPatchDir, decode_rfc2047_words, parse_send_email_recipients};
 
     #[test]
     fn temp_patch_dir_is_cleaned_up() {
@@ -306,5 +471,45 @@ Result: OK
         let recipients = parse_send_email_recipients(output).unwrap();
         assert_eq!(recipients.to, "to@example.com");
         assert!(recipients.cc.is_empty());
+    }
+    #[test]
+    fn decodes_rfc2047_q_encoded_recipient_names() {
+        assert_eq!(
+            decode_rfc2047_words("=?UTF-8?q?J=C3=A9r=C3=A9mie=20Rodon?= <jeremie.rodon@gmail.com>"),
+            "Jérémie Rodon <jeremie.rodon@gmail.com>"
+        );
+        assert_eq!(
+            decode_rfc2047_words(
+                "=?UTF-8?q?Christoph=20B=C3=B6hmwalder?= <christoph.boehmwalder@linbit.com>"
+            ),
+            "Christoph Böhmwalder <christoph.boehmwalder@linbit.com>"
+        );
+    }
+
+    #[test]
+    fn decodes_rfc2047_base64_encoded_recipient_name() {
+        assert_eq!(
+            decode_rfc2047_words("=?UTF-8?B?SsOpcsOpbWllIFJvZG9u?= <jeremie@example.com>"),
+            "Jérémie Rodon <jeremie@example.com>"
+        );
+    }
+
+    #[test]
+    fn parses_decoded_rfc2047_send_email_recipients() {
+        let output = r#"Dry-OK. Log says:
+From: Example <from@example.com>
+To: to@example.com
+Cc: =?UTF-8?q?J=C3=A9r=C3=A9mie=20Rodon?= <jeremie.rodon@gmail.com>,
+ =?UTF-8?q?Christoph=20B=C3=B6hmwalder?= <christoph.boehmwalder@linbit.com>
+Subject: [PATCH] test
+
+Result: OK
+"#;
+
+        let recipients = parse_send_email_recipients(output).unwrap();
+        assert_eq!(
+            recipients.cc,
+            "Jérémie Rodon <jeremie.rodon@gmail.com>, Christoph Böhmwalder <christoph.boehmwalder@linbit.com>"
+        );
     }
 }

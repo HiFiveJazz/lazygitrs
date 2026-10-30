@@ -1175,6 +1175,7 @@ fn show_email_patch_popup_with_values(
         to_selected: 0,
         cc_selected: 0,
         recipient_editor: None,
+        deleted_recipients: Vec::new(),
         dry_run,
         reviewing,
         resolving_recipients,
