@@ -7,7 +7,7 @@ mod os;
 mod pager;
 mod upgrade;
 
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -58,35 +58,78 @@ enum Commands {
     },
 }
 
-fn parse_init_answer(answer: &str) -> Option<bool> {
-    match answer.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => Some(true),
-        "n" | "no" => Some(false),
+fn parse_init_key(key: char) -> Option<bool> {
+    match key.to_ascii_lowercase() {
+        'y' => Some(true),
+        'n' => Some(false),
         _ => None,
     }
 }
 
-fn read_init_answer() -> io::Result<String> {
-    let mut answer = String::new();
+#[cfg(unix)]
+fn read_init_key() -> io::Result<char> {
+    use std::fs::OpenOptions;
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, RawFd};
 
-    if io::stdin().is_terminal() {
-        io::stdin().read_line(&mut answer)?;
-        return Ok(answer);
+    struct RestoreTermios {
+        fd: RawFd,
+        original: libc::termios,
     }
 
-    #[cfg(unix)]
-    {
-        let tty = std::fs::OpenOptions::new().read(true).open("/dev/tty")?;
-        let mut tty = io::BufReader::new(tty);
-        tty.read_line(&mut answer)?;
-        return Ok(answer);
+    impl Drop for RestoreTermios {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+            }
+        }
     }
 
-    #[cfg(not(unix))]
-    {
-        io::stdin().read_line(&mut answer)?;
-        Ok(answer)
+    // Always use the controlling terminal here. This also works when lazygitrs
+    // was launched with redirected stdin/stdout (for example from Helix).
+    let mut tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+    let fd = tty.as_raw_fd();
+
+    let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+    if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
     }
+    let original = unsafe { original.assume_init() };
+    let mut single_key = original;
+    single_key.c_lflag &= !(libc::ICANON | libc::ECHO);
+    single_key.c_cc[libc::VMIN] = 1;
+    single_key.c_cc[libc::VTIME] = 0;
+
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &single_key) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let _restore = RestoreTermios { fd, original };
+
+    let mut byte = [0_u8; 1];
+    tty.read_exact(&mut byte)?;
+    Ok(char::from(byte[0]))
+}
+
+#[cfg(not(unix))]
+fn read_init_key() -> io::Result<char> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    use crossterm::terminal;
+
+    terminal::enable_raw_mode()?;
+    let result = loop {
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                if let KeyCode::Char(ch) = key.code {
+                    break Ok(ch);
+                }
+            }
+            Ok(_) => {}
+            Err(err) => break Err(err),
+        }
+    };
+    let restore = terminal::disable_raw_mode();
+    restore?;
+    result
 }
 
 fn initialize_repository_if_requested(path: &Path) -> anyhow::Result<bool> {
@@ -107,14 +150,18 @@ fn initialize_repository_if_requested(path: &Path) -> anyhow::Result<bool> {
         )?;
         out.flush()?;
 
-        let answer = match read_init_answer() {
-            Ok(answer) => answer,
+        let key = match read_init_key() {
+            Ok(key) => key,
             Err(_) => return Ok(false),
         };
 
-        match parse_init_answer(&answer) {
-            Some(false) => return Ok(false),
+        match parse_init_key(key) {
+            Some(false) => {
+                writeln!(out, "n")?;
+                return Ok(false);
+            }
             Some(true) => {
+                writeln!(out, "y")?;
                 let status = Command::new("git")
                     .args(["init", "--quiet"])
                     .current_dir(path)
@@ -125,7 +172,10 @@ fn initialize_repository_if_requested(path: &Path) -> anyhow::Result<bool> {
                 }
                 return Ok(true);
             }
-            None => continue,
+            None => {
+                writeln!(out)?;
+                continue;
+            }
         }
     }
 }
@@ -228,11 +278,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_repository_init_answers() {
-        assert_eq!(parse_init_answer("y"), Some(true));
-        assert_eq!(parse_init_answer("YES\n"), Some(true));
-        assert_eq!(parse_init_answer("n"), Some(false));
-        assert_eq!(parse_init_answer("No"), Some(false));
-        assert_eq!(parse_init_answer("maybe"), None);
+    fn parses_repository_init_keys() {
+        assert_eq!(parse_init_key('y'), Some(true));
+        assert_eq!(parse_init_key('Y'), Some(true));
+        assert_eq!(parse_init_key('n'), Some(false));
+        assert_eq!(parse_init_key('N'), Some(false));
+        assert_eq!(parse_init_key('x'), None);
     }
 }
