@@ -658,6 +658,12 @@ impl DiffModeState {
     }
 
     pub fn exit(&mut self) {
+        let retained_items = self.commits.len()
+            + self.search_results.len()
+            + self.diff_files.len()
+            + self.tree_nodes.len()
+            + self.file_search_matches.len();
+
         self.clear_commits();
         self.active = false;
         self.ahead_behind = None;
@@ -667,6 +673,20 @@ impl DiffModeState {
         self.diff_files.clear();
         self.tree_nodes.clear();
         self.collapsed_dirs.clear();
+
+        // Small compare sessions benefit from retaining Vec capacity for the
+        // next open. Large Linux-scale comparisons should give their memory
+        // back just like the deep-history rebase planner does.
+        if retained_items >= 4_096 {
+            drop(std::mem::take(&mut self.commits));
+            drop(std::mem::take(&mut self.search_results));
+            drop(std::mem::take(&mut self.diff_files));
+            drop(std::mem::take(&mut self.tree_nodes));
+            drop(std::mem::take(&mut self.collapsed_dirs));
+            drop(std::mem::take(&mut self.file_search_matches));
+            drop(std::mem::take(&mut self.file_search_query));
+            trim_process_heap();
+        }
     }
 
     pub fn swap_refs(&mut self) {
@@ -946,3 +966,14 @@ impl DiffModeState {
         self.select_list_match(self.file_search_matches[self.file_search_match_idx]);
     }
 }
+
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_process_heap() {
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_process_heap() {}
