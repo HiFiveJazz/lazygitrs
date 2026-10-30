@@ -229,8 +229,10 @@ fn new_branch(gui: &mut Gui) -> Result<()> {
         textarea: make_textarea(""),
         on_confirm: Box::new(|gui, name| {
             if !name.is_empty() {
-                gui.git.create_branch(name)?;
-                gui.needs_refresh = true;
+                let name = name.to_string();
+                gui.start_background_mutation("Creating branch", move |git| {
+                    git.create_branch(&name)
+                });
             }
             Ok(())
         }),
@@ -372,8 +374,11 @@ fn merge_branch(gui: &mut Gui) -> Result<()> {
             title: "Merge".to_string(),
             message: format!("Merge '{}' into current branch?", name),
             on_confirm: Box::new(move |gui| {
-                gui.git.merge_branch(&name, &merge_args)?;
-                gui.needs_refresh = true;
+                let name = name.clone();
+                let merge_args = merge_args.clone();
+                gui.start_background_mutation("Merging branch", move |git| {
+                    git.merge_branch(&name, &merge_args)
+                });
                 Ok(())
             }),
         };
@@ -406,8 +411,10 @@ fn rebase_branch(gui: &mut Gui) -> Result<()> {
                     None
                 } else {
                     Some(Box::new(move |gui| {
-                        gui.git.rebase_branch(&name_for_simple)?;
-                        gui.request_history_refresh();
+                        let name = name_for_simple.clone();
+                        gui.start_background_mutation("Rebasing branch", move |git| {
+                            git.rebase_branch(&name)
+                        });
                         Ok(())
                     }))
                 },
@@ -434,8 +441,10 @@ fn rebase_branch(gui: &mut Gui) -> Result<()> {
                 description: String::new(),
                 key: Some("b".to_string()),
                 action: Some(Box::new(move |gui| {
-                    gui.git.rebase_branch(&name_for_base)?;
-                    gui.request_history_refresh();
+                    let name = name_for_base.clone();
+                    gui.start_background_mutation("Rebasing branch", move |git| {
+                        git.rebase_branch(&name)
+                    });
                     Ok(())
                 })),
             },
@@ -481,8 +490,11 @@ fn rename_branch(gui: &mut Gui) -> Result<()> {
             textarea: ta,
             on_confirm: Box::new(move |gui, new_name| {
                 if !new_name.is_empty() && new_name != old_name {
-                    gui.git.rename_branch(&old_name, new_name)?;
-                    gui.needs_refresh = true;
+                    let old_name = old_name.clone();
+                    let new_name = new_name.to_string();
+                    gui.start_background_mutation("Renaming branch", move |git| {
+                        git.rename_branch(&old_name, &new_name)
+                    });
                 }
                 Ok(())
             }),
