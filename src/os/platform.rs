@@ -2,7 +2,7 @@ use std::env;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use super::cmd::CmdBuilder;
 
@@ -88,15 +88,53 @@ impl Platform {
 }
 
 fn copy_with(program: &str, args: &[&str], text: &str) -> Result<()> {
-    // Clipboard owners such as wl-copy and xclip intentionally fork into the
-    // background so they can continue serving the selection after this call
-    // returns. Do not use CmdBuilder here: it captures stdout/stderr and then
-    // waits for EOF on those pipes, but the background clipboard process
-    // inherits the pipe descriptors and can keep them open indefinitely.
-    //
-    // Redirect output to /dev/null and wait only for the short-lived parent
-    // process. The background clipboard owner is then free to keep serving the
-    // copied data without blocking the TUI.
+    // wl-copy normally daemonizes itself. That is fine for tiny strings, but
+    // for larger payloads (notably format-patch output) the parent can return
+    // before the background clipboard owner has fully taken the selection.
+    // Run it in the foreground ourselves instead, feed the complete payload,
+    // then move the long-lived owner into a tiny reaper thread. This avoids
+    // both the old wait-with-captured-pipes freeze and the ownership race.
+    if program == "wl-copy" {
+        let mut child = Command::new(program)
+            .arg("--foreground")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin.write_all(text.as_bytes())?;
+        }
+
+        // Give wl-copy a brief chance to reject the request synchronously
+        // (for example, if no compositor is reachable). A healthy foreground
+        // owner remains alive until another client replaces the clipboard.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        if let Some(status) = child.try_wait()? {
+            if !status.success() {
+                bail!(
+                    "Clipboard command failed (exit {}): {} --foreground {}",
+                    status.code().unwrap_or(-1),
+                    program,
+                    args.join(" ")
+                );
+            }
+            // A clipboard manager may immediately persist the payload and take
+            // ownership itself, in which case wl-copy can exit successfully.
+            return Ok(());
+        }
+
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        return Ok(());
+    }
+
+    // X11 clipboard owners such as xclip may fork into the background. Avoid
+    // captured stdout/stderr pipes so their background process cannot keep the
+    // caller blocked waiting for EOF.
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
@@ -148,7 +186,7 @@ fn linux_clipboard_candidates_for(
     wayland: bool,
     x11: bool,
 ) -> Vec<(&'static str, &'static [&'static str])> {
-    const WL_COPY_ARGS: &[&str] = &[];
+    const WL_COPY_ARGS: &[&str] = &["--type", "text/plain"];
     const WL_PASTE_ARGS: &[&str] = &["--no-newline"];
     const XCLIP_COPY_ARGS: &[&str] = &["-selection", "clipboard"];
     const XCLIP_PASTE_ARGS: &[&str] = &["-selection", "clipboard", "-o"];
@@ -211,6 +249,7 @@ mod tests {
         let copy = linux_clipboard_candidates_for(false, true, true);
         let paste = linux_clipboard_candidates_for(true, true, true);
         assert_eq!(copy[0].0, "wl-copy");
+        assert_eq!(copy[0].1, &["--type", "text/plain"]);
         assert_eq!(paste[0].0, "wl-paste");
     }
 

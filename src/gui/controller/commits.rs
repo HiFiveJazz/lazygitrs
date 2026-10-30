@@ -1091,13 +1091,7 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                 action: Some(Box::new(move |gui| {
                     gui.git
                         .git_cmd()
-                        .args(&[
-                            "format-patch",
-                            "-1",
-                            "--output-directory",
-                            ".",
-                            &save_hash,
-                        ])
+                        .args(&["format-patch", "-1", "--output-directory", ".", &save_hash])
                         .run_expecting_success()?;
                     // `git format-patch` has already written the file. Keep this
                     // action as lightweight as yank/copy: close the menu and return

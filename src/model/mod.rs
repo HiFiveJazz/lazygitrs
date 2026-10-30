@@ -70,7 +70,10 @@ pub struct Model {
 impl Model {
     fn remember_commit_authors(&mut self, commits: &[Commit]) {
         for commit in commits {
-            if self.commit_filter_authors.contains_key(&commit.author_email) {
+            if self
+                .commit_filter_authors
+                .contains_key(&commit.author_email)
+            {
                 continue;
             }
             if self.commit_filter_authors.len() >= MAX_REMEMBERED_COMMIT_AUTHORS {
@@ -198,7 +201,7 @@ impl Model {
         }
         use std::collections::HashMap;
 
-const MAX_REMEMBERED_COMMIT_AUTHORS: usize = 2048;
+        const MAX_REMEMBERED_COMMIT_AUTHORS: usize = 2048;
         let mut by_name: HashMap<String, File> =
             new_files.into_iter().map(|f| (f.name.clone(), f)).collect();
 

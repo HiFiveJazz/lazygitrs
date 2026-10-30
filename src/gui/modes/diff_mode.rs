@@ -967,7 +967,6 @@ impl DiffModeState {
     }
 }
 
-
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn trim_process_heap() {
     unsafe {

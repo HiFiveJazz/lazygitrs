@@ -603,7 +603,6 @@ pub struct CustomCommandPrompt {
     pub filter: Option<String>,
 }
 
-
 #[cfg(test)]
 mod keybinding_migration_tests {
     use super::*;

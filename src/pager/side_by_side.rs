@@ -2590,7 +2590,6 @@ pub fn render_diff(
     render_inline_image_regions(frame, area, inner, state, theme);
 }
 
-
 /// Overlay inline images onto their placeholder rows (viewport only).
 ///
 /// Gathers contiguous visible placeholder rows per file section via

@@ -337,15 +337,10 @@ fn delete_branch(gui: &mut Gui) -> Result<()> {
                         .unwrap_or("origin")
                         .to_string();
                     let name = name_both.clone();
-                    gui.start_remote_op(
-                        RemoteOpKind::Push,
-                        "Deleting branch",
-                        "",
-                        move |git| {
-                            git.delete_branch(&name, true)?;
-                            git.delete_remote_branch(&remote, &name)
-                        },
-                    );
+                    gui.start_remote_op(RemoteOpKind::Push, "Deleting branch", "", move |git| {
+                        git.delete_branch(&name, true)?;
+                        git.delete_remote_branch(&remote, &name)
+                    });
                     Ok(())
                 })),
             });

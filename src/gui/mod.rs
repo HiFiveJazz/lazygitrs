@@ -486,7 +486,11 @@ fn spawn_index_mutation_worker(
                         }
                     }
                     IndexMutation::All { stage } => {
-                        if stage { current_git.stage_all() } else { current_git.unstage_all() }
+                        if stage {
+                            current_git.stage_all()
+                        } else {
+                            current_git.unstage_all()
+                        }
                     }
                 };
                 if let Err(err) = result
@@ -500,7 +504,7 @@ fn spawn_index_mutation_worker(
                         generation = next.generation;
                         current_git = next.git;
                         current = Some(next.mutation);
-                    },
+                    }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => break,
                 }
@@ -1408,7 +1412,9 @@ impl Gui {
             commit_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             commit_stats_cache_order: std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new())),
             commit_messages_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            commit_messages_cache_order: std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            commit_messages_cache_order: std::sync::Arc::new(
+                std::sync::Mutex::new(VecDeque::new()),
+            ),
             commit_details_job_tx,
             commit_details_generation,
             last_commit_details_key: String::new(),
@@ -2792,13 +2798,7 @@ impl Gui {
         self.spawn_commit_page_load(DEFAULT_COMMIT_LIMIT, 0, true, false);
     }
 
-    fn spawn_commit_page_load(
-        &mut self,
-        limit: usize,
-        skip: usize,
-        replace: bool,
-        prepend: bool,
-    ) {
+    fn spawn_commit_page_load(&mut self, limit: usize, skip: usize, replace: bool, prepend: bool) {
         self.commit_page_loading = true;
         let generation = self.commit_page_generation;
         let git = Arc::clone(&self.git);
@@ -4416,11 +4416,11 @@ impl Gui {
         // Smooth preview scrolling (J/K by default). Keep this separate from
         // Ctrl-J/K, which performs smooth multi-row navigation in the active list.
         if matches_key(key, &keybindings.universal.scroll_down_main_alt1) {
-            self.diff_view.request_smooth_scroll(9);
+            self.diff_view.request_smooth_scroll(22);
             return Ok(());
         }
         if matches_key(key, &keybindings.universal.scroll_up_main_alt1) {
-            self.diff_view.request_smooth_scroll(-9);
+            self.diff_view.request_smooth_scroll(-22);
             return Ok(());
         }
         if key.code == KeyCode::PageDown {
@@ -6784,10 +6784,7 @@ impl Gui {
                         kb.commits.amend_to_commit.clone(),
                         "Amend to commit".into(),
                     ),
-                    CommandEntry::keybinding(
-                        kb.commits.pick_commit.clone(),
-                        "Drop commit".into(),
-                    ),
+                    CommandEntry::keybinding(kb.commits.pick_commit.clone(), "Drop commit".into()),
                     CommandEntry::keybinding(
                         kb.commits.patch_options.clone(),
                         "Patch actions".into(),

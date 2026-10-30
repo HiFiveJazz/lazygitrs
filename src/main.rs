@@ -121,9 +121,7 @@ fn read_init_key() -> io::Result<char> {
     let result = loop {
         match event::read() {
             Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                if key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     break Ok('\u{3}');
                 }
                 if let KeyCode::Char(ch) = key.code {
