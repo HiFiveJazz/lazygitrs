@@ -19,6 +19,8 @@ pub use worktree::Worktree;
 
 use std::collections::HashMap;
 
+const MAX_REMEMBERED_COMMIT_AUTHORS: usize = 2048;
+
 use crate::git::submodule::Submodule;
 
 /// Holds all repository data loaded from git.
@@ -68,12 +70,19 @@ pub struct Model {
 impl Model {
     fn remember_commit_authors(&mut self, commits: &[Commit]) {
         for commit in commits {
-            self.commit_filter_authors
-                .entry(commit.author_email.clone())
-                .or_insert_with(|| Author {
+            if self.commit_filter_authors.contains_key(&commit.author_email) {
+                continue;
+            }
+            if self.commit_filter_authors.len() >= MAX_REMEMBERED_COMMIT_AUTHORS {
+                break;
+            }
+            self.commit_filter_authors.insert(
+                commit.author_email.clone(),
+                Author {
                     name: commit.author_name.clone(),
                     email: commit.author_email.clone(),
-                });
+                },
+            );
         }
     }
 
@@ -124,6 +133,31 @@ impl Model {
         }
     }
 
+    pub fn prepend_commits(&mut self, mut commits: Vec<Commit>) {
+        if commits.is_empty() {
+            return;
+        }
+        self.remember_commit_authors(&commits);
+        commits.append(&mut self.commits);
+        self.commits = commits;
+        self.commits_revision = self.commits_revision.wrapping_add(1);
+    }
+
+    pub fn drain_commits_front(&mut self, count: usize) {
+        let count = count.min(self.commits.len());
+        if count > 0 {
+            self.commits.drain(0..count);
+            self.commits_revision = self.commits_revision.wrapping_add(1);
+        }
+    }
+
+    pub fn truncate_commits(&mut self, len: usize) {
+        if self.commits.len() > len {
+            self.commits.truncate(len);
+            self.commits_revision = self.commits_revision.wrapping_add(1);
+        }
+    }
+
     /// Prepend a newly-created HEAD commit without rebuilding the entire
     /// globally topologically-sorted commit page.
     pub fn prepend_commit(&mut self, commit: Commit) {
@@ -163,6 +197,8 @@ impl Model {
             return;
         }
         use std::collections::HashMap;
+
+const MAX_REMEMBERED_COMMIT_AUTHORS: usize = 2048;
         let mut by_name: HashMap<String, File> =
             new_files.into_iter().map(|f| (f.name.clone(), f)).collect();
 

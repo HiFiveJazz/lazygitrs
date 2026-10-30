@@ -433,10 +433,17 @@ impl GitCommands {
 
         let contributors = self.load_contributors_cli(max_commits, top_n);
         if let Some(head) = head {
-            self.contributor_cache
+            let mut cache = self
+                .contributor_cache
                 .lock()
-                .expect("contributor cache poisoned")
-                .insert((head, max_commits, top_n), contributors.clone());
+                .expect("contributor cache poisoned");
+            // This cache is informational and keyed by HEAD. Keep it tiny so
+            // long branch-hopping sessions cannot retain one contributor list
+            // for every historical head visited.
+            if cache.len() >= 16 {
+                cache.clear();
+            }
+            cache.insert((head, max_commits, top_n), contributors.clone());
         }
         contributors
     }

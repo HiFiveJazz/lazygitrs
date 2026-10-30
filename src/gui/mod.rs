@@ -701,12 +701,16 @@ struct IndexMutationResult {
 
 struct CommitPageResult {
     generation: u64,
-    /// When true, replace the commit list (filter apply). When false, append.
+    /// When true, replace the current window. Otherwise append/prepend.
     replace: bool,
+    prepend: bool,
+    skip: usize,
+    limit: usize,
     result: Result<Vec<crate::model::Commit>>,
 }
 
 const COMMIT_PAGE_PREFETCH_THRESHOLD: usize = 100;
+const MAX_LOADED_COMMITS: usize = 3000;
 const PULL_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 2;
 
 pub struct Gui {
@@ -785,8 +789,12 @@ pub struct Gui {
     commit_page_tx: mpsc::Sender<CommitPageResult>,
     /// True while a background commit page is in flight.
     commit_page_loading: bool,
-    /// True when the last commit page was shorter than the requested page size.
+    /// True when the last older-history page reached the end of history.
     commit_history_complete: bool,
+    /// Absolute skip offset represented by `model.commits[0]`. The commits
+    /// panel is a sliding window so huge histories stay fully navigable without
+    /// retaining every page visited for the lifetime of the TUI.
+    commit_window_start: usize,
     /// Generation counter used to discard stale commit-page results after refresh.
     commit_page_generation: u64,
     /// Active AI commit generation job, if one is running.
@@ -1320,6 +1328,7 @@ impl Gui {
             commit_page_tx,
             commit_page_loading: false,
             commit_history_complete: false,
+            commit_window_start: 0,
             commit_page_generation: 0,
             ai_commit_job: None,
             ai_commit_generation: 0,
@@ -2649,10 +2658,35 @@ impl Gui {
                     let mut model = self.model.lock().unwrap();
                     if result.replace {
                         model.set_commits(commits);
+                        self.commit_window_start = result.skip;
                         drop(model);
                         self.context_mgr.set_selection_for(ContextId::Commits, 0);
+                        self.context_mgr.set_scroll_offset(ContextId::Commits, 0);
                         self.range_select_anchor = None;
-                        self.commit_history_complete = page_len < DEFAULT_COMMIT_LIMIT;
+                        self.commit_history_complete = page_len < result.limit;
+                    } else if result.prepend {
+                        let existing: HashSet<String> =
+                            model.commits.iter().map(|c| c.hash.clone()).collect();
+                        let new_commits: Vec<_> = commits
+                            .into_iter()
+                            .filter(|c| !existing.contains(&c.hash))
+                            .collect();
+                        let added = new_commits.len();
+                        model.prepend_commits(new_commits);
+                        if model.commits.len() > MAX_LOADED_COMMITS {
+                            model.truncate_commits(MAX_LOADED_COMMITS);
+                        }
+                        self.commit_window_start = result.skip;
+                        let selected = self.context_mgr.selected(ContextId::Commits);
+                        let scroll = self.context_mgr.scroll_offset(ContextId::Commits);
+                        self.context_mgr
+                            .set_selection_for(ContextId::Commits, selected.saturating_add(added));
+                        self.context_mgr
+                            .set_scroll_offset(ContextId::Commits, scroll.saturating_add(added));
+                        if let Some(anchor) = self.range_select_anchor.as_mut() {
+                            *anchor = anchor.saturating_add(added);
+                        }
+                        self.context_mgr.clamp_selections(&model);
                     } else {
                         let mut seen: HashSet<String> =
                             model.commits.iter().map(|c| c.hash.clone()).collect();
@@ -2661,12 +2695,34 @@ impl Gui {
                             .filter(|c| seen.insert(c.hash.clone()))
                             .collect();
                         model.extend_commits(new_commits);
-                        self.commit_history_complete = page_len < DEFAULT_COMMIT_LIMIT;
+                        self.commit_history_complete = page_len < result.limit;
+
+                        if model.commits.len() > MAX_LOADED_COMMITS {
+                            let excess = model.commits.len() - MAX_LOADED_COMMITS;
+                            model.drain_commits_front(excess);
+                            self.commit_window_start =
+                                self.commit_window_start.saturating_add(excess);
+                            let selected = self.context_mgr.selected(ContextId::Commits);
+                            let scroll = self.context_mgr.scroll_offset(ContextId::Commits);
+                            self.context_mgr.set_selection_for(
+                                ContextId::Commits,
+                                selected.saturating_sub(excess),
+                            );
+                            self.context_mgr.set_scroll_offset(
+                                ContextId::Commits,
+                                scroll.saturating_sub(excess),
+                            );
+                            if let Some(anchor) = self.range_select_anchor.as_mut() {
+                                *anchor = anchor.saturating_sub(excess);
+                            }
+                        }
                         self.context_mgr.clamp_selections(&model);
                     }
                 }
                 Err(e) => {
-                    self.commit_history_complete = true;
+                    if !result.prepend {
+                        self.commit_history_complete = true;
+                    }
                     if self.popup == PopupState::None
                         || self.shell_command_ui_active()
                         || self.deferred_notification_ui_active()
@@ -2691,10 +2747,16 @@ impl Gui {
         }
         self.context_mgr.set_selection_for(ContextId::Commits, 0);
         self.range_select_anchor = None;
-        self.spawn_commit_page_load(DEFAULT_COMMIT_LIMIT, 0, true);
+        self.spawn_commit_page_load(DEFAULT_COMMIT_LIMIT, 0, true, false);
     }
 
-    fn spawn_commit_page_load(&mut self, limit: usize, skip: usize, replace: bool) {
+    fn spawn_commit_page_load(
+        &mut self,
+        limit: usize,
+        skip: usize,
+        replace: bool,
+        prepend: bool,
+    ) {
         self.commit_page_loading = true;
         let generation = self.commit_page_generation;
         let git = Arc::clone(&self.git);
@@ -2716,16 +2778,16 @@ impl Gui {
             let _ = tx.send(CommitPageResult {
                 generation,
                 replace,
+                prepend,
+                skip,
+                limit,
                 result,
             });
         });
     }
 
     fn maybe_request_more_commits(&mut self) {
-        if self.context_mgr.active() != ContextId::Commits
-            || self.commit_page_loading
-            || self.commit_history_complete
-        {
+        if self.context_mgr.active() != ContextId::Commits || self.commit_page_loading {
             return;
         }
 
@@ -2736,29 +2798,47 @@ impl Gui {
         if len == 0 {
             return;
         }
-        if len < DEFAULT_COMMIT_LIMIT {
+
+        let selected = self.context_mgr.selected(ContextId::Commits);
+        let scroll = self.context_mgr.scroll_offset(ContextId::Commits);
+
+        // When the front of a bounded window was previously evicted, scrolling
+        // back toward the top loads the preceding page and evicts from the tail.
+        if self.commit_window_start > 0
+            && (selected <= COMMIT_PAGE_PREFETCH_THRESHOLD
+                || scroll <= COMMIT_PAGE_PREFETCH_THRESHOLD)
+        {
+            let limit = DEFAULT_COMMIT_LIMIT.min(self.commit_window_start);
+            let skip = self.commit_window_start - limit;
+            self.spawn_commit_page_load(limit, skip, false, true);
+            return;
+        }
+
+        if self.commit_history_complete || len < DEFAULT_COMMIT_LIMIT {
             self.commit_history_complete = true;
             return;
         }
 
-        let selected = self.context_mgr.selected(ContextId::Commits);
-        let viewport_end = self
-            .context_mgr
-            .scroll_offset(ContextId::Commits)
-            .saturating_add(self.sidebar_visible_height());
+        let viewport_end = scroll.saturating_add(self.sidebar_visible_height());
         let near_loaded_tail = selected.saturating_add(COMMIT_PAGE_PREFETCH_THRESHOLD) >= len
             || viewport_end.saturating_add(COMMIT_PAGE_PREFETCH_THRESHOLD) >= len;
         if !near_loaded_tail {
             return;
         }
 
-        self.spawn_commit_page_load(DEFAULT_COMMIT_LIMIT, len, false);
+        self.spawn_commit_page_load(
+            DEFAULT_COMMIT_LIMIT,
+            self.commit_window_start.saturating_add(len),
+            false,
+            false,
+        );
     }
 
     fn reset_commit_pagination(&mut self) {
         self.commit_page_generation = self.commit_page_generation.wrapping_add(1);
         self.commit_page_loading = false;
         self.commit_history_complete = false;
+        self.commit_window_start = 0;
     }
 
     /// Kick off a silent background `git fetch --all` if auto-fetch is enabled
@@ -10633,6 +10713,9 @@ mod terminal_mouse_tests {
             .send(CommitPageResult {
                 generation: gui.commit_page_generation,
                 replace: false,
+                prepend: false,
+                skip: 0,
+                limit: DEFAULT_COMMIT_LIMIT,
                 result: Err(anyhow::anyhow!("page fixture failure")),
             })
             .unwrap();
