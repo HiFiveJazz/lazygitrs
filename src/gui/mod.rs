@@ -454,6 +454,61 @@ fn estimate_diff_view_bytes(view: &DiffViewState) -> usize {
 type BackgroundJob = Box<dyn FnOnce() + Send>;
 pub(crate) type UiJob = Box<dyn FnOnce(&mut Gui) + Send>;
 
+fn spawn_index_mutation_worker(
+    git: Arc<GitCommands>,
+    rx: mpsc::Receiver<IndexMutation>,
+    tx: mpsc::Sender<IndexMutationResult>,
+    busy: Arc<AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            busy.store(true, Ordering::Release);
+            let mut mutation_error = None;
+            let mut current = Some(first);
+
+            loop {
+                let mutation = current.take().expect("index mutation present");
+                let result = match mutation {
+                    IndexMutation::Paths { paths, stage } => {
+                        if stage {
+                            git.stage_files(&paths)
+                        } else {
+                            git.unstage_files(&paths)
+                        }
+                    }
+                    IndexMutation::All { stage } => {
+                        if stage { git.stage_all() } else { git.unstage_all() }
+                    }
+                };
+                if let Err(err) = result
+                    && mutation_error.is_none()
+                {
+                    mutation_error = Some(format!("{err:#}"));
+                }
+
+                match rx.try_recv() {
+                    Ok(next) => current = Some(next),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+
+            let files = git.refresh_files_status_only();
+            busy.store(false, Ordering::Release);
+            if tx
+                .send(IndexMutationResult {
+                    files,
+                    mutation_error,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+        busy.store(false, Ordering::Release);
+    });
+}
+
 fn spawn_diff_scheduler(
     rx: mpsc::Receiver<DiffSchedulerEvent>,
     scheduler_tx: mpsc::Sender<DiffSchedulerEvent>,
@@ -626,6 +681,16 @@ enum AiCommitSource {
     Commit(String),
 }
 
+enum IndexMutation {
+    Paths { paths: Vec<String>, stage: bool },
+    All { stage: bool },
+}
+
+struct IndexMutationResult {
+    files: Result<Vec<crate::model::File>>,
+    mutation_error: Option<String>,
+}
+
 struct CommitPageResult {
     generation: u64,
     /// When true, replace the commit list (filter apply). When false, append.
@@ -726,9 +791,15 @@ pub struct Gui {
     remote_op_rx: mpsc::Receiver<(RemoteOpKind, Result<RemoteOpCompletion>)>,
     /// Sender cloned into background threads for remote operations.
     remote_op_tx: mpsc::Sender<(RemoteOpKind, Result<RemoteOpCompletion>)>,
-    /// Async light files refresh (status-only) so Space-spam doesn't freeze.
+    /// Async light files refresh (status-only) for non-index refreshes.
     files_refresh_rx: Option<mpsc::Receiver<Result<Vec<crate::model::File>>>>,
     files_refresh_in_progress: bool,
+    /// One long-lived worker owns all index mutations so rapid staging cannot
+    /// race on `.git/index.lock`. The worker drains bursts in order and emits
+    /// one status snapshot after each burst.
+    index_mutation_tx: mpsc::Sender<IndexMutation>,
+    index_mutation_rx: mpsc::Receiver<IndexMutationResult>,
+    index_mutation_busy: Arc<AtomicBool>,
     /// Background `git ls-files` for the path-filter picker (ctrl-s → path).
     filter_paths_rx: Option<mpsc::Receiver<Result<Vec<String>>>>,
     /// Receiver for silent auto-fetch results. Kept separate from remote_op
@@ -1084,6 +1155,9 @@ impl Gui {
         let (ai_commit_tx, ai_commit_rx) = mpsc::channel();
         let (commit_page_tx, commit_page_rx) = mpsc::channel();
         let (remote_op_tx, remote_op_rx) = mpsc::channel();
+        let (index_mutation_tx, index_mutation_cmd_rx) = mpsc::channel();
+        let (index_mutation_result_tx, index_mutation_rx) = mpsc::channel();
+        let index_mutation_busy = Arc::new(AtomicBool::new(false));
         let (auto_fetch_tx, auto_fetch_rx) = mpsc::channel();
         let (menu_async_tx, menu_async_rx) = mpsc::channel();
         let (ui_job_tx, ui_job_rx) = mpsc::channel();
@@ -1117,6 +1191,12 @@ impl Gui {
             diff_scheduler_tx.clone(),
             diff_tx.clone(),
             Arc::clone(&diff_generation),
+        );
+        spawn_index_mutation_worker(
+            Arc::clone(&git),
+            index_mutation_cmd_rx,
+            index_mutation_result_tx,
+            Arc::clone(&index_mutation_busy),
         );
         spawn_diff_prefetch_workers(diff_prefetch_rx, diff_tx.clone());
         spawn_latest_background_worker(commit_details_job_rx);
@@ -1236,6 +1316,9 @@ impl Gui {
             remote_op_tx,
             files_refresh_rx: None,
             files_refresh_in_progress: false,
+            index_mutation_tx,
+            index_mutation_rx,
+            index_mutation_busy,
             filter_paths_rx: None,
             auto_fetch_rx,
             auto_fetch_tx,
@@ -1544,6 +1627,7 @@ impl Gui {
 
             // Check for completed background diff results
             self.receive_diff_results();
+            self.receive_index_mutation_results();
 
             // Warm the preview cache with neighbor diffs while idle
             self.maybe_prefetch_diffs();
@@ -2890,6 +2974,10 @@ impl Gui {
 
     /// Kick off a status-only files refresh on a background thread.
     fn start_files_refresh_async(&mut self) {
+        if self.index_mutation_busy.load(Ordering::Acquire) {
+            self.needs_files_refresh = true;
+            return;
+        }
         if self.files_refresh_in_progress {
             return;
         }
@@ -2903,67 +2991,69 @@ impl Gui {
         });
     }
 
-    /// Stage/unstage paths on a background thread, then load status-only and
-    /// apply via the files-refresh channel. Avoids racing a status refresh
-    /// ahead of the git add/reset (which would clobber optimistic UI).
+    /// Queue an index mutation on the single serialized index worker.
+    /// The UI has already applied its optimistic state; the worker returns an
+    /// authoritative status snapshot after draining the current burst.
     pub(crate) fn enqueue_stage_then_refresh(&mut self, paths: Vec<String>, stage: bool) {
         if paths.is_empty() {
             return;
         }
-        // Coalesce: if a light refresh is already in flight, just mark that we
-        // need another after it lands; still run the git op so the index keeps
-        // up with optimistic presses.
-        let git = Arc::clone(&self.git);
-        let should_send_files = !self.files_refresh_in_progress;
-        if should_send_files {
-            self.files_refresh_in_progress = true;
-            let (tx, rx) = mpsc::channel();
-            self.files_refresh_rx = Some(rx);
-            std::thread::spawn(move || {
-                if stage {
-                    let _ = git.stage_files(&paths);
-                } else {
-                    let _ = git.unstage_files(&paths);
-                }
-                let _ = tx.send(git.refresh_files_status_only());
-            });
-        } else {
-            self.needs_files_refresh = true;
-            std::thread::spawn(move || {
-                if stage {
-                    let _ = git.stage_files(&paths);
-                } else {
-                    let _ = git.unstage_files(&paths);
-                }
-            });
+        if self
+            .index_mutation_tx
+            .send(IndexMutation::Paths { paths, stage })
+            .is_err()
+        {
+            self.popup = PopupState::Message {
+                title: "Stage failed".into(),
+                message: "Index worker is unavailable".into(),
+                kind: MessageKind::Error,
+            };
         }
     }
 
-    /// Stage/unstage everything on a background thread, then status-only refresh.
+    /// Queue stage/unstage-all through the same serialized index worker.
     pub(crate) fn enqueue_stage_all_then_refresh(&mut self, stage: bool) {
-        let git = Arc::clone(&self.git);
-        let should_send_files = !self.files_refresh_in_progress;
-        if should_send_files {
-            self.files_refresh_in_progress = true;
-            let (tx, rx) = mpsc::channel();
-            self.files_refresh_rx = Some(rx);
-            std::thread::spawn(move || {
-                if stage {
-                    let _ = git.stage_all();
-                } else {
-                    let _ = git.unstage_all();
+        if self
+            .index_mutation_tx
+            .send(IndexMutation::All { stage })
+            .is_err()
+        {
+            self.popup = PopupState::Message {
+                title: "Stage failed".into(),
+                message: "Index worker is unavailable".into(),
+                kind: MessageKind::Error,
+            };
+        }
+    }
+
+    fn receive_index_mutation_results(&mut self) {
+        while let Ok(result) = self.index_mutation_rx.try_recv() {
+            match result.files {
+                Ok(files) => {
+                    let mut model = self.model.lock().unwrap();
+                    model.set_files(files);
+                    if self.show_file_tree {
+                        self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
+                        self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
+                    } else {
+                        self.file_tree_nodes.clear();
+                        self.context_mgr.files_list_len_override = None;
+                    }
+                    drop(model);
+                    self.needs_diff_refresh = true;
                 }
-                let _ = tx.send(git.refresh_files_status_only());
-            });
-        } else {
-            self.needs_files_refresh = true;
-            std::thread::spawn(move || {
-                if stage {
-                    let _ = git.stage_all();
-                } else {
-                    let _ = git.unstage_all();
-                }
-            });
+                Err(err) => self.show_error("Refresh failed", err),
+            }
+            if let Some(message) = result.mutation_error {
+                self.show_notification(PopupState::Message {
+                    title: "Stage failed".into(),
+                    message,
+                    kind: MessageKind::Error,
+                });
+            }
+        }
+        if self.needs_files_refresh && !self.index_mutation_busy.load(Ordering::Acquire) {
+            self.start_files_refresh_async();
         }
     }
 
