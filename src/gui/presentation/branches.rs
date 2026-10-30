@@ -5,7 +5,7 @@ use ratatui::widgets::ListItem;
 use crate::config::Theme;
 use crate::model::Model;
 
-const SPINNER_CHARS: &[char] = &['·', '✻', '✽', '✶', '✳', '✢'];
+const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 pub fn render_branch_list<'a>(
     model: &Model,

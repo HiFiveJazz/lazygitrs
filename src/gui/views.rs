@@ -3417,7 +3417,7 @@ pub fn render_selection_overlay(
     }
 }
 
-const SPINNER_CHARS: &[char] = &['·', '✻', '✽', '✶', '✳', '✢'];
+const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Geometry of the ✦ AI-generate button shown inside the commit-message popup.
 /// The button sits on the "Summary" label row, right-aligned inside the popup
