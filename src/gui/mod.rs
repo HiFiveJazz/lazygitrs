@@ -49,6 +49,7 @@ use self::popup::{
 /// Compute the visible list height for a list picker popup, given terminal height.
 /// Must match the rendering formula: popup 60% height, minus borders (2), search bar + sep + hint (3).
 const COMMIT_DETAILS_CACHE_ENTRIES: usize = 512;
+const ACTION_TOAST_DURATION: Duration = Duration::from_millis(1800);
 
 fn bounded_cache_insert<T>(
     cache: &mut HashMap<String, T>,
@@ -925,6 +926,8 @@ pub struct Gui {
     background_mutation_label: Option<String>,
     /// Timestamp when the last remote operation succeeded (for showing a temporary ✓).
     remote_op_success_at: Option<Instant>,
+    /// Short non-modal confirmation for copy/save/open actions.
+    action_toast: Option<(String, Instant)>,
     /// Branch name from checkout-by-name; used to offer create-on-miss when checkout fails.
     pub(crate) pending_checkout_by_name: Option<String>,
     /// Editor to run after suspending the TUI (hx/nvim/vim).
@@ -1140,6 +1143,10 @@ impl Gui {
             message: format!("{:#}", err),
             kind: MessageKind::Error,
         });
+    }
+
+    pub(crate) fn show_action_toast(&mut self, message: impl Into<String>) {
+        self.action_toast = Some((message.into(), Instant::now()));
     }
 
     fn periodic_refresh_due(&self) -> bool {
@@ -1401,6 +1408,7 @@ impl Gui {
             remote_op_label: None,
             background_mutation_label: None,
             remote_op_success_at: None,
+            action_toast: None,
             pending_checkout_by_name: None,
             pending_editor_launch: None,
             cherry_pick_clipboard: Vec::new(),
@@ -1709,6 +1717,14 @@ impl Gui {
             // Advance spinner animation
             self.spinner_frame = self.spinner_frame.wrapping_add(1);
 
+            if self
+                .action_toast
+                .as_ref()
+                .is_some_and(|(_, shown_at)| shown_at.elapsed() >= ACTION_TOAST_DURATION)
+            {
+                self.action_toast = None;
+            }
+
             // Render
             let theme = self.active_theme();
             crate::pager::image_preview::flush_cleanup(terminal.backend_mut());
@@ -1722,6 +1738,7 @@ impl Gui {
                 || self.ai_commit_generation_active()
                 || self.remote_op_label.is_some()
                 || self.background_mutation_label.is_some()
+                || self.action_toast.is_some()
                 || self.rebase_mode.active
                 || self.patch_building.active;
             self.context_mgr.tick_selection_animations();
@@ -1772,6 +1789,8 @@ impl Gui {
                             "",
                             None,
                         );
+                    } else if let Some((label, _)) = self.action_toast.as_ref() {
+                        views::render_success_overlay(frame, frame.area(), &theme, label);
                     }
                 } else if self.diff_mode.active {
                     let diff_loading_show = self.diff_loading
@@ -1833,6 +1852,8 @@ impl Gui {
                             "",
                             None,
                         );
+                    } else if let Some((label, _)) = self.action_toast.as_ref() {
+                        views::render_success_overlay(frame, frame.area(), &theme, label);
                     }
                 } else {
                     let model = self.model.lock().unwrap();
@@ -1940,6 +1961,8 @@ impl Gui {
                                 "",
                                 None,
                             );
+                        } else if let Some((label, _)) = self.action_toast.as_ref() {
+                            views::render_success_overlay(frame, frame.area(), &theme, label);
                         }
                     }
                 }
@@ -2083,6 +2106,7 @@ impl Gui {
             || self.ai_commit_generation_active()
             || self.remote_op_label.is_some()
             || self.background_mutation_label.is_some()
+            || self.action_toast.is_some()
             || self.needs_refresh
             || self.diff_loading
             || self.initial_load_rx.is_some()

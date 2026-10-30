@@ -1029,6 +1029,7 @@ pub fn open_commit_in_browser_for(gui: &mut Gui, hash: String) -> Result<()> {
         .git
         .get_commit_url(&hash, &gui.config.user_config.services)?;
     Platform::open_file(&url)?;
+    gui.show_action_toast("Opened commit in browser");
     Ok(())
 }
 
@@ -1087,6 +1088,7 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                         .run_expecting_success()?
                         .stdout;
                     Platform::copy_to_clipboard(&patch)?;
+                    gui.show_action_toast("Patch copied");
                     Ok(())
                 })),
             },
@@ -1099,9 +1101,7 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                         .git_cmd()
                         .args(&["format-patch", "-1", "--output-directory", ".", &save_hash])
                         .run_expecting_success()?;
-                    // `git format-patch` has already written the file. Keep this
-                    // action as lightweight as yank/copy: close the menu and return
-                    // directly instead of requiring an acknowledgement popup.
+                    gui.show_action_toast("Patch saved");
                     Ok(())
                 })),
             },
@@ -1169,8 +1169,9 @@ pub fn copy_commit_to_clipboard_menu_for(
                     label: "Commit hash".to_string(),
                     description: String::new(),
                     key: None,
-                    action: Some(Box::new(move |_gui| {
+                    action: Some(Box::new(move |gui| {
                         Platform::copy_to_clipboard(&hash)?;
+                        gui.show_action_toast("Commit hash copied");
                         Ok(())
                     })),
                 },
@@ -1178,8 +1179,9 @@ pub fn copy_commit_to_clipboard_menu_for(
                     label: "Commit subject".to_string(),
                     description: String::new(),
                     key: Some("s".to_string()),
-                    action: Some(Box::new(move |_gui| {
+                    action: Some(Box::new(move |gui| {
                         Platform::copy_to_clipboard(&subject)?;
+                        gui.show_action_toast("Commit subject copied");
                         Ok(())
                     })),
                 },
@@ -1190,6 +1192,7 @@ pub fn copy_commit_to_clipboard_menu_for(
                     action: Some(Box::new(move |gui| {
                         let msg = gui.git.commit_message_full(&hash_for_msg)?;
                         Platform::copy_to_clipboard(&msg)?;
+                        gui.show_action_toast("Commit message copied");
                         Ok(())
                     })),
                 },
@@ -1205,6 +1208,7 @@ pub fn copy_commit_to_clipboard_menu_for(
                         Some(Box::new(move |gui| {
                             let body = gui.git.commit_message_body(&hash_for_body)?;
                             Platform::copy_to_clipboard(&body)?;
+                            gui.show_action_toast("Commit message body copied");
                             Ok(())
                         }))
                     } else {
@@ -1221,6 +1225,7 @@ pub fn copy_commit_to_clipboard_menu_for(
                             .get_commit_url(&hash_for_url, &gui.config.user_config.services)
                         {
                             Platform::copy_to_clipboard(&url)?;
+                            gui.show_action_toast("Commit URL copied");
                         }
                         Ok(())
                     })),
@@ -1232,6 +1237,7 @@ pub fn copy_commit_to_clipboard_menu_for(
                     action: Some(Box::new(move |gui| {
                         let diff = gui.git.commit_diff(&hash_for_diff)?;
                         Platform::copy_to_clipboard(&diff)?;
+                        gui.show_action_toast("Commit diff copied");
                         Ok(())
                     })),
                 },
@@ -1239,8 +1245,9 @@ pub fn copy_commit_to_clipboard_menu_for(
                     label: "Commit author".to_string(),
                     description: String::new(),
                     key: Some("a".to_string()),
-                    action: Some(Box::new(move |_gui| {
+                    action: Some(Box::new(move |gui| {
                         Platform::copy_to_clipboard(&author)?;
+                        gui.show_action_toast("Commit author copied");
                         Ok(())
                     })),
                 },
@@ -1253,8 +1260,9 @@ pub fn copy_commit_to_clipboard_menu_for(
                     },
                     key: Some("t".to_string()),
                     action: if has_tags {
-                        Some(Box::new(move |_gui| {
+                        Some(Box::new(move |gui| {
                             Platform::copy_to_clipboard(&tags)?;
+                            gui.show_action_toast("Commit tags copied");
                             Ok(())
                         }))
                     } else {

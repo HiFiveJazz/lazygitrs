@@ -3544,11 +3544,6 @@ pub fn render_loading_overlay(
     message: &str,
     hint: Option<(&str, &str)>,
 ) {
-    if area.width < 4 || area.height < 3 {
-        return;
-    }
-
-    // Compact bottom-right toast: spinner + short label, no large modal.
     let spinner = SPINNER_CHARS[(spinner_frame / 8) % SPINNER_CHARS.len()];
     let label = if message.is_empty() {
         title.to_string()
@@ -3558,7 +3553,26 @@ pub fn render_loading_overlay(
         // Prefer title when message is long (e.g. "Pushing branch to remote...").
         title.to_string()
     };
-    let content = format!(" {spinner} {label} ");
+    render_compact_overlay(frame, area, theme, &spinner.to_string(), &label, hint);
+}
+
+pub fn render_success_overlay(frame: &mut Frame, area: Rect, theme: &Theme, label: &str) {
+    render_compact_overlay(frame, area, theme, "✓", label, None);
+}
+
+fn render_compact_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    marker: &str,
+    label: &str,
+    hint: Option<(&str, &str)>,
+) {
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
+
+    let content = format!(" {marker} {label} ");
     let mut width = (content.chars().count() as u16)
         .saturating_add(2)
         .min(area.width);
@@ -3575,9 +3589,9 @@ pub fn render_loading_overlay(
         .border_style(Style::default().fg(theme.accent));
 
     let mut text = vec![Line::from(vec![
-        Span::styled(format!(" {spinner} "), Style::default().fg(theme.accent)),
+        Span::styled(format!(" {marker} "), Style::default().fg(theme.accent)),
         Span::styled(
-            label,
+            label.to_string(),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -3593,8 +3607,7 @@ pub fn render_loading_overlay(
         ]));
     }
 
-    let widget = Paragraph::new(text).block(block);
-    frame.render_widget(widget, popup_rect);
+    frame.render_widget(Paragraph::new(text).block(block), popup_rect);
 }
 
 fn command_output_geometry(area: Rect) -> (Rect, usize) {
