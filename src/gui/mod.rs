@@ -7078,8 +7078,9 @@ impl Gui {
                             message: format!("Loading {p}..."),
                             kind: MessageKind::Info,
                         };
+                        let repo_path = p.clone();
                         std::thread::spawn(move || {
-                            let result = crate::git::GitCommands::new(std::path::Path::new(&p))
+                            let result = crate::git::GitCommands::new(std::path::Path::new(&repo_path))
                                 .and_then(|git| git.load_model().map(|model| (git, model)));
                             let _ = tx.send(Box::new(move |gui: &mut Gui| match result {
                                 Ok((new_git, new_model)) => {
