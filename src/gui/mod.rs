@@ -48,6 +48,33 @@ use self::popup::{
 
 /// Compute the visible list height for a list picker popup, given terminal height.
 /// Must match the rendering formula: popup 60% height, minus borders (2), search bar + sep + hint (3).
+const COMMIT_DETAILS_CACHE_ENTRIES: usize = 512;
+
+fn bounded_cache_insert<T>(
+    cache: &mut HashMap<String, T>,
+    order: &mut VecDeque<String>,
+    key: String,
+    value: T,
+) {
+    if cache.contains_key(&key) {
+        cache.insert(key.clone(), value);
+        if let Some(pos) = order.iter().position(|existing| existing == &key) {
+            order.remove(pos);
+        }
+        order.push_back(key);
+        return;
+    }
+
+    while cache.len() >= COMMIT_DETAILS_CACHE_ENTRIES {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
+    cache.insert(key.clone(), value);
+    order.push_back(key);
+}
+
 fn list_picker_visible_height(terminal_height: usize) -> usize {
     let popup_h = (terminal_height * 60 / 100)
         .max(10)
@@ -790,9 +817,11 @@ pub struct Gui {
     /// by background threads so the render path never blocks on git.
     pub commit_stats_cache:
         std::sync::Arc<std::sync::Mutex<HashMap<String, crate::model::commit::CommitStat>>>,
+    commit_stats_cache_order: std::sync::Arc<std::sync::Mutex<VecDeque<String>>>,
     /// Cache of full commit messages (subject + body) per hash, fetched
     /// asynchronously so the details panel can render the full description.
     pub commit_messages_cache: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
+    commit_messages_cache_order: std::sync::Arc<std::sync::Mutex<VecDeque<String>>>,
     /// Latest-only queue for commit metadata shown below the commit list.
     commit_details_job_tx: mpsc::Sender<BackgroundJob>,
     /// Invalidates commit-detail jobs when selection changes while one is running.
@@ -1234,7 +1263,9 @@ impl Gui {
             commit_history_draft: String::new(),
             current_theme_index,
             commit_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            commit_stats_cache_order: std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new())),
             commit_messages_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            commit_messages_cache_order: std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new())),
             commit_details_job_tx,
             commit_details_generation,
             last_commit_details_key: String::new(),
@@ -2267,7 +2298,9 @@ impl Gui {
 
         let git = Arc::clone(&self.git);
         let stat_cache = Arc::clone(&self.commit_stats_cache);
+        let stat_order = Arc::clone(&self.commit_stats_cache_order);
         let message_cache = Arc::clone(&self.commit_messages_cache);
+        let message_order = Arc::clone(&self.commit_messages_cache_order);
         let generation_counter = Arc::clone(&self.commit_details_generation);
         let _ = self.commit_details_job_tx.send(Box::new(move || {
             if generation_counter.load(Ordering::Relaxed) != generation {
@@ -2276,11 +2309,13 @@ impl Gui {
 
             if !stat_cached && !message_cached {
                 if let Ok((message, stat)) = git.commit_details(&hash) {
-                    if let Ok(mut cache) = stat_cache.lock() {
-                        cache.insert(hash.clone(), stat);
+                    if let (Ok(mut cache), Ok(mut order)) = (stat_cache.lock(), stat_order.lock()) {
+                        bounded_cache_insert(&mut cache, &mut order, hash.clone(), stat);
                     }
-                    if let Ok(mut cache) = message_cache.lock() {
-                        cache.insert(hash, message);
+                    if let (Ok(mut cache), Ok(mut order)) =
+                        (message_cache.lock(), message_order.lock())
+                    {
+                        bounded_cache_insert(&mut cache, &mut order, hash, message);
                     }
                 }
                 return;
@@ -2288,8 +2323,8 @@ impl Gui {
 
             if !stat_cached {
                 if let Ok(stat) = git.commit_stat(&hash) {
-                    if let Ok(mut cache) = stat_cache.lock() {
-                        cache.insert(hash.clone(), stat);
+                    if let (Ok(mut cache), Ok(mut order)) = (stat_cache.lock(), stat_order.lock()) {
+                        bounded_cache_insert(&mut cache, &mut order, hash.clone(), stat);
                     }
                 }
             }
@@ -2300,8 +2335,10 @@ impl Gui {
 
             if !message_cached {
                 if let Ok(message) = git.commit_message_full(&hash) {
-                    if let Ok(mut cache) = message_cache.lock() {
-                        cache.insert(hash, message);
+                    if let (Ok(mut cache), Ok(mut order)) =
+                        (message_cache.lock(), message_order.lock())
+                    {
+                        bounded_cache_insert(&mut cache, &mut order, hash, message);
                     }
                 }
             }
@@ -7013,7 +7050,9 @@ impl Gui {
                         *gui.model.lock().unwrap() = new_model;
                         gui.commit_list_cache = presentation::commits::CommitListCache::default();
                         gui.commit_stats_cache.lock().unwrap().clear();
+                        gui.commit_stats_cache_order.lock().unwrap().clear();
                         gui.commit_messages_cache.lock().unwrap().clear();
+                        gui.commit_messages_cache_order.lock().unwrap().clear();
                         gui.clear_diff_preview_cache();
                         gui.last_commit_details_key.clear();
                         gui.commit_details_generation
