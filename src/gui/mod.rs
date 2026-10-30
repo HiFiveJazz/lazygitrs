@@ -326,6 +326,19 @@ pub(crate) enum DiffPayload {
     Empty,
 }
 
+/// Return large temporary allocations to glibc after workflows that are known
+/// to allocate substantial short-lived buffers. Other allocators/platforms
+/// already reclaim/reuse this memory appropriately, so this is a no-op there.
+#[inline]
+pub(crate) fn trim_process_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        // SAFETY: malloc_trim takes no pointers and only asks glibc to release
+        // unused arena pages back to the OS.
+        libc::malloc_trim(0);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteOpKind {
     Push,
@@ -2053,6 +2066,15 @@ impl Gui {
                         }
                     }
                 }
+
+                // Action confirmations normally yield to popups. Email is a
+                // long-lived compose/review surface, though, so confirmations
+                // such as a successful dry run must be visible above it.
+                if matches!(self.popup, PopupState::EmailPatch { .. }) {
+                    if let Some((label, _)) = self.action_toast.as_ref() {
+                        views::render_success_overlay(frame, frame.area(), &theme, label);
+                    }
+                }
             })?;
 
             // One batch per frame. Reassembly lives on the reader thread so a
@@ -3302,6 +3324,7 @@ impl Gui {
                             } else {
                                 "Patch emailed"
                             });
+                            trim_process_heap();
                         }
                         RemoteOpKind::FetchAndCheckout | RemoteOpKind::Other => {
                             self.needs_refresh = true;
@@ -3358,6 +3381,9 @@ impl Gui {
                             message: err,
                             kind: MessageKind::Error,
                         };
+                    }
+                    if matches!(kind, RemoteOpKind::Email(_)) {
+                        trim_process_heap();
                     }
                 }
             }
@@ -5690,7 +5716,9 @@ impl Gui {
 
                 if resolving_recipients {
                     if key.code == KeyCode::Esc {
-                        self.popup = PopupState::None;
+                        let popup = std::mem::replace(&mut self.popup, PopupState::None);
+                        drop(popup);
+                        trim_process_heap();
                     }
                     return Ok(());
                 }
@@ -5708,9 +5736,14 @@ impl Gui {
                     if key.code == KeyCode::Enter || key.code == KeyCode::Char('y') {
                         let popup = std::mem::replace(&mut self.popup, PopupState::None);
                         if let PopupState::EmailPatch {
+                            title,
                             to_recipients,
                             cc_recipients,
+                            to_selected,
+                            cc_selected,
+                            recipient_undo,
                             dry_run,
+                            resolution_request_id,
                             on_confirm,
                             ..
                         } = popup
@@ -5722,6 +5755,26 @@ impl Gui {
                                     title: "Error".to_string(),
                                     message: format!("{}", e),
                                     kind: MessageKind::Error,
+                                };
+                            } else if dry_run {
+                                // Keep the reviewed recipients and Dry Run state visible while
+                                // the asynchronous check runs. On success the normal action toast
+                                // confirms the check, and the user can ctrl-d to switch to a real
+                                // send without rebuilding the review screen.
+                                self.popup = PopupState::EmailPatch {
+                                    title,
+                                    to_recipients,
+                                    cc_recipients,
+                                    focus: popup::EmailPatchFocus::To,
+                                    to_selected,
+                                    cc_selected,
+                                    recipient_editor: None,
+                                    recipient_undo,
+                                    dry_run: true,
+                                    reviewing: true,
+                                    resolving_recipients: false,
+                                    resolution_request_id,
+                                    on_confirm,
                                 };
                             }
                         }
@@ -5771,12 +5824,42 @@ impl Gui {
                             return Ok(());
                         }
 
+                        let (editing_field, editing_index) = if let PopupState::EmailPatch {
+                            recipient_editor: Some(editor),
+                            ..
+                        } = &self.popup
+                        {
+                            (editor.field, editor.index)
+                        } else {
+                            return Ok(());
+                        };
+                        let validation = if let PopupState::EmailPatch {
+                            to_recipients,
+                            cc_recipients,
+                            ..
+                        } = &self.popup
+                        {
+                            popup::validate_email_recipient_candidates(
+                                &parsed,
+                                to_recipients,
+                                cc_recipients,
+                                editing_index.map(|index| (editing_field, index)),
+                            )
+                        } else {
+                            Ok(())
+                        };
+                        if let Err(message) = validation {
+                            self.show_action_toast(message);
+                            return Ok(());
+                        }
+
                         if let PopupState::EmailPatch {
                             to_recipients,
                             cc_recipients,
                             to_selected,
                             cc_selected,
                             recipient_editor,
+                            recipient_undo,
                             ..
                         } = &mut self.popup
                         {
@@ -5788,11 +5871,31 @@ impl Gui {
                             if let Some(index) =
                                 editor.index.filter(|index| *index < recipients.len())
                             {
+                                let old_value = recipients[index].clone();
                                 let inserted = parsed.len();
                                 recipients.splice(index..=index, parsed);
+                                popup::push_email_recipient_undo(
+                                    recipient_undo,
+                                    popup::EmailRecipientUndo::Replaced {
+                                        field: editor.field,
+                                        index,
+                                        old_value,
+                                        new_count: inserted,
+                                    },
+                                );
                                 *selected = index.saturating_add(inserted.saturating_sub(1));
                             } else {
+                                let index = recipients.len();
+                                let inserted = parsed.len();
                                 recipients.extend(parsed);
+                                popup::push_email_recipient_undo(
+                                    recipient_undo,
+                                    popup::EmailRecipientUndo::Inserted {
+                                        field: editor.field,
+                                        index,
+                                        count: inserted,
+                                    },
+                                );
                                 *selected = recipients.len().saturating_sub(1);
                             }
                         }
@@ -5810,7 +5913,9 @@ impl Gui {
                 }
 
                 if key.code == KeyCode::Esc {
-                    self.popup = PopupState::None;
+                    let popup = std::mem::replace(&mut self.popup, PopupState::None);
+                    drop(popup);
+                    trim_process_heap();
                 } else if key.code == KeyCode::Enter {
                     let missing_to = if let PopupState::EmailPatch {
                         to_recipients,
@@ -5913,7 +6018,7 @@ impl Gui {
                         cc_recipients,
                         to_selected,
                         cc_selected,
-                        deleted_recipients,
+                        recipient_undo,
                         ..
                     } = &mut self.popup
                     {
@@ -5925,14 +6030,14 @@ impl Gui {
                         if !recipients.is_empty() {
                             let index = (*selected).min(recipients.len() - 1);
                             let value = recipients.remove(index);
-                            deleted_recipients.push(popup::DeletedEmailRecipient {
-                                field,
-                                index,
-                                value,
-                            });
-                            if deleted_recipients.len() > popup::EMAIL_RECIPIENT_UNDO_LIMIT {
-                                deleted_recipients.remove(0);
-                            }
+                            popup::push_email_recipient_undo(
+                                recipient_undo,
+                                popup::EmailRecipientUndo::Deleted {
+                                    field,
+                                    index,
+                                    value,
+                                },
+                            );
                             *selected = index.min(recipients.len().saturating_sub(1));
                         }
                     }
@@ -5943,19 +6048,47 @@ impl Gui {
                         cc_recipients,
                         to_selected,
                         cc_selected,
-                        deleted_recipients,
+                        recipient_undo,
                         ..
                     } = &mut self.popup
                     {
-                        if let Some(deleted) = deleted_recipients.pop() {
-                            *focus = deleted.field;
-                            let (recipients, selected) = match deleted.field {
+                        if let Some(entry) = recipient_undo.pop() {
+                            let field = match &entry {
+                                popup::EmailRecipientUndo::Deleted { field, .. }
+                                | popup::EmailRecipientUndo::Inserted { field, .. }
+                                | popup::EmailRecipientUndo::Replaced { field, .. } => *field,
+                            };
+                            *focus = field;
+                            let (recipients, selected) = match field {
                                 popup::EmailPatchFocus::To => (to_recipients, to_selected),
                                 popup::EmailPatchFocus::Cc => (cc_recipients, cc_selected),
                             };
-                            let index = deleted.index.min(recipients.len());
-                            recipients.insert(index, deleted.value);
-                            *selected = index;
+                            match entry {
+                                popup::EmailRecipientUndo::Deleted { index, value, .. } => {
+                                    let index = index.min(recipients.len());
+                                    recipients.insert(index, value);
+                                    *selected = index;
+                                }
+                                popup::EmailRecipientUndo::Inserted { index, count, .. } => {
+                                    let start = index.min(recipients.len());
+                                    let end = start.saturating_add(count).min(recipients.len());
+                                    recipients.drain(start..end);
+                                    *selected = start.min(recipients.len().saturating_sub(1));
+                                }
+                                popup::EmailRecipientUndo::Replaced {
+                                    index,
+                                    old_value,
+                                    new_count,
+                                    ..
+                                } => {
+                                    let start = index.min(recipients.len());
+                                    let end = start.saturating_add(new_count).min(recipients.len());
+                                    recipients.drain(start..end);
+                                    let restore_at = start.min(recipients.len());
+                                    recipients.insert(restore_at, old_value);
+                                    *selected = restore_at;
+                                }
+                            }
                         }
                     }
                 } else if key.code == KeyCode::Char('a') || key.code == KeyCode::Char('e') {

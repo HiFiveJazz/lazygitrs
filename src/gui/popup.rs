@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -459,7 +460,7 @@ impl BodySoftWrap {
 pub type ConfirmAction = Box<dyn FnOnce(&mut Gui) -> Result<()>>;
 pub type InputAction = Box<dyn FnOnce(&mut Gui, &str) -> Result<()>>;
 pub type MenuAction = Box<dyn Fn(&mut Gui) -> Result<()>>;
-pub type EmailPatchAction = Box<dyn FnOnce(&mut Gui, String, String, bool) -> Result<()>>;
+pub type EmailPatchAction = Box<dyn Fn(&mut Gui, String, String, bool) -> Result<()>>;
 
 /// Result sent back from a menu item's background operation.
 pub enum MenuAsyncResult {
@@ -522,13 +523,139 @@ pub struct EmailRecipientEditor {
 }
 
 #[derive(Debug, Clone)]
-pub struct DeletedEmailRecipient {
-    pub field: EmailPatchFocus,
-    pub index: usize,
-    pub value: String,
+pub enum EmailRecipientUndo {
+    Deleted {
+        field: EmailPatchFocus,
+        index: usize,
+        value: String,
+    },
+    Inserted {
+        field: EmailPatchFocus,
+        index: usize,
+        count: usize,
+    },
+    Replaced {
+        field: EmailPatchFocus,
+        index: usize,
+        old_value: String,
+        new_count: usize,
+    },
 }
 
 pub const EMAIL_RECIPIENT_UNDO_LIMIT: usize = 32;
+
+pub fn push_email_recipient_undo(stack: &mut Vec<EmailRecipientUndo>, entry: EmailRecipientUndo) {
+    stack.push(entry);
+    if stack.len() > EMAIL_RECIPIENT_UNDO_LIMIT {
+        stack.remove(0);
+    }
+}
+
+/// Return the normalized mailbox part of a visible recipient such as
+/// `Name <user@example.com>`. This is intentionally a conservative validator,
+/// not a full RFC 5322 parser: git-send-email's common human-facing forms are
+/// accepted while obvious typos are rejected before sending.
+pub fn email_address_key(recipient: &str) -> Option<String> {
+    let value = recipient.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let address = if let Some(open) = value.rfind('<') {
+        let close = value.rfind('>')?;
+        if close <= open || !value[close + 1..].trim().is_empty() {
+            return None;
+        }
+        value[open + 1..close].trim()
+    } else {
+        value
+    };
+
+    if address.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+        return None;
+    }
+
+    let mut parts = address.split('@');
+    let local = parts.next()?;
+    let domain = parts.next()?;
+    if parts.next().is_some() || local.is_empty() || domain.is_empty() {
+        return None;
+    }
+    if local.starts_with('.')
+        || local.ends_with('.')
+        || local.contains("..")
+        || local
+            .chars()
+            .any(|ch| matches!(ch, '<' | '>' | '(' | ')' | '[' | ']' | ',' | ';' | ':' | '\\' | '"'))
+    {
+        return None;
+    }
+
+    // Require a dotted domain for the mail UI. This intentionally catches
+    // common mistakes like `user@example` while keeping validation simple.
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() < 2
+        || labels.iter().any(|label| {
+            label.is_empty()
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        })
+    {
+        return None;
+    }
+
+    Some(address.to_ascii_lowercase())
+}
+
+/// Remove duplicate mailboxes while preserving order. `To` wins over `Cc`
+/// when the same address appears in both lists.
+pub fn dedupe_email_recipients(to: &mut Vec<String>, cc: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    to.retain(|recipient| {
+        let key = email_address_key(recipient)
+            .unwrap_or_else(|| recipient.trim().to_ascii_lowercase());
+        seen.insert(key)
+    });
+    cc.retain(|recipient| {
+        let key = email_address_key(recipient)
+            .unwrap_or_else(|| recipient.trim().to_ascii_lowercase());
+        seen.insert(key)
+    });
+}
+
+/// Validate a pending add/edit against both visible recipient lists. Editing
+/// may keep its own mailbox (for example when only changing the display name),
+/// but no other To/Cc entry may resolve to the same address.
+pub fn validate_email_recipient_candidates(
+    candidates: &[String],
+    to: &[String],
+    cc: &[String],
+    editing: Option<(EmailPatchFocus, usize)>,
+) -> std::result::Result<(), String> {
+    let mut seen = HashSet::new();
+    for (field, recipients) in [(EmailPatchFocus::To, to), (EmailPatchFocus::Cc, cc)] {
+        for (index, recipient) in recipients.iter().enumerate() {
+            if editing == Some((field, index)) {
+                continue;
+            }
+            if let Some(key) = email_address_key(recipient) {
+                seen.insert(key);
+            }
+        }
+    }
+
+    let mut pending = HashSet::new();
+    for recipient in candidates {
+        let Some(key) = email_address_key(recipient) else {
+            return Err(format!("Invalid email address: {recipient}"));
+        };
+        if seen.contains(&key) || !pending.insert(key.clone()) {
+            return Err(format!("Recipient already added: {key}"));
+        }
+    }
+    Ok(())
+}
 
 /// Split a Git send-email recipient header into individual addresses while
 /// preserving quoted display names such as `"Doe, Jane" <jane@example.com>`.
@@ -626,7 +753,7 @@ pub enum PopupState {
         to_selected: usize,
         cc_selected: usize,
         recipient_editor: Option<EmailRecipientEditor>,
-        deleted_recipients: Vec<DeletedEmailRecipient>,
+        recipient_undo: Vec<EmailRecipientUndo>,
         dry_run: bool,
         /// True while the final, editable recipient list is being reviewed.
         reviewing: bool,
@@ -1615,7 +1742,10 @@ mod checklist_free_entry_tests {
 
 #[cfg(test)]
 mod email_recipient_tests {
-    use super::{join_email_recipients, split_email_recipients};
+    use super::{
+        EmailPatchFocus, dedupe_email_recipients, email_address_key, join_email_recipients,
+        split_email_recipients, validate_email_recipient_candidates,
+    };
 
     #[test]
     fn splits_recipient_list_without_breaking_quoted_names() {
@@ -1629,6 +1759,72 @@ mod email_recipient_tests {
                 "list@example.org",
             ]
         );
+    }
+
+
+    #[test]
+    fn validates_and_normalizes_visible_email_addresses() {
+        assert_eq!(
+            email_address_key("Jens Axboe <Axboe@Kernel.DK>"),
+            Some("axboe@kernel.dk".to_string())
+        );
+        assert_eq!(
+            email_address_key("list@example.org"),
+            Some("list@example.org".to_string())
+        );
+        assert_eq!(email_address_key("missing-at.example.org"), None);
+        assert_eq!(email_address_key("user@example"), None);
+        assert_eq!(email_address_key("user @example.org"), None);
+        assert_eq!(email_address_key("user@.example.org"), None);
+    }
+
+    #[test]
+    fn rejects_duplicate_recipients_across_to_and_cc() {
+        let to = vec!["Jens Axboe <axboe@kernel.dk>".to_string()];
+        let cc = vec!["list@example.org".to_string()];
+        assert!(
+            validate_email_recipient_candidates(
+                &["AXBOE@kernel.dk".to_string()],
+                &to,
+                &cc,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_email_recipient_candidates(
+                &["new@example.org".to_string(), "NEW@example.org".to_string()],
+                &to,
+                &cc,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_email_recipient_candidates(
+                &["Jens <axboe@kernel.dk>".to_string()],
+                &to,
+                &cc,
+                Some((EmailPatchFocus::To, 0)),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn dedupes_resolved_recipients_with_to_taking_priority() {
+        let mut to = vec![
+            "Jens Axboe <axboe@kernel.dk>".to_string(),
+            "AXBOE@kernel.dk".to_string(),
+        ];
+        let mut cc = vec![
+            "axboe@kernel.dk".to_string(),
+            "list@example.org".to_string(),
+            "LIST@example.org".to_string(),
+        ];
+        dedupe_email_recipients(&mut to, &mut cc);
+        assert_eq!(to, vec!["Jens Axboe <axboe@kernel.dk>"]);
+        assert_eq!(cc, vec!["list@example.org"]);
     }
 
     #[test]

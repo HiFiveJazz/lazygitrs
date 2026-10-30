@@ -4215,36 +4215,22 @@ pub fn render_popup(
                 return;
             }
 
-            // Footer and options are anchored from the bottom of the modal,
-            // independent of recipient count or editor state.
+            // Status badges and hints are anchored at the very bottom of the
+            // modal. Compose/Review shares the footer row; Dry Run appears
+            // directly above it only while enabled, so mode state is visible
+            // without permanently spending space on an old-style checkbox.
             let footer_y = inner.y + inner.height.saturating_sub(1);
-            let options_y = footer_y.saturating_sub(2);
-            let checkbox = if *dry_run { "[x]" } else { "[ ]" };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(format!(" {checkbox} "), Style::default().fg(theme.text)),
-                    Span::styled("Dry run", Style::default().fg(theme.text)),
-                ])),
-                Rect::new(inner.x, options_y, inner.width, 1),
-            );
-
-            let mode_text = if *reviewing { " Review " } else { " Compose " };
-            let mode_width = mode_text.len() as u16;
+            let status_y = footer_y.saturating_sub(1);
+            // Keep all status badges on one shared width so Compose, Review,
+            // and Dry Run line up as a single right-edge status stack.
+            let status_badge_width = 9u16.min(inner.width);
+            let mode_text = if *reviewing { "Review" } else { "Compose" };
+            let mode_width = status_badge_width;
             let mode_rect = Rect::new(
                 inner.x + inner.width.saturating_sub(mode_width),
-                options_y,
-                mode_width.min(inner.width),
+                footer_y,
+                mode_width,
                 1,
-            );
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    mode_text,
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(mode_color)
-                        .add_modifier(Modifier::BOLD),
-                ))),
-                mode_rect,
             );
 
             let key_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
@@ -4287,10 +4273,66 @@ pub fn render_popup(
                     Span::styled("review", desc_style),
                 ])
             };
+            let footer_width = inner.width.saturating_sub(mode_width.saturating_add(1));
+            if footer_width > 0 {
+                frame.render_widget(
+                    Paragraph::new(footer),
+                    Rect::new(inner.x, footer_y, footer_width, 1),
+                );
+            }
+
+            // Paint the entire fixed-width badge rectangle, then center the
+            // label inside it. Styling only the text span makes labels with
+            // different lengths (e.g. "Dry Run" vs "Review") appear
+            // horizontally misaligned even when their Rects are identical.
             frame.render_widget(
-                Paragraph::new(footer),
-                Rect::new(inner.x, footer_y, inner.width, 1),
+                Block::default().style(Style::default().bg(mode_color)),
+                mode_rect,
             );
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    mode_text,
+                    Style::default()
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center),
+                mode_rect,
+            );
+
+            if *dry_run {
+                let dry_text = "Dry Run";
+                let dry_width = status_badge_width;
+                let dry_rect = Rect::new(
+                    inner.x + inner.width.saturating_sub(dry_width),
+                    status_y,
+                    dry_width,
+                    1,
+                );
+                // Pick Dry Run from the theme's graph palette, but never reuse
+                // either Compose or Review's accent. This keeps the status
+                // theme-native while making the three modes visually distinct.
+                let dry_run_color = theme
+                    .graph_colors
+                    .iter()
+                    .copied()
+                    .find(|color| *color != theme.accent && *color != theme.accent_secondary)
+                    .unwrap_or(theme.change_added);
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(dry_run_color)),
+                    dry_rect,
+                );
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        dry_text,
+                        Style::default()
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD),
+                    )))
+                    .alignment(ratatui::layout::Alignment::Center),
+                    dry_rect,
+                );
+            }
 
             let focused_label = Style::default()
                 .fg(theme.accent_secondary)
@@ -4302,25 +4344,19 @@ pub fn render_popup(
             let content_start = if *reviewing {
                 let action = if *dry_run { "Check" } else { "Send" };
                 frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled(
-                            format!("{action} this patch?"),
-                            Style::default()
-                                .fg(theme.text_strong)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            "  Only the recipients below will be used.",
-                            Style::default().fg(theme.text_dimmed),
-                        ),
-                    ])),
+                    Paragraph::new(Line::from(Span::styled(
+                        format!("{action} this patch?"),
+                        Style::default()
+                            .fg(theme.text_strong)
+                            .add_modifier(Modifier::BOLD),
+                    ))),
                     Rect::new(inner.x, inner.y, inner.width, 1),
                 );
                 inner.y.saturating_add(2)
             } else {
                 inner.y
             };
-            let content_rows = options_y.saturating_sub(content_start) as usize;
+            let content_rows = status_y.saturating_sub(content_start) as usize;
             let list_budget = content_rows.saturating_sub(3).max(2);
             let (to_rows, cc_rows) = email_recipient_row_allocation(
                 to_recipients.len(),

@@ -7,7 +7,7 @@ use crate::config::keybindings::parse_key;
 use crate::git::rebase::RebaseAction;
 use crate::gui::popup::{
     BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, EmailPatchFocus, MenuItem,
-    MessageKind, PopupState, make_textarea, split_email_recipients,
+    MessageKind, PopupState, dedupe_email_recipients, make_textarea, split_email_recipients,
 };
 use crate::gui::{Gui, RemoteOpKind};
 use crate::model::Branch;
@@ -1164,8 +1164,9 @@ fn show_email_patch_popup_with_values(
     resolution_request_id: u64,
     focus: EmailPatchFocus,
 ) {
-    let to_recipients = split_email_recipients(&to);
-    let cc_recipients = split_email_recipients(&cc);
+    let mut to_recipients = split_email_recipients(&to);
+    let mut cc_recipients = split_email_recipients(&cc);
+    dedupe_email_recipients(&mut to_recipients, &mut cc_recipients);
 
     gui.popup = PopupState::EmailPatch {
         title: format!("Email patch {short}"),
@@ -1175,7 +1176,7 @@ fn show_email_patch_popup_with_values(
         to_selected: 0,
         cc_selected: 0,
         recipient_editor: None,
-        deleted_recipients: Vec::new(),
+        recipient_undo: Vec::new(),
         dry_run,
         reviewing,
         resolving_recipients,
@@ -1228,6 +1229,7 @@ fn resolve_send_patch_recipients(
                 } if *active_request_id == request_id
             );
             if !still_current {
+                crate::gui::trim_process_heap();
                 return;
             }
 
@@ -1255,6 +1257,11 @@ fn resolve_send_patch_recipients(
                     };
                 }
             }
+            // git send-email --dry-run can emit the entire patch while we only
+            // retain its resolved headers. Its large temporary stdout buffer is
+            // dead by this point; return those pages instead of leaving them in
+            // glibc's arena after the email popup is closed.
+            crate::gui::trim_process_heap();
         }) as crate::gui::UiJob);
     });
 
