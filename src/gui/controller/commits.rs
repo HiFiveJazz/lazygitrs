@@ -1051,7 +1051,7 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
         items: vec![
             MenuItem {
                 label: "Preview".to_string(),
-                description: "formatted patch".to_string(),
+                description: "View formatted patch".to_string(),
                 key: Some("v".to_string()),
                 action: Some(Box::new(move |gui| {
                     let patch = gui
@@ -1071,7 +1071,7 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
             },
             MenuItem {
                 label: "Copy".to_string(),
-                description: "clipboard".to_string(),
+                description: "Copy to clipboard".to_string(),
                 key: Some("y".to_string()),
                 action: Some(Box::new(move |gui| {
                     let patch = gui
@@ -1081,21 +1081,15 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                         .run_expecting_success()?
                         .stdout;
                     Platform::copy_to_clipboard(&patch)?;
-                    gui.popup = PopupState::Message {
-                        title: "Patch copied".to_string(),
-                        message: "Patch copied to clipboard.".to_string(),
-                        kind: MessageKind::Info,
-                    };
                     Ok(())
                 })),
             },
             MenuItem {
                 label: "Save".to_string(),
-                description: ".patch file".to_string(),
+                description: "Save .patch in repo root".to_string(),
                 key: Some("s".to_string()),
                 action: Some(Box::new(move |gui| {
-                    let result = gui
-                        .git
+                    gui.git
                         .git_cmd()
                         .args(&[
                             "format-patch",
@@ -1105,22 +1099,15 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                             &save_hash,
                         ])
                         .run_expecting_success()?;
-                    let path = result.stdout.trim();
-                    gui.popup = PopupState::Message {
-                        title: "Patch saved".to_string(),
-                        message: if path.is_empty() {
-                            "Patch written to the repository root.".to_string()
-                        } else {
-                            format!("Wrote {path}")
-                        },
-                        kind: MessageKind::Info,
-                    };
+                    // `git format-patch` has already written the file. Keep this
+                    // action as lightweight as yank/copy: close the menu and return
+                    // directly instead of requiring an acknowledgement popup.
                     Ok(())
                 })),
             },
             MenuItem {
                 label: "Custom patch".to_string(),
-                description: "select files".to_string(),
+                description: "Choose files to stage".to_string(),
                 key: Some("b".to_string()),
                 action: Some(Box::new(move |gui| {
                     super::patch_building::show_patch_menu(gui)
