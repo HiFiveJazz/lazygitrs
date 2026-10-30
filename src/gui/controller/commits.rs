@@ -635,6 +635,70 @@ fn apply_action_to_selection(gui: &mut Gui, action: RebaseAction) -> Result<()> 
     )
 }
 
+pub(crate) fn enter_interactive_rebase_for_base(
+    gui: &mut Gui,
+    base_hash: String,
+    branch_name: String,
+) -> Result<()> {
+    let base_from_model = {
+        let model = gui.model.lock().unwrap();
+        model
+            .commits
+            .iter()
+            .find(|c| {
+                c.hash == base_hash
+                    || base_hash.starts_with(&c.hash)
+                    || c.hash.starts_with(&base_hash)
+            })
+            .cloned()
+    };
+
+    let rebase_count = match gui.git.rebase_commit_count(&base_hash) {
+        Ok(count) => count,
+        Err(e) => {
+            gui.popup = PopupState::Message {
+                title: "Interactive rebase".to_string(),
+                message: format!("Failed to determine rebase range: {e}"),
+                kind: crate::gui::popup::MessageKind::Error,
+            };
+            return Ok(());
+        }
+    };
+
+    if rebase_count == 0 {
+        gui.popup = PopupState::Message {
+            title: "Interactive rebase".to_string(),
+            message: "No commits to rebase.".to_string(),
+            kind: crate::gui::popup::MessageKind::Error,
+        };
+        return Ok(());
+    }
+
+    let open = move |gui: &mut Gui| {
+        open_rebase_planner(
+            gui,
+            RebaseAction::Pick,
+            HashSet::new(),
+            base_hash.clone(),
+            branch_name.clone(),
+            base_from_model.clone(),
+        )
+    };
+
+    if rebase_count > LARGE_REBASE_PLANNER_THRESHOLD {
+        gui.popup = PopupState::Confirm {
+            title: "Large interactive rebase".to_string(),
+            message: format!(
+                "This operation would rewrite {rebase_count} commits.\nOpen the interactive rebase planner?"
+            ),
+            on_confirm: Box::new(open),
+        };
+        return Ok(());
+    }
+
+    open(gui)
+}
+
 fn open_rebase_planner(
     gui: &mut Gui,
     action: RebaseAction,
@@ -696,9 +760,10 @@ fn open_rebase_planner(
     // Selecting a commit from `git log --all` does not guarantee that commit is
     // on the current HEAD ancestry. Avoid opening a planner for the wrong line
     // of history.
-    if !commits_to_rebase
-        .iter()
-        .any(|c| selected_hashes.contains(&c.hash))
+    if !selected_hashes.is_empty()
+        && !commits_to_rebase
+            .iter()
+            .any(|c| selected_hashes.contains(&c.hash))
     {
         gui.popup = PopupState::Message {
             title: "Interactive rebase".to_string(),
@@ -1523,73 +1588,28 @@ fn enter_commit_files(gui: &mut Gui) -> Result<()> {
 
 fn enter_interactive_rebase(gui: &mut Gui) -> Result<()> {
     let selected = gui.context_mgr.selected_active();
-    let model = gui.model.lock().unwrap();
-
-    let base_commit = match model.commits.get(selected) {
-        Some(c) => c,
-        None => return Ok(()),
+    let (base_hash, branch_name, head_hash) = {
+        let model = gui.model.lock().unwrap();
+        let Some(base_commit) = model.commits.get(selected) else {
+            return Ok(());
+        };
+        (
+            base_commit.hash.clone(),
+            model.head_branch_name.clone(),
+            model.head_hash.clone(),
+        )
     };
 
-    if base_commit.hash == model.head_hash {
+    if base_hash == head_hash {
         gui.popup = PopupState::Message {
             title: "Interactive rebase".to_string(),
             message: "Cannot rebase HEAD onto itself. Select a different commit.".to_string(),
             kind: crate::gui::popup::MessageKind::Error,
         };
-        drop(model);
         return Ok(());
     }
 
-    let base_hash = base_commit.hash.clone();
-    let branch_name = model.head_branch_name.clone();
-
-    // Ask git which commits would be rebased (handles all cases correctly:
-    // base above HEAD, base below HEAD, non-linear histories, etc.)
-    let rebase_hashes = match gui.git.rebase_commit_range(&base_hash) {
-        Ok(hashes) => hashes,
-        Err(e) => {
-            gui.popup = PopupState::Message {
-                title: "Interactive rebase".to_string(),
-                message: format!("Failed to determine rebase range: {}", e),
-                kind: crate::gui::popup::MessageKind::Error,
-            };
-            drop(model);
-            return Ok(());
-        }
-    };
-
-    if rebase_hashes.is_empty() {
-        gui.popup = PopupState::Message {
-            title: "Interactive rebase".to_string(),
-            message: "No commits to rebase.".to_string(),
-            kind: crate::gui::popup::MessageKind::Error,
-        };
-        drop(model);
-        return Ok(());
-    }
-
-    // Match the hashes to model commits (preserving git's order: newest-first)
-    let commits_to_rebase: Vec<_> = rebase_hashes
-        .iter()
-        .filter_map(|hash| model.commits.iter().find(|c| c.hash == *hash))
-        .cloned()
-        .collect();
-
-    if commits_to_rebase.is_empty() {
-        gui.popup = PopupState::Message {
-            title: "Interactive rebase".to_string(),
-            message: "No commits to rebase.".to_string(),
-            kind: crate::gui::popup::MessageKind::Error,
-        };
-        drop(model);
-        return Ok(());
-    }
-
-    gui.rebase_mode
-        .enter(branch_name, base_commit, &commits_to_rebase);
-    drop(model);
-
-    Ok(())
+    enter_interactive_rebase_for_base(gui, base_hash, branch_name)
 }
 
 pub(super) fn matches_key(key: KeyEvent, binding: &str) -> bool {

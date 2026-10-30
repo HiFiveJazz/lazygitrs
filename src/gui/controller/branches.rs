@@ -454,82 +454,12 @@ fn rebase_branch(gui: &mut Gui) -> Result<()> {
 
 /// Enter interactive rebase mode onto a specific branch/ref.
 pub fn enter_interactive_rebase_onto(gui: &mut Gui, onto_ref: &str) -> Result<()> {
-    // Resolve the ref to a commit hash
     let base_hash = gui.git.resolve_ref(onto_ref)?;
-
-    let model = gui.model.lock().unwrap();
-    let branch_name = model.head_branch_name.clone();
-
-    // Find the base commit in the model
-    let base_commit = model.commits.iter().find(|c| c.hash == base_hash).cloned();
-
-    // Get commits to rebase
-    let rebase_hashes = match gui.git.rebase_commit_range(&base_hash) {
-        Ok(h) => h,
-        Err(e) => {
-            gui.popup = PopupState::Message {
-                title: "Interactive rebase".to_string(),
-                message: format!("Failed to determine rebase range: {}", e),
-                kind: crate::gui::popup::MessageKind::Error,
-            };
-            drop(model);
-            return Ok(());
-        }
+    let branch_name = {
+        let model = gui.model.lock().unwrap();
+        model.head_branch_name.clone()
     };
-
-    if rebase_hashes.is_empty() {
-        gui.popup = PopupState::Message {
-            title: "Interactive rebase".to_string(),
-            message: "No commits to rebase.".to_string(),
-            kind: crate::gui::popup::MessageKind::Error,
-        };
-        drop(model);
-        return Ok(());
-    }
-
-    let commits_to_rebase: Vec<_> = rebase_hashes
-        .iter()
-        .filter_map(|hash| model.commits.iter().find(|c| c.hash == *hash))
-        .cloned()
-        .collect();
-
-    if commits_to_rebase.is_empty() {
-        gui.popup = PopupState::Message {
-            title: "Interactive rebase".to_string(),
-            message: "Commits not found in current view.".to_string(),
-            kind: crate::gui::popup::MessageKind::Error,
-        };
-        drop(model);
-        return Ok(());
-    }
-
-    // Build a base commit — use model commit if available, otherwise create a minimal one
-    let base = match base_commit {
-        Some(c) => c,
-        None => {
-            // Base commit might not be in the loaded commits list — create a minimal one
-            let msg = gui.git.commit_subject(&base_hash).unwrap_or_default();
-            let author = gui.git.commit_author_name(&base_hash).unwrap_or_default();
-            use crate::model::commit::{CommitStatus, Divergence};
-            crate::model::Commit {
-                hash: base_hash.clone(),
-                name: msg,
-                status: CommitStatus::Pushed,
-                tags: Vec::<String>::new(),
-                refs: Vec::<String>::new(),
-                author_name: author,
-                author_email: String::new(),
-                unix_timestamp: 0,
-                parents: Vec::new(),
-                divergence: Divergence::None,
-            }
-        }
-    };
-
-    gui.rebase_mode
-        .enter(branch_name, &base, &commits_to_rebase);
-    drop(model);
-    Ok(())
+    super::commits::enter_interactive_rebase_for_base(gui, base_hash, branch_name)
 }
 
 fn rename_branch(gui: &mut Gui) -> Result<()> {
