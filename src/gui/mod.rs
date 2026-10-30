@@ -9406,7 +9406,7 @@ impl Gui {
         self.subview_refresh_generation = self.subview_refresh_generation.wrapping_add(1);
         let generation = self.subview_refresh_generation;
 
-        {
+        let is_rebasing = {
             let mut model = self.model.lock().unwrap();
             self.commit_history_complete = model.commits.len() < DEFAULT_COMMIT_LIMIT;
 
@@ -9432,7 +9432,9 @@ impl Gui {
             {
                 model.sub_remote_branches = remote.branches.clone();
             }
-        }
+
+            model.is_rebasing
+        };
 
         // Refreshing the whole model used to synchronously call git again for
         // these selection-dependent views. On large repositories that created
@@ -9510,6 +9512,40 @@ impl Gui {
                     }
                 }) as UiJob);
             });
+        }
+
+        // Keep rebase-mode state synchronized with the refreshed repository
+        // status. This is intentionally immediate even though selection-dependent
+        // subviews above are refreshed asynchronously: finishing/aborting a rebase
+        // must update the modal state and deferred notification queue in this tick.
+        if is_rebasing {
+            let should_open = !self.rebase_mode.active && !self.rebase_mode.in_progress_dismissed;
+            let should_resync =
+                self.rebase_mode.active && self.rebase_mode.phase == RebasePhase::InProgress;
+            if should_open || should_resync {
+                self.sync_rebase_progress_view();
+            }
+        }
+        if !is_rebasing
+            && self.rebase_mode.active
+            && self.rebase_mode.phase == RebasePhase::InProgress
+        {
+            let branch = self.rebase_mode.branch_name.clone();
+            let count = self.rebase_mode.total_count;
+            self.rebase_mode.exit();
+            self.show_notification(PopupState::Message {
+                title: "Rebase ended".to_string(),
+                message: format!(
+                    "Rebase of '{}' is no longer in progress ({} commit{}). It may have completed or been aborted.",
+                    branch,
+                    count,
+                    if count == 1 { "" } else { "s" },
+                ),
+                kind: MessageKind::Info,
+            });
+        }
+        if !is_rebasing && self.rebase_mode.in_progress_dismissed {
+            self.rebase_mode.in_progress_dismissed = false;
         }
 
         self.last_refresh_at = Instant::now();
@@ -12637,6 +12673,18 @@ mod terminal_mouse_tests {
             // Streaming model refreshes do not retain sub-history themselves.
             gui.model.lock().unwrap().clear_sub_commits();
             gui.after_model_refresh().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                gui.receive_ui_jobs();
+                if !gui.model.lock().unwrap().sub_commits.is_empty() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "async branch history refresh did not finish"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
             assert_eq!(gui.model.lock().unwrap().sub_commits[0].hash, head);
             gui.context_mgr.set_active(ContextId::BranchCommitFiles);
             gui.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
