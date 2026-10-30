@@ -1726,6 +1726,7 @@ impl Gui {
                 || self.patch_building.active;
             self.context_mgr.tick_selection_animations();
             self.diff_view.tick_smooth_scroll();
+            self.tick_patch_preview_scroll();
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
@@ -1986,17 +1987,66 @@ impl Gui {
         Ok(())
     }
 
+    fn patch_preview_scroll_active(&self) -> bool {
+        matches!(
+            self.popup,
+            PopupState::PatchPreview {
+                smooth_scroll_started_at: Some(_),
+                ..
+            }
+        )
+    }
+
+    fn tick_patch_preview_scroll(&mut self) {
+        const DURATION: Duration = Duration::from_millis(100);
+        let PopupState::PatchPreview {
+            scroll,
+            smooth_scroll_from,
+            smooth_scroll_target,
+            smooth_scroll_started_at,
+            message,
+            ..
+        } = &mut self.popup
+        else {
+            return;
+        };
+        let Some(started_at) = *smooth_scroll_started_at else {
+            return;
+        };
+        let area = Rect::new(0, 0, self.layout.width, self.layout.height);
+        let (rows, total) = views::patch_preview_metrics(message, area);
+        let max = total.saturating_sub(rows);
+        let t = (started_at.elapsed().as_secs_f64() / DURATION.as_secs_f64()).min(1.0);
+        let target = smooth_scroll_target.min(max as f64);
+        if t >= 1.0 {
+            *scroll = target as usize;
+            *smooth_scroll_started_at = None;
+            *smooth_scroll_from = target;
+            *smooth_scroll_target = target;
+            return;
+        }
+        let value = *smooth_scroll_from + (target - *smooth_scroll_from) * t;
+        *scroll = if target >= *smooth_scroll_from {
+            value.floor() as usize
+        } else {
+            value.ceil() as usize
+        };
+    }
+
     fn shell_command_ui_active(&self) -> bool {
         self.shell_command_job.is_some()
             || matches!(
                 self.popup,
-                PopupState::ShellCommand { .. } | PopupState::CommandOutput { .. }
+                PopupState::ShellCommand { .. }
+                    | PopupState::CommandOutput { .. }
+                    | PopupState::PatchPreview { .. }
             )
     }
     fn input_wait_timeout(&self) -> Duration {
         if self.context_mgr.has_active_scroll_animation()
             || self.context_mgr.has_active_selection_animation()
             || self.diff_view.has_active_smooth_scroll()
+            || self.patch_preview_scroll_active()
         {
             Duration::from_millis(8)
         } else if self.shell_command_job.is_some()
@@ -4185,7 +4235,9 @@ impl Gui {
         // gesture must not intercept dismissal of an unrelated modal.
         if matches!(
             self.popup,
-            PopupState::ShellCommand { .. } | PopupState::CommandOutput { .. }
+            PopupState::ShellCommand { .. }
+                | PopupState::CommandOutput { .. }
+                | PopupState::PatchPreview { .. }
         ) || self.deferred_notification_visible
         {
             return self.handle_popup_key(key);
@@ -4248,7 +4300,11 @@ impl Gui {
             )
         {
             let ctx = self.context_mgr.active();
-            let amount = self.config.user_config.gui.scroll_height.max(1);
+            let amount = if ctx == ContextId::Commits {
+                22
+            } else {
+                self.config.user_config.gui.scroll_height.max(1)
+            };
 
             let model = self.model.lock().unwrap();
             let len = self.context_mgr.list_len(&model);
@@ -5228,6 +5284,87 @@ impl Gui {
                     controller::custom_commands::confirm_shell_prompt(self, &command)?;
                 } else if let PopupState::ShellCommand { textarea } = &mut self.popup {
                     textarea_input(textarea, key);
+                }
+            }
+            PopupState::PatchPreview { .. } => {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+                    self.popup = PopupState::None;
+                } else if let PopupState::PatchPreview {
+                    message,
+                    scroll,
+                    cursor_line,
+                    smooth_scroll_from,
+                    smooth_scroll_target,
+                    smooth_scroll_started_at,
+                    ..
+                } = &mut self.popup
+                {
+                    let area = Rect::new(0, 0, self.layout.width, self.layout.height);
+                    let (rows, total) = views::patch_preview_metrics(message, area);
+                    let last = total.saturating_sub(1);
+                    let max_scroll = total.saturating_sub(rows);
+                    let old_cursor = (*cursor_line).min(last);
+                    let mut new_cursor = old_cursor;
+                    let mut smooth = false;
+
+                    match (key.modifiers, key.code) {
+                        (m, KeyCode::Char('j')) if m.contains(KeyModifiers::CONTROL) => {
+                            new_cursor = old_cursor.saturating_add(22).min(last);
+                            smooth = true;
+                        }
+                        (m, KeyCode::Char('k')) if m.contains(KeyModifiers::CONTROL) => {
+                            new_cursor = old_cursor.saturating_sub(22);
+                            smooth = true;
+                        }
+                        (_, KeyCode::Char('j') | KeyCode::Down) => {
+                            new_cursor = old_cursor.saturating_add(1).min(last);
+                        }
+                        (_, KeyCode::Char('k') | KeyCode::Up) => {
+                            new_cursor = old_cursor.saturating_sub(1);
+                        }
+                        (_, KeyCode::PageDown) => {
+                            new_cursor = old_cursor.saturating_add(rows).min(last);
+                            smooth = true;
+                        }
+                        (_, KeyCode::PageUp) => {
+                            new_cursor = old_cursor.saturating_sub(rows);
+                            smooth = true;
+                        }
+                        (_, KeyCode::Home | KeyCode::Char('g')) => {
+                            new_cursor = 0;
+                            smooth = true;
+                        }
+                        (_, KeyCode::End | KeyCode::Char('G')) => {
+                            new_cursor = last;
+                            smooth = true;
+                        }
+                        (_, KeyCode::Char('y')) => {
+                            let _ = Platform::copy_to_clipboard(message);
+                            return Ok(());
+                        }
+                        _ => return Ok(()),
+                    }
+
+                    *cursor_line = new_cursor;
+                    let viewport_start = (*scroll).min(max_scroll);
+                    let viewport_end = viewport_start.saturating_add(rows.saturating_sub(1));
+                    let target = if smooth {
+                        new_cursor.saturating_sub(rows / 2).min(max_scroll)
+                    } else if new_cursor < viewport_start {
+                        new_cursor.min(max_scroll)
+                    } else if new_cursor > viewport_end {
+                        new_cursor
+                            .saturating_sub(rows.saturating_sub(1))
+                            .min(max_scroll)
+                    } else {
+                        viewport_start
+                    };
+
+                    if target != *scroll {
+                        *smooth_scroll_from = *scroll as f64;
+                        *smooth_scroll_target = target as f64;
+                        *smooth_scroll_started_at = Some(Instant::now());
+                    }
                 }
             }
             PopupState::CommandOutput { .. } => {
@@ -7713,6 +7850,7 @@ impl Gui {
 
         match &mut self.popup {
             PopupState::ShellCommand { .. } => return,
+            PopupState::PatchPreview { .. } => return,
             PopupState::CommandOutput {
                 message, scroll, ..
             } => {

@@ -3,7 +3,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use std::collections::HashSet;
 
@@ -3619,6 +3619,87 @@ pub(super) fn command_output_max_scroll(message: &str, area: Rect) -> usize {
         .saturating_sub(rows)
 }
 
+fn hard_wrap_preserve(line: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for ch in line.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if !current.is_empty() && current_width.saturating_add(ch_width) > width {
+            out.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width = current_width.saturating_add(ch_width);
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+fn patch_line_style(line: &str, theme: &Theme) -> Style {
+    if line.starts_with("diff --git ") || line.starts_with("index ") {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("@@") {
+        Style::default()
+            .fg(theme.accent_secondary)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with('+') && !line.starts_with("+++") {
+        theme.diff_add.bg(theme.diff_add_bg)
+    } else if line.starts_with('-') && !line.starts_with("---") {
+        theme.diff_remove.bg(theme.diff_remove_bg)
+    } else if line.starts_with("--- ") || line.starts_with("+++ ") {
+        Style::default()
+            .fg(theme.text_strong)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("From: ")
+        || line.starts_with("Date: ")
+        || line.starts_with("Subject: ")
+    {
+        Style::default().fg(theme.accent_secondary)
+    } else if line == "---" || line.starts_with("-- ") {
+        Style::default().fg(theme.text_dimmed)
+    } else {
+        Style::default().fg(theme.text)
+    }
+}
+
+fn wrap_patch_preview_lines(message: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for source in message.lines() {
+        let style = patch_line_style(source, theme);
+        if source.is_empty() {
+            out.push(Line::from(Span::styled(String::new(), style)));
+            continue;
+        }
+        for part in hard_wrap_preserve(source, width) {
+            out.push(Line::from(Span::styled(part, style)));
+        }
+    }
+    if out.is_empty() {
+        out.push(Line::from(String::new()));
+    }
+    out
+}
+
+pub(super) fn patch_preview_metrics(message: &str, area: Rect) -> (usize, usize) {
+    let (rect, rows) = command_output_geometry(area);
+    let width = usize::from(rect.width.saturating_sub(2));
+    let total = message
+        .lines()
+        .map(|line| hard_wrap_preserve(line, width).len())
+        .sum::<usize>();
+    (rows.max(1), total.max(1))
+}
+
 pub fn render_popup(
     frame: &mut Frame,
     popup: &PopupState,
@@ -3647,6 +3728,84 @@ pub fn render_popup(
                 confirm_focused: false,
             };
             render_popup(frame, &input, area, spinner_frame, theme, false, false);
+        }
+        PopupState::PatchPreview {
+            title,
+            message,
+            scroll,
+            cursor_line,
+            ..
+        } => {
+            let (rect, rows) = command_output_geometry(area);
+            let width = usize::from(rect.width.saturating_sub(2));
+            let wrapped = wrap_patch_preview_lines(message, width, theme);
+            let max = wrapped.len().saturating_sub(rows);
+            let scroll = (*scroll).min(max);
+            let cursor = (*cursor_line).min(wrapped.len().saturating_sub(1));
+
+            frame.render_widget(Clear, rect);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    " {title} [{}/{}] ",
+                    cursor + 1,
+                    wrapped.len().max(1)
+                ))
+                .border_style(Style::default().fg(theme.accent_secondary));
+            frame.render_widget(block, rect);
+            let inner = rect.inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+
+            let body_height = inner.height.saturating_sub(1);
+            let mut lines = Vec::new();
+            for (idx, line) in wrapped
+                .iter()
+                .enumerate()
+                .skip(scroll)
+                .take(usize::from(body_height))
+            {
+                let mut line = line.clone();
+                if idx == cursor {
+                    for span in &mut line.spans {
+                        span.style = span.style.bg(theme.selected_bg);
+                    }
+                    if line.spans.is_empty() {
+                        line.spans
+                            .push(Span::styled(" ", Style::default().bg(theme.selected_bg)));
+                    }
+                }
+                lines.push(line);
+            }
+            frame.render_widget(
+                Paragraph::new(lines),
+                Rect::new(inner.x, inner.y, inner.width, body_height),
+            );
+            if cursor >= scroll && cursor < scroll.saturating_add(usize::from(body_height)) {
+                let y = inner.y + (cursor - scroll) as u16;
+                frame.buffer_mut().set_style(
+                    Rect::new(inner.x, y, inner.width, 1),
+                    Style::default().bg(theme.selected_bg),
+                );
+            }
+
+            let key_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
+            let desc_style = Style::default().fg(theme.text_dimmed);
+            let hint_line = Line::from(vec![
+                Span::styled(" ctrl+j/k ", key_style),
+                Span::styled("jump 22  ", desc_style),
+                Span::styled("j/k ", key_style),
+                Span::styled("line  ", desc_style),
+                Span::styled("y ", key_style),
+                Span::styled("copy  ", desc_style),
+                Span::styled("esc ", key_style),
+                Span::styled("close", desc_style),
+            ]);
+            frame.render_widget(
+                Paragraph::new(hint_line),
+                Rect::new(inner.x, inner.y + body_height, inner.width, 1),
+            );
         }
         PopupState::CommandOutput {
             title,

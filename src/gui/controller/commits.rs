@@ -1060,11 +1060,14 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                         .args(&["format-patch", "-1", "--stdout", &preview_hash])
                         .run_expecting_success()?
                         .stdout;
-                    gui.popup = PopupState::CommandOutput {
+                    gui.popup = PopupState::PatchPreview {
                         title: "Patch preview".to_string(),
                         message: patch,
-                        kind: MessageKind::Info,
                         scroll: 0,
+                        cursor_line: 0,
+                        smooth_scroll_from: 0.0,
+                        smooth_scroll_target: 0.0,
+                        smooth_scroll_started_at: None,
                     };
                     Ok(())
                 })),

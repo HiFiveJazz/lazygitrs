@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use anyhow::Result;
 use crossterm::event::KeyEvent;
 use tui_textarea::{CursorMove, TextArea};
@@ -545,6 +547,18 @@ pub enum PopupState {
         message: String,
         kind: MessageKind,
         scroll: usize,
+    },
+    /// `git format-patch` preview with patch-aware coloring and a smooth
+    /// keyboard cursor. Ctrl-J/K moves the cursor by 22 visual rows while the
+    /// viewport eases to keep it visible.
+    PatchPreview {
+        title: String,
+        message: String,
+        scroll: usize,
+        cursor_line: usize,
+        smooth_scroll_from: f64,
+        smooth_scroll_target: f64,
+        smooth_scroll_started_at: Option<Instant>,
     },
     /// Shown while a background operation (like AI commit generation) is running.
     #[allow(dead_code)]

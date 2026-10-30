@@ -404,6 +404,10 @@ pub struct DiffViewState {
     /// Updated on each render so scroll helpers can compute visual rows
     /// without a live layout.
     pub last_content_width: usize,
+    /// Last rendered diff-body height. Used to clamp viewport scrolling so the
+    /// final screen stays full instead of allowing the last line to reach the
+    /// top of the panel.
+    pub last_visible_height: usize,
     /// Whether the currently viewed file exists in the working tree on disk.
     pub file_exists_on_disk: bool,
     /// Hunk line number offsets for unified diffs. Each entry is
@@ -459,6 +463,7 @@ impl Default for DiffViewState {
             view_layout: DiffViewLayout::SideBySide,
             wrap: false,
             last_content_width: 0,
+            last_visible_height: 1,
             file_exists_on_disk: false,
             hunk_line_offsets: Vec::new(),
             search_active: false,
@@ -1219,7 +1224,7 @@ impl DiffViewState {
     /// keypresses retarget from the pending destination so fast J/K input
     /// accumulates naturally instead of restarting from each intermediate frame.
     pub fn request_smooth_scroll(&mut self, delta: isize) {
-        let max = self.max_scroll();
+        let max = self.max_viewport_scroll();
         let base = if self.smooth_scroll_started_at.is_some() {
             self.smooth_scroll_target.round() as usize
         } else {
@@ -1251,7 +1256,9 @@ impl DiffViewState {
         };
 
         let t = (started_at.elapsed().as_secs_f64() / DURATION.as_secs_f64()).min(1.0);
-        let target = self.smooth_scroll_target.min(self.max_scroll() as f64);
+        let target = self
+            .smooth_scroll_target
+            .min(self.max_viewport_scroll() as f64);
         if t >= 1.0 {
             self.scroll_offset = target as usize;
             self.smooth_scroll_started_at = None;
@@ -1297,9 +1304,25 @@ impl DiffViewState {
         self.horizontal_scroll += amount;
     }
 
-    /// Max scroll offset (last visual/DiffLine row can reach the top).
+    /// Maximum general-purpose scroll offset. Some internal operations
+    /// intentionally position headers/placeholders near the top of the
+    /// viewport, so this retains the traditional "last row may reach top"
+    /// semantics. Keyboard neoscroll uses `max_viewport_scroll()` instead.
     pub fn max_scroll(&self) -> usize {
         self.total_scroll_rows().saturating_sub(1)
+    }
+
+    /// Maximum offset for user-driven viewport scrolling. Keep the final
+    /// screen full where possible, without constraining internal positioning
+    /// used by image placeholders, sticky headers, search and layout changes.
+    fn max_viewport_scroll(&self) -> usize {
+        let sticky_rows = usize::from(self.sections.len() > 1);
+        let visible_rows = self
+            .last_visible_height
+            .max(1)
+            .saturating_sub(sticky_rows)
+            .max(1);
+        self.total_scroll_rows().saturating_sub(visible_rows)
     }
 
     /// Total scrollable rows for the active layout.
@@ -1967,6 +1990,7 @@ pub fn render_diff(
     }
 
     let inner = block.inner(area);
+    state.last_visible_height = usize::from(inner.height.max(1));
     frame.render_widget(block, area);
 
     if !state.image_preview_hidden {
@@ -4216,6 +4240,19 @@ mod tests {
             preview_placeholder: None,
             section_index: 0,
         }
+    }
+
+    #[test]
+    fn smooth_scroll_keeps_the_final_viewport_full() {
+        let mut state = DiffViewState::new();
+        state.lines = (0..100).map(|_| diff_line(ChangeType::Equal)).collect();
+        state.last_visible_height = 20;
+        assert_eq!(state.max_scroll(), 99);
+        assert_eq!(state.max_viewport_scroll(), 80);
+
+        state.scroll_offset = 80;
+        state.request_smooth_scroll(22);
+        assert_eq!(state.smooth_scroll_target as usize, 80);
     }
 
     #[test]
