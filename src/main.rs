@@ -96,7 +96,9 @@ fn read_init_key() -> io::Result<char> {
     }
     let original = unsafe { original.assume_init() };
     let mut single_key = original;
-    single_key.c_lflag &= !(libc::ICANON | libc::ECHO);
+    // Disable ISIG too so Ctrl-C is read as a byte instead of terminating the
+    // process before RestoreTermios can restore the caller's tty settings.
+    single_key.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
     single_key.c_cc[libc::VMIN] = 1;
     single_key.c_cc[libc::VTIME] = 0;
 
@@ -112,13 +114,18 @@ fn read_init_key() -> io::Result<char> {
 
 #[cfg(not(unix))]
 fn read_init_key() -> io::Result<char> {
-    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
     use crossterm::terminal;
 
     terminal::enable_raw_mode()?;
     let result = loop {
         match event::read() {
             Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                if key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    break Ok('\u{3}');
+                }
                 if let KeyCode::Char(ch) = key.code {
                     break Ok(ch);
                 }
@@ -167,6 +174,11 @@ fn initialize_repository_if_requested(path: &Path) -> anyhow::Result<bool> {
             Ok(key) => key,
             Err(_) => return Ok(false),
         };
+
+        if key == '\u{3}' {
+            writeln!(out)?;
+            return Ok(false);
+        }
 
         match parse_init_key(key) {
             Some(false) => {
