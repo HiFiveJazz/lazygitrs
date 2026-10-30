@@ -50,8 +50,10 @@ fn update_submodule(gui: &mut Gui) -> Result<()> {
             title: "Update submodule".to_string(),
             message: format!("Update submodule '{}'?", path),
             on_confirm: Box::new(move |gui| {
-                gui.git.update_submodule(&path)?;
-                gui.needs_refresh = true;
+                let path = path.clone();
+                gui.start_background_mutation("Updating submodule", move |git| {
+                    git.update_submodule(&path)
+                });
                 Ok(())
             }),
         };
@@ -66,8 +68,11 @@ fn add_submodule(gui: &mut Gui) -> Result<()> {
         on_confirm: Box::new(|gui, input| {
             let parts: Vec<&str> = input.split_whitespace().collect();
             if parts.len() >= 2 {
-                gui.git.add_submodule(parts[0], parts[1])?;
-                gui.needs_refresh = true;
+                let url = parts[0].to_string();
+                let path = parts[1].to_string();
+                gui.start_background_mutation("Adding submodule", move |git| {
+                    git.add_submodule(&url, &path)
+                });
             } else if parts.len() == 1 {
                 // Derive path from URL
                 let url = parts[0];
@@ -76,8 +81,11 @@ fn add_submodule(gui: &mut Gui) -> Result<()> {
                     .next()
                     .unwrap_or("submodule")
                     .trim_end_matches(".git");
-                gui.git.add_submodule(url, path)?;
-                gui.needs_refresh = true;
+                let url = url.to_string();
+                let path = path.to_string();
+                gui.start_background_mutation("Adding submodule", move |git| {
+                    git.add_submodule(&url, &path)
+                });
             }
             Ok(())
         }),
@@ -98,8 +106,10 @@ fn remove_submodule(gui: &mut Gui) -> Result<()> {
             title: "Remove submodule".to_string(),
             message: format!("Remove submodule '{}'?", path),
             on_confirm: Box::new(move |gui| {
-                gui.git.remove_submodule(&path)?;
-                gui.needs_refresh = true;
+                let path = path.clone();
+                gui.start_background_mutation("Removing submodule", move |git| {
+                    git.remove_submodule(&path)
+                });
                 Ok(())
             }),
         };
@@ -144,8 +154,7 @@ fn update_all_submodules(gui: &mut Gui) -> Result<()> {
         title: "Update submodules".to_string(),
         message: "Update all submodules?".to_string(),
         on_confirm: Box::new(|gui| {
-            gui.git.update_submodules()?;
-            gui.needs_refresh = true;
+            gui.start_background_mutation("Updating submodules", |git| git.update_submodules());
             Ok(())
         }),
     };
@@ -153,7 +162,6 @@ fn update_all_submodules(gui: &mut Gui) -> Result<()> {
 }
 
 fn init_submodules(gui: &mut Gui) -> Result<()> {
-    gui.git.init_submodules()?;
-    gui.needs_refresh = true;
+    gui.start_background_mutation("Initializing submodules", |git| git.init_submodules());
     Ok(())
 }

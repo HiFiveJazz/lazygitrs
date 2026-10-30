@@ -63,8 +63,11 @@ fn create_worktree(gui: &mut Gui) -> Result<()> {
         on_confirm: Box::new(|gui, input| {
             let parts: Vec<&str> = input.split_whitespace().collect();
             if parts.len() >= 2 {
-                gui.git.create_worktree(parts[0], parts[1])?;
-                gui.needs_refresh = true;
+                let path = parts[0].to_string();
+                let branch = parts[1].to_string();
+                gui.start_background_mutation("Creating worktree", move |git| {
+                    git.create_worktree(&path, &branch)
+                });
             } else if parts.len() == 1 {
                 // If only path given, create with new branch based on dir name
                 let path = parts[0];
@@ -73,8 +76,10 @@ fn create_worktree(gui: &mut Gui) -> Result<()> {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "worktree".to_string());
 
-                gui.git.create_worktree_new_branch(path, &branch)?;
-                gui.needs_refresh = true;
+                let path = path.to_string();
+                gui.start_background_mutation("Creating worktree", move |git| {
+                    git.create_worktree_new_branch(&path, &branch)
+                });
             }
             Ok(())
         }),
@@ -102,8 +107,10 @@ fn remove_worktree(gui: &mut Gui) -> Result<()> {
                 branch, path
             ),
             on_confirm: Box::new(move |gui| {
-                gui.git.remove_worktree(&path, false)?;
-                gui.needs_refresh = true;
+                let path = path.clone();
+                gui.start_background_mutation("Removing worktree", move |git| {
+                    git.remove_worktree(&path, false)
+                });
                 Ok(())
             }),
         };

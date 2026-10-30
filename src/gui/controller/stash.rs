@@ -91,12 +91,9 @@ fn pop_stash(gui: &mut Gui) -> Result<()> {
                     description: "apply and drop this stash".to_string(),
                     key: Some("g".to_string()),
                     action: Some(Box::new(move |gui| {
-                        let result = gui.git.stash_pop(index);
-                        // A conflicting pop still touches the worktree (conflict
-                        // markers / unmerged paths), so refresh even on failure.
-                        gui.needs_refresh = true;
-                        gui.needs_diff_refresh = true;
-                        result?;
+                        gui.start_background_mutation("Popping stash", move |git| {
+                            git.stash_pop(index)
+                        });
                         Ok(())
                     })),
                 },
@@ -130,12 +127,9 @@ fn apply_stash(gui: &mut Gui) -> Result<()> {
                     description: "apply stash (keep in stash list)".to_string(),
                     key: Some("a".to_string()),
                     action: Some(Box::new(move |gui| {
-                        let result = gui.git.stash_apply(index);
-                        // A conflicting apply still touches the worktree, so
-                        // refresh even on failure.
-                        gui.needs_refresh = true;
-                        gui.needs_diff_refresh = true;
-                        result?;
+                        gui.start_background_mutation("Applying stash", move |git| {
+                            git.stash_apply(index)
+                        });
                         Ok(())
                     })),
                 },
@@ -169,8 +163,9 @@ fn drop_stash(gui: &mut Gui) -> Result<()> {
                     description: "permanently remove this stash".to_string(),
                     key: Some("d".to_string()),
                     action: Some(Box::new(move |gui| {
-                        gui.git.stash_drop(index)?;
-                        gui.needs_refresh = true;
+                        gui.start_background_mutation("Dropping stash", move |git| {
+                            git.stash_drop(index)
+                        });
                         Ok(())
                     })),
                 },
@@ -203,8 +198,10 @@ fn rename_stash(gui: &mut Gui) -> Result<()> {
             textarea: ta,
             on_confirm: Box::new(move |gui, new_name| {
                 if !new_name.is_empty() {
-                    gui.git.stash_rename(index, new_name)?;
-                    gui.needs_refresh = true;
+                    let new_name = new_name.to_string();
+                    gui.start_background_mutation("Renaming stash", move |git| {
+                        git.stash_rename(index, &new_name)
+                    });
                 }
                 Ok(())
             }),

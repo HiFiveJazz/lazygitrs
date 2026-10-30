@@ -902,6 +902,9 @@ pub struct Gui {
     spinner_frame: usize,
     /// Label shown on the head branch during a remote operation (e.g. "Pushing", "Pulling").
     remote_op_label: Option<String>,
+    /// One local mutation (stash/submodule/worktree/etc.) may run in the
+    /// background at a time so potentially slow Git commands never block input.
+    background_mutation_label: Option<String>,
     /// Timestamp when the last remote operation succeeded (for showing a temporary ✓).
     remote_op_success_at: Option<Instant>,
     /// Branch name from checkout-by-name; used to offer create-on-miss when checkout fails.
@@ -1377,6 +1380,7 @@ impl Gui {
             commit_files_parent_context: None,
             spinner_frame: 0,
             remote_op_label: None,
+            background_mutation_label: None,
             remote_op_success_at: None,
             pending_checkout_by_name: None,
             pending_editor_launch: None,
@@ -1696,6 +1700,7 @@ impl Gui {
                         .is_some_and(|p| !p.uses_placeholders()))
                 || self.ai_commit_generation_active()
                 || self.remote_op_label.is_some()
+                || self.background_mutation_label.is_some()
                 || self.rebase_mode.active
                 || self.patch_building.active;
             self.context_mgr.tick_selection_animations();
@@ -1730,7 +1735,11 @@ impl Gui {
                             "Generating commit message...",
                             Some(("Esc esc", "cancel")),
                         );
-                    } else if let Some(label) = self.remote_op_label.as_deref() {
+                    } else if let Some(label) = self
+                        .remote_op_label
+                        .as_deref()
+                        .or(self.background_mutation_label.as_deref())
+                    {
                         views::render_loading_overlay(
                             frame,
                             frame.area(),
@@ -1787,7 +1796,11 @@ impl Gui {
                             "Generating commit message...",
                             Some(("Esc esc", "cancel")),
                         );
-                    } else if let Some(label) = self.remote_op_label.as_deref() {
+                    } else if let Some(label) = self
+                        .remote_op_label
+                        .as_deref()
+                        .or(self.background_mutation_label.as_deref())
+                    {
                         views::render_loading_overlay(
                             frame,
                             frame.area(),
@@ -1890,7 +1903,11 @@ impl Gui {
                                 "Generating commit message...",
                                 Some(("Esc esc", "cancel")),
                             );
-                        } else if let Some(label) = self.remote_op_label.as_deref() {
+                        } else if let Some(label) = self
+                            .remote_op_label
+                            .as_deref()
+                            .or(self.background_mutation_label.as_deref())
+                        {
                             views::render_loading_overlay(
                                 frame,
                                 frame.area(),
@@ -1962,6 +1979,7 @@ impl Gui {
         } else if self.shell_command_job.is_some()
             || self.ai_commit_generation_active()
             || self.remote_op_label.is_some()
+            || self.background_mutation_label.is_some()
             || self.needs_refresh
             || self.diff_loading
             || self.initial_load_rx.is_some()
@@ -3377,6 +3395,35 @@ impl Gui {
             });
 
             let _ = tx.send((kind, result));
+        });
+    }
+
+    /// Run a potentially slow local Git mutation without blocking the TUI.
+    /// A single lane is intentional: these commands often touch the index,
+    /// worktree, or repository metadata and gain nothing from racing each other.
+    pub fn start_background_mutation<F>(&mut self, title: &str, op: F)
+    where
+        F: FnOnce(&GitCommands) -> Result<()> + Send + 'static,
+    {
+        if self.background_mutation_label.is_some() {
+            return;
+        }
+        self.background_mutation_label = Some(title.to_string());
+        let git = Arc::clone(&self.git);
+        let tx = self.ui_job_tx.clone();
+        let title = title.to_string();
+        std::thread::spawn(move || {
+            let result = op(&git);
+            let _ = tx.send(Box::new(move |gui| {
+                gui.background_mutation_label = None;
+                // Even a failed apply/pop can leave conflict markers or partial
+                // worktree changes. Always refresh from Git's actual state.
+                gui.needs_refresh = true;
+                gui.needs_diff_refresh = true;
+                if let Err(err) = result {
+                    gui.show_error(&title, err);
+                }
+            }) as UiJob);
         });
     }
 
