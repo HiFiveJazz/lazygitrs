@@ -892,9 +892,24 @@ impl GitCommands {
         self.load_files_status_only()
     }
 
-    /// Get the current branch name without spawning Git.
+    /// Get the current branch name. Usually this is an in-process gix read;
+    /// for an unborn repository HEAD has no object id yet, so fall back to the
+    /// symbolic ref name instead of treating the repository as detached.
     pub fn current_branch_name(&self) -> Result<String> {
-        Ok(self.read_head_state()?.branch_name)
+        match self.read_head_state() {
+            Ok(head) => Ok(head.branch_name),
+            Err(read_err) => {
+                let symbolic = self
+                    .git()
+                    .args(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+                    .run()?;
+                if symbolic.success && !symbolic.stdout_trimmed().is_empty() {
+                    Ok(symbolic.stdout_trimmed().to_string())
+                } else {
+                    Err(read_err)
+                }
+            }
+        }
     }
 
     /// Read the full HEAD hash and symbolic ref in-process through gix.
@@ -1072,11 +1087,12 @@ mod tests {
     }
 
     #[test]
-    fn head_state_rejects_unborn_head() {
+    fn head_state_rejects_unborn_head_but_branch_name_is_available() {
         let temp = TempDir::new("unborn-head-state");
         run_test_git(temp.path(), &["init", "-b", "main"]);
         let git = GitCommands::new(temp.path()).unwrap();
         assert!(git.head_state().is_err());
+        assert_eq!(git.current_branch_name().unwrap(), "main");
     }
 
     #[test]

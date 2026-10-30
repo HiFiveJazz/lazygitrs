@@ -132,6 +132,19 @@ fn read_init_key() -> io::Result<char> {
     result
 }
 
+fn configured_default_branch(path: &Path) -> String {
+    let configured = Command::new("git")
+        .args(["config", "--get", "init.defaultBranch"])
+        .current_dir(path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|branch| branch.trim().to_string())
+        .filter(|branch| !branch.is_empty());
+    configured.unwrap_or_else(|| "main".to_string())
+}
+
 fn initialize_repository_if_requested(path: &Path) -> anyhow::Result<bool> {
     if GitCommands::is_valid_repo(path) {
         return Ok(true);
@@ -162,8 +175,9 @@ fn initialize_repository_if_requested(path: &Path) -> anyhow::Result<bool> {
             }
             Some(true) => {
                 writeln!(out, "y")?;
+                let default_branch = configured_default_branch(path);
                 let status = Command::new("git")
-                    .args(["init", "--quiet"])
+                    .args(["init", "--quiet", "--initial-branch", &default_branch])
                     .current_dir(path)
                     .status()
                     .with_context(|| format!("failed to run git init in {}", path.display()))?;
