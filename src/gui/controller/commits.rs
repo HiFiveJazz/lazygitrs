@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::config::KeybindingConfig;
@@ -525,6 +525,8 @@ fn drop_commit(gui: &mut Gui) -> Result<()> {
     apply_action_to_selection(gui, RebaseAction::Drop)
 }
 
+const LARGE_REBASE_PLANNER_THRESHOLD: usize = 5_000;
+
 /// Open the Interactive Rebase planner with the user's current commit
 /// selection pre-marked with `action`. Selection comes from range-select
 /// (`v`) when active; otherwise it's just the focused commit.
@@ -568,7 +570,8 @@ fn apply_action_to_selection(gui: &mut Gui, action: RebaseAction) -> Result<()> 
     };
     let branch_name = model.head_branch_name.clone();
 
-    // Prefer the model copy of the base when present; otherwise synthesize.
+    // Prefer the model copy of the base when present; otherwise synthesize it
+    // from one batched metadata query later.
     let base_from_model = model
         .commits
         .iter()
@@ -578,10 +581,11 @@ fn apply_action_to_selection(gui: &mut Gui, action: RebaseAction) -> Result<()> 
         .cloned();
     drop(model);
 
-    // Only include commits reachable from HEAD above the base. This excludes
-    // unrelated `--all` commits that happen to sit between selected rows.
-    let rebase_hashes = match gui.git.rebase_commit_range(&base_hash) {
-        Ok(h) => h,
+    // Counting first is cheap and prevents an ancient commit in a very deep
+    // history from looking like a UI freeze. The user gets an explicit warning
+    // before we materialize thousands of planner rows.
+    let rebase_count = match gui.git.rebase_commit_count(&base_hash) {
+        Ok(count) => count,
         Err(e) => {
             gui.popup = PopupState::Message {
                 title: "Interactive rebase".to_string(),
@@ -591,7 +595,8 @@ fn apply_action_to_selection(gui: &mut Gui, action: RebaseAction) -> Result<()> 
             return Ok(());
         }
     };
-    if rebase_hashes.is_empty() {
+
+    if rebase_count == 0 {
         gui.popup = PopupState::Message {
             title: "Interactive rebase".to_string(),
             message: "Nothing to rebase above the selected commit.".to_string(),
@@ -600,35 +605,97 @@ fn apply_action_to_selection(gui: &mut Gui, action: RebaseAction) -> Result<()> 
         return Ok(());
     }
 
-    // Resolve each hash in the HEAD range to a Commit. Prefer the already-
-    // loaded model entry; fall back to git metadata for commits outside the
-    // currently loaded page (pagination / deep history).
-    let model_commits = {
-        let model = gui.model.lock().unwrap();
-        model.commits.clone()
-    };
-    let mut commits_to_rebase = Vec::with_capacity(rebase_hashes.len());
-    for hash in &rebase_hashes {
-        if let Some(c) = model_commits.iter().find(|c| &c.hash == hash) {
-            commits_to_rebase.push(c.clone());
-        } else {
-            let msg = gui.git.commit_subject(hash).unwrap_or_default();
-            let author = gui.git.commit_author_name(hash).unwrap_or_default();
-            commits_to_rebase.push(synthetic_commit(hash, &msg, &author));
-        }
+    if rebase_count > LARGE_REBASE_PLANNER_THRESHOLD {
+        gui.popup = PopupState::Confirm {
+            title: "Large interactive rebase".to_string(),
+            message: format!(
+                "This operation would rewrite {rebase_count} commits.\nOpen the interactive rebase planner?"
+            ),
+            on_confirm: Box::new(move |gui| {
+                open_rebase_planner(
+                    gui,
+                    action,
+                    selected_hashes,
+                    base_hash,
+                    branch_name,
+                    base_from_model,
+                )
+            }),
+        };
+        return Ok(());
     }
 
-    if commits_to_rebase.is_empty() {
+    open_rebase_planner(
+        gui,
+        action,
+        selected_hashes,
+        base_hash,
+        branch_name,
+        base_from_model,
+    )
+}
+
+fn open_rebase_planner(
+    gui: &mut Gui,
+    action: RebaseAction,
+    selected_hashes: HashSet<String>,
+    base_hash: String,
+    branch_name: String,
+    base_from_model: Option<crate::model::Commit>,
+) -> Result<()> {
+    // Load hash + subject + author for the entire range with one `git log`.
+    // The old implementation spawned two `git log -1` processes for every
+    // commit outside the currently loaded page, which could mean tens of
+    // thousands of synchronous processes in repositories like Linux.
+    let metadata = match gui.git.rebase_commit_metadata(&base_hash) {
+        Ok(metadata) => metadata,
+        Err(e) => {
+            gui.popup = PopupState::Message {
+                title: "Interactive rebase".to_string(),
+                message: format!("Failed to load rebase commits: {e}"),
+                kind: crate::gui::popup::MessageKind::Error,
+            };
+            return Ok(());
+        }
+    };
+
+    if metadata.is_empty() {
         gui.popup = PopupState::Message {
             title: "Interactive rebase".to_string(),
-            message: "Selected commit is not reachable from HEAD — cannot rebase it.".to_string(),
+            message: "Nothing to rebase above the selected commit.".to_string(),
             kind: crate::gui::popup::MessageKind::Error,
         };
         return Ok(());
     }
 
-    // Ensure at least one selected commit is in the range (guards against
-    // selecting a commit that is not an ancestor of HEAD).
+    // Prefer already-loaded model entries when available so planner rows retain
+    // their existing model data. Deep-history rows are synthesized from the
+    // batched metadata instead of spawning per-commit Git commands.
+    let model_commits: HashMap<String, crate::model::Commit> = {
+        let model = gui.model.lock().unwrap();
+        model
+            .commits
+            .iter()
+            .cloned()
+            .map(|commit| (commit.hash.clone(), commit))
+            .collect()
+    };
+    let mut commits_to_rebase = Vec::with_capacity(metadata.len());
+    for meta in metadata {
+        if let Some(c) = model_commits.get(&meta.hash) {
+            commits_to_rebase.push(c.clone());
+        } else {
+            commits_to_rebase.push(synthetic_commit(
+                &meta.hash,
+                &meta.subject,
+                &meta.author_name,
+            ));
+        }
+    }
+
+    // Selecting a commit from `git log --all` does not guarantee that commit is
+    // on the current HEAD ancestry. Avoid opening a planner for the wrong line
+    // of history.
     if !commits_to_rebase
         .iter()
         .any(|c| selected_hashes.contains(&c.hash))
@@ -644,11 +711,17 @@ fn apply_action_to_selection(gui: &mut Gui, action: RebaseAction) -> Result<()> 
 
     let base_commit = match base_from_model {
         Some(c) => c,
-        None => {
-            let msg = gui.git.commit_subject(&base_hash).unwrap_or_default();
-            let author = gui.git.commit_author_name(&base_hash).unwrap_or_default();
-            synthetic_commit(&base_hash, &msg, &author)
-        }
+        None => match gui.git.rebase_base_metadata(&base_hash) {
+            Ok(meta) => synthetic_commit(&meta.hash, &meta.subject, &meta.author_name),
+            Err(e) => {
+                gui.popup = PopupState::Message {
+                    title: "Interactive rebase".to_string(),
+                    message: format!("Failed to load rebase base commit: {e}"),
+                    kind: crate::gui::popup::MessageKind::Error,
+                };
+                return Ok(());
+            }
+        },
     };
 
     gui.range_select_anchor = None;

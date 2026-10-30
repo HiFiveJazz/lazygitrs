@@ -15,6 +15,18 @@ pub enum RebaseAction {
     Drop,
 }
 
+/// Minimal commit metadata needed to populate the interactive-rebase planner.
+///
+/// Keeping this separate from `model::Commit` lets the Git layer load an
+/// arbitrarily deep rebase range with one `git log` process instead of doing
+/// per-commit subject/author lookups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebaseCommitMetadata {
+    pub hash: String,
+    pub subject: String,
+    pub author_name: String,
+}
+
 impl RebaseAction {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -345,6 +357,46 @@ impl GitCommands {
         Ok(hashes)
     }
 
+    /// Count commits that would be included by `git rebase -i <base>`.
+    ///
+    /// This is intentionally cheap and is used to warn before materializing a
+    /// very large planner (for example when selecting an old Linux commit).
+    pub fn rebase_commit_count(&self, base_hash: &str) -> Result<usize> {
+        let result = self
+            .git()
+            .args(&["rev-list", "--count", &format!("{}..HEAD", base_hash)])
+            .run_expecting_success()?;
+        Ok(result.stdout_trimmed().parse::<usize>()?)
+    }
+
+    /// Load all metadata needed by the interactive-rebase planner in one Git
+    /// process. Results are newest-first, matching the commits panel.
+    ///
+    /// `-z` makes Git terminate each record with NUL; the format contributes
+    /// two more NUL separators, so every record is exactly three fields. This
+    /// avoids the old O(n) process-spawn pattern of separately asking Git for
+    /// each commit's subject and author.
+    pub fn rebase_commit_metadata(&self, base_hash: &str) -> Result<Vec<RebaseCommitMetadata>> {
+        let range = format!("{}..HEAD", base_hash);
+        let result = self
+            .git()
+            .args(&["log", "-z", "--format=%H%x00%s%x00%an", &range, "--"])
+            .run_expecting_success()?;
+        parse_rebase_commit_metadata(&result.stdout)
+    }
+
+    /// Load the same minimal metadata for a single commit.
+    pub fn rebase_base_metadata(&self, hash: &str) -> Result<RebaseCommitMetadata> {
+        let result = self
+            .git()
+            .args(&["show", "-s", "-z", "--format=%H%x00%s%x00%an", hash, "--"])
+            .run_expecting_success()?;
+        let mut metadata = parse_rebase_commit_metadata(&result.stdout)?;
+        metadata
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("No metadata returned for commit {hash}"))
+    }
+
     /// Parse the state of a rebase that is currently in progress.
     /// Returns `None` if no rebase is in progress.
     pub fn parse_rebase_progress(&self) -> Option<RebaseProgress> {
@@ -531,6 +583,25 @@ impl GitCommands {
     }
 }
 
+fn parse_rebase_commit_metadata(output: &str) -> Result<Vec<RebaseCommitMetadata>> {
+    let fields: Vec<&str> = output.split_terminator('\0').collect();
+    let mut chunks = fields.chunks_exact(3);
+    let metadata = chunks
+        .by_ref()
+        .map(|chunk| RebaseCommitMetadata {
+            hash: chunk[0].to_string(),
+            subject: chunk[1].to_string(),
+            author_name: chunk[2].to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    if !chunks.remainder().is_empty() {
+        anyhow::bail!("Malformed commit metadata returned by git log");
+    }
+
+    Ok(metadata)
+}
+
 fn first_kept_is_squash_or_fixup(actions: &[(String, RebaseAction)]) -> bool {
     actions
         .iter()
@@ -677,6 +748,32 @@ mod tests {
             .expect("rev-parse");
         assert!(out.status.success());
         String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn rebase_metadata_is_batched_and_newest_first() {
+        let temp = TempDir::new("rebase-metadata");
+        let dir = temp.path();
+        init_repo(dir);
+        let c1 = commit(dir, "first", "1");
+        let c2 = commit(dir, "second", "2");
+        let c3 = commit(dir, "third", "3");
+
+        let git = GitCommands::new(dir).expect("git");
+        assert_eq!(git.rebase_commit_count(&c1).expect("count"), 2);
+
+        let metadata = git.rebase_commit_metadata(&c1).expect("metadata");
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata[0].hash, c3);
+        assert_eq!(metadata[0].subject, "third");
+        assert_eq!(metadata[0].author_name, "t");
+        assert_eq!(metadata[1].hash, c2);
+        assert_eq!(metadata[1].subject, "second");
+
+        let base = git.rebase_base_metadata(&c1).expect("base metadata");
+        assert_eq!(base.hash, c1);
+        assert_eq!(base.subject, "first");
+        assert_eq!(base.author_name, "t");
     }
 
     #[test]
