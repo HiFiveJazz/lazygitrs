@@ -304,9 +304,15 @@ fn delete_branch(gui: &mut Gui) -> Result<()> {
                     let remote = upstream_for_remote
                         .as_deref()
                         .and_then(|u| u.split('/').next())
-                        .unwrap_or("origin");
-                    gui.git.delete_remote_branch(remote, &name_remote)?;
-                    gui.needs_refresh = true;
+                        .unwrap_or("origin")
+                        .to_string();
+                    let name = name_remote.clone();
+                    gui.start_remote_op(
+                        RemoteOpKind::Push,
+                        "Deleting remote branch",
+                        "",
+                        move |git| git.delete_remote_branch(&remote, &name),
+                    );
                     Ok(())
                 })),
             });
@@ -328,11 +334,18 @@ fn delete_branch(gui: &mut Gui) -> Result<()> {
                     let remote = upstream_for_both
                         .as_deref()
                         .and_then(|u| u.split('/').next())
-                        .unwrap_or("origin");
-                    // Delete local first (force, since we're deleting remote too)
-                    gui.git.delete_branch(&name_both, true)?;
-                    gui.git.delete_remote_branch(remote, &name_both)?;
-                    gui.needs_refresh = true;
+                        .unwrap_or("origin")
+                        .to_string();
+                    let name = name_both.clone();
+                    gui.start_remote_op(
+                        RemoteOpKind::Push,
+                        "Deleting branch",
+                        "",
+                        move |git| {
+                            git.delete_branch(&name, true)?;
+                            git.delete_remote_branch(&remote, &name)
+                        },
+                    );
                     Ok(())
                 })),
             });
