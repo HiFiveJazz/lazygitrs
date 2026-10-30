@@ -2936,7 +2936,8 @@ impl Gui {
             if self.remote_op_label.is_none()
                 && let Some(pending) = self.pending_remote_op.take()
             {
-                self.launch_remote_op(pending.kind, &pending.title, pending.op);
+                let PendingRemoteOp { kind, title, op } = pending;
+                self.launch_remote_op(kind, &title, op);
             }
         }
     }
