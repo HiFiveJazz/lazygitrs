@@ -224,7 +224,7 @@ impl GitCommands {
         Ok(RefSnapshot { head, refs })
     }
 
-    /// Read HEAD through the persistent gix repository, falling back to Git
+    /// Read HEAD through the burst-reused gix repository, falling back to Git
     /// for compatibility with repository layouts gix cannot handle yet.
     pub(crate) fn read_head_state(&self) -> Result<HeadState> {
         if let Some(repo) = &self.read_repo

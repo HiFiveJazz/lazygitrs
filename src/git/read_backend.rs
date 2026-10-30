@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -68,61 +70,185 @@ pub(crate) struct DiscoveredRepository {
     pub repo_path: PathBuf,
 }
 
-/// Lightweight locator for read-only gix queries.
+/// Read-only gix state with a short idle lifetime.
 ///
 /// Mutating/network operations intentionally remain on the system Git CLI.
-/// Unlike the earlier persistent repository handle, this stores only a path and
-/// opens a short-lived gix repository for each query. Dropping that handle after
-/// the query releases pack/MIDX mappings and other ODB resources instead of
+/// During a burst of model reads we keep one gix repository alive so HEAD,
+/// refs, branches, tags, remotes, and reflog queries can reuse repository/ODB
+/// setup and a small decoded-object cache. After a short idle window the
+/// repository is cold-reloaded, releasing pack/MIDX mappings instead of
 /// charging them to lazygitrs' idle RSS for the lifetime of the application.
 pub struct ReadRepository {
+    inner: Arc<ReadRepositoryInner>,
+}
+
+const GIX_BURST_IDLE: Duration = Duration::from_millis(75);
+const GIX_BURST_OBJECT_CACHE_BYTES: usize = 4 * 1024 * 1024;
+
+struct ReadRepositoryInner {
     path: PathBuf,
-    query_lock: Mutex<()>,
+    state: Mutex<ReadRepositoryState>,
+    wake: Condvar,
+    shutdown: AtomicBool,
+}
+
+struct ReadRepositoryState {
+    repo: Option<gix::Repository>,
+    last_used: Option<Instant>,
+    generation: u64,
 }
 
 struct ReadRepositoryHandle<'a> {
-    // Drop the repository before unlocking the gate so the next query cannot
-    // overlap its ODB mappings with the previous query's mappings.
-    repo: gix::Repository,
-    _gate: MutexGuard<'a, ()>,
+    state: MutexGuard<'a, ReadRepositoryState>,
+    wake: &'a Condvar,
 }
 
 impl Deref for ReadRepositoryHandle<'_> {
     type Target = gix::Repository;
 
     fn deref(&self) -> &Self::Target {
-        &self.repo
+        self.state
+            .repo
+            .as_ref()
+            .expect("gix burst repository missing while leased")
+    }
+}
+
+impl Drop for ReadRepositoryHandle<'_> {
+    fn drop(&mut self) {
+        self.state.last_used = Some(Instant::now());
+        self.state.generation = self.state.generation.wrapping_add(1);
+        self.wake.notify_one();
+    }
+}
+
+impl Drop for ReadRepository {
+    fn drop(&mut self) {
+        self.inner.shutdown.store(true, Ordering::Release);
+        self.inner.wake.notify_one();
     }
 }
 
 impl ReadRepository {
-    fn from_repo(repo: gix::Repository) -> Self {
+    fn configure_burst_repo(repo: &mut gix::Repository) {
+        // A small cache is enough to reuse recently decoded commits while a
+        // refresh is active without recreating the old 32 MiB steady-state
+        // cache. The freelist is disabled so large temporary buffers are not
+        // retained when the burst is cold-reloaded after inactivity.
+        repo.object_cache_size(Some(GIX_BURST_OBJECT_CACHE_BYTES));
+        repo.set_freelist(None);
+    }
+
+    fn from_repo(mut repo: gix::Repository) -> Self {
         let path = repo
             .workdir()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| repo.common_dir().to_path_buf());
         let path = path.canonicalize().unwrap_or(path);
-        Self {
+        Self::configure_burst_repo(&mut repo);
+
+        let inner = Arc::new(ReadRepositoryInner {
             path,
-            query_lock: Mutex::new(()),
-        }
+            state: Mutex::new(ReadRepositoryState {
+                repo: Some(repo),
+                last_used: Some(Instant::now()),
+                generation: 0,
+            }),
+            wake: Condvar::new(),
+            shutdown: AtomicBool::new(false),
+        });
+        Self::spawn_idle_reaper(&inner);
+        Self { inner }
+    }
+
+    fn spawn_idle_reaper(inner: &Arc<ReadRepositoryInner>) {
+        let weak = Arc::downgrade(inner);
+        std::thread::Builder::new()
+            .name("lazygitrs-gix-idle".to_string())
+            .spawn(move || {
+                loop {
+                    let Some(inner) = weak.upgrade() else {
+                        return;
+                    };
+                    let mut state = inner
+                        .state
+                        .lock()
+                        .expect("gix burst repository lock poisoned");
+
+                    while state.last_used.is_none() && !inner.shutdown.load(Ordering::Acquire) {
+                        state = inner
+                            .wake
+                            .wait(state)
+                            .expect("gix burst repository lock poisoned");
+                    }
+                    if inner.shutdown.load(Ordering::Acquire) {
+                        return;
+                    }
+
+                    let generation = state.generation;
+                    let last_used = state.last_used.unwrap_or_else(Instant::now);
+                    let remaining = GIX_BURST_IDLE.saturating_sub(last_used.elapsed());
+                    let (mut state, timeout) = inner
+                        .wake
+                        .wait_timeout(state, remaining)
+                        .expect("gix burst repository lock poisoned");
+
+                    if inner.shutdown.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if !timeout.timed_out() {
+                        continue;
+                    }
+
+                    let idle_long_enough = state
+                        .last_used
+                        .is_some_and(|last_used| last_used.elapsed() >= GIX_BURST_IDLE);
+                    if state.generation == generation && idle_long_enough {
+                        // `reload()` keeps the lightweight repository handle and
+                        // open options available while dropping caches and ODB
+                        // system resources (including pack/MIDX mappings). If
+                        // reopening fails, discard the handle and let the next
+                        // query recreate it from the stored path.
+                        let reload_ok = if let Some(repo) = state.repo.as_mut() {
+                            if repo.reload().is_ok() {
+                                Self::configure_burst_repo(repo);
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if !reload_ok {
+                            state.repo.take();
+                        }
+                        state.last_used = None;
+                    }
+                }
+            })
+            .expect("failed to spawn gix idle reaper");
     }
 
     fn open_for_read(&self) -> Result<ReadRepositoryHandle<'_>> {
-        let gate = self
-            .query_lock
+        let mut state = self
+            .inner
+            .state
             .lock()
-            .expect("gix read repository query lock poisoned");
-        let mut repo = gix::open(&self.path)
-            .with_context(|| format!("failed to open {} with gix", self.path.display()))?;
+            .expect("gix burst repository lock poisoned");
 
-        // Keep each in-process Git read deliberately low-memory. We already
-        // cache parsed/application-level results where it matters, while gix's
-        // decoded-object cache and reusable-buffer freelist can retain tens of
-        // MiB after a large repository scan.
-        repo.object_cache_size(None);
-        repo.set_freelist(None);
-        Ok(ReadRepositoryHandle { repo, _gate: gate })
+        if state.repo.is_none() {
+            let mut repo = gix::open(&self.inner.path).with_context(|| {
+                format!("failed to open {} with gix", self.inner.path.display())
+            })?;
+            Self::configure_burst_repo(&mut repo);
+            state.repo = Some(repo);
+            state.last_used = Some(Instant::now());
+        }
+
+        Ok(ReadRepositoryHandle {
+            state,
+            wake: &self.inner.wake,
+        })
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -131,15 +257,32 @@ impl ReadRepository {
         Ok(Self::from_repo(repo))
     }
 
-    /// Kept for callers that mutate repository configuration through Git. Each
-    /// read now opens a fresh gix handle, so there is no persistent state to
-    /// refresh and the next query will observe the mutation automatically.
+    /// Refresh configuration/refs after a Git CLI mutation while returning the
+    /// repository to its cold, low-memory state.
     pub fn reload(&self) -> Result<()> {
-        Ok(())
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("gix burst repository lock poisoned");
+        let result: Result<()> = if let Some(repo) = state.repo.as_mut() {
+            repo.reload()
+                .map(|repo| Self::configure_burst_repo(repo))
+                .map_err(anyhow::Error::from)
+        } else {
+            Ok(())
+        };
+        if result.is_err() {
+            state.repo.take();
+        }
+        state.last_used = None;
+        state.generation = state.generation.wrapping_add(1);
+        self.inner.wake.notify_one();
+        result
     }
 
     /// Discover and open a repository in one pass so startup doesn't need two
-    /// `git rev-parse` subprocesses before creating the lightweight gix locator.
+    /// `git rev-parse` subprocesses before creating the burst gix handle.
     pub fn discover(path: &Path) -> Result<DiscoveredRepository> {
         let repo = gix::discover(path)
             .with_context(|| format!("failed to discover {} with gix", path.display()))?;

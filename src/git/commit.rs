@@ -314,8 +314,8 @@ impl GitCommands {
 
     /// Return the first parent of a commit, or None for a root commit.
     ///
-    /// This is a hot post-commit query, so use the persistent gix object store
-    /// rather than spawning `git rev-parse`.
+    /// This is a hot post-commit query, so use the burst-reused gix object
+    /// store rather than spawning `git rev-parse`.
     pub fn first_parent_hash(&self, hash: &str) -> Result<Option<String>> {
         self.read_first_parent_hash(hash)
     }
