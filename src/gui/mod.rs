@@ -315,6 +315,14 @@ pub(crate) enum RemoteOpKind {
     Other,
 }
 
+type RemoteOpFn = Box<dyn FnOnce(&GitCommands) -> Result<()> + Send>;
+
+struct PendingRemoteOp {
+    kind: RemoteOpKind,
+    title: String,
+    op: RemoteOpFn,
+}
+
 struct RemoteOpCompletion {
     head: Option<HeadState>,
     /// Some(false) proves that no refs affecting `git log --all` changed.
@@ -791,6 +799,10 @@ pub struct Gui {
     remote_op_rx: mpsc::Receiver<(RemoteOpKind, Result<RemoteOpCompletion>)>,
     /// Sender cloned into background threads for remote operations.
     remote_op_tx: mpsc::Sender<(RemoteOpKind, Result<RemoteOpCompletion>)>,
+    /// A manual network operation requested while silent auto-fetch owns the
+    /// remote lane. Only one user operation is queued; repeated keys while it
+    /// waits are intentionally ignored.
+    pending_remote_op: Option<PendingRemoteOp>,
     /// Async light files refresh (status-only) for non-index refreshes.
     files_refresh_rx: Option<mpsc::Receiver<Result<Vec<crate::model::File>>>>,
     files_refresh_in_progress: bool,
@@ -1314,6 +1326,7 @@ impl Gui {
             ai_commit_source: AiCommitSource::Staged,
             remote_op_rx,
             remote_op_tx,
+            pending_remote_op: None,
             files_refresh_rx: None,
             files_refresh_in_progress: false,
             index_mutation_tx,
@@ -2799,6 +2812,14 @@ impl Gui {
                 // refresh rather than risk leaving stale remote state.
                 self.needs_refresh = true;
             }
+
+            // Manual network operations own the lane as soon as auto-fetch
+            // releases it. Do not wait for the next keypress.
+            if self.remote_op_label.is_none()
+                && let Some(pending) = self.pending_remote_op.take()
+            {
+                self.launch_remote_op(pending.kind, &pending.title, pending.op);
+            }
         }
     }
 
@@ -3206,16 +3227,31 @@ impl Gui {
         }
     }
 
-    /// Run a remote operation (push/pull/fetch) on a background thread.
-    /// Non-blocking: corner toast + branch-side label; input stays free (like AI commit).
+    /// Run a remote operation (push/pull/fetch) on the single network lane.
+    /// If silent auto-fetch is already using the lane, remember the manual
+    /// request and launch it as soon as auto-fetch completes.
     pub fn start_remote_op<F>(&mut self, kind: RemoteOpKind, title: &str, _message: &str, op: F)
     where
         F: FnOnce(&GitCommands) -> Result<()> + Send + 'static,
     {
-        if self.remote_op_label.is_some() {
+        if self.remote_op_label.is_some() || self.pending_remote_op.is_some() {
             return;
         }
 
+        let op: RemoteOpFn = Box::new(op);
+        if self.auto_fetch_in_flight {
+            self.pending_remote_op = Some(PendingRemoteOp {
+                kind,
+                title: title.to_string(),
+                op,
+            });
+            return;
+        }
+
+        self.launch_remote_op(kind, title, op);
+    }
+
+    fn launch_remote_op(&mut self, kind: RemoteOpKind, title: &str, op: RemoteOpFn) {
         // Show operation label on the head branch in the sidebar (e.g. "Pushing", "Pulling").
         let label = match title {
             "Push" => "Pushing",
