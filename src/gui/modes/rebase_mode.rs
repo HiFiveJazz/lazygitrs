@@ -175,16 +175,37 @@ impl RebaseModeState {
     pub fn exit(&mut self) {
         self.active = false;
         self.phase = RebasePhase::Planning;
-        self.entries.clear();
-        self.branch_name.clear();
-        self.base_hash.clear();
-        self.base_short_hash.clear();
-        self.base_message.clear();
-        self.base_author_name.clear();
+
+        // `Vec::clear()` keeps the vector allocation around.  That is useful
+        // for a small planner which may be opened again, but a deep-history
+        // planner can contain tens of thousands of entries and leave several
+        // MiB of capacity resident after the user simply presses q/Esc.
+        // Replace the containers instead so all planner-owned allocations are
+        // actually released.
+        let released_entries = self.entries.len();
+        let entries = std::mem::take(&mut self.entries);
+        drop(entries);
+        drop(std::mem::take(&mut self.branch_name));
+        drop(std::mem::take(&mut self.base_hash));
+        drop(std::mem::take(&mut self.base_short_hash));
+        drop(std::mem::take(&mut self.base_message));
+        drop(std::mem::take(&mut self.base_author_name));
+
         self.selected = 0;
         self.scroll = 0;
+        self.visible_height = 0;
         self.done_count = 0;
         self.total_count = 0;
+
+        // Rust uses the system allocator here.  On glibc, freeing thousands of
+        // planner strings does not necessarily make RSS fall immediately: the
+        // allocator can keep those now-unused pages in its arenas for reuse.
+        // Large planners are rare, so after releasing one explicitly ask glibc
+        // to return free pages to the kernel.  Keep this GNU/Linux-only so the
+        // normal portable path remains just the ownership cleanup above.
+        if released_entries >= 4_096 {
+            trim_process_heap();
+        }
     }
 
     /// Set the action on the currently selected entry.
@@ -300,6 +321,17 @@ impl RebaseModeState {
 }
 
 /// Helper: create a RebaseEntry from a TodoEntry with a given status.
+#[inline]
+fn trim_process_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        // SAFETY: `malloc_trim(0)` has no pointer arguments and is safe to
+        // invoke after the planner-owned allocations above have been dropped.
+        // It only asks glibc to release unused allocator pages.
+        libc::malloc_trim(0);
+    }
+}
+
 fn entry_from_todo(todo: &TodoEntry, status: EntryStatus) -> RebaseEntry {
     RebaseEntry {
         hash: todo.hash.clone(),
