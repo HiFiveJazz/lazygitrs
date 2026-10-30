@@ -7,6 +7,7 @@ use crate::config::Theme;
 use crate::model::Model;
 use crate::model::commit::{Commit, CommitStatus, Divergence};
 
+use super::commit_details::avatar_color_for;
 use super::graph;
 use super::text::plain_text;
 
@@ -153,7 +154,7 @@ fn render_commits_window<'a>(
             } else {
                 author_initials(&author)
             };
-            (label, author_color(&author))
+            (label, avatar_color_for(&plain_text(&c.author_email), theme))
         })
         .collect();
 
@@ -202,7 +203,7 @@ fn render_commits_window<'a>(
                 spans.push(Span::raw(" "));
             }
 
-            // Author — per-author color like lazygit's AuthorStyle.
+            // Author — use the same per-author theme palette as Commit Details.
             if author_w > 0 {
                 spans.push(Span::styled(
                     pad_to(&authors[vi].0, author_w),
@@ -380,40 +381,6 @@ fn long_author(name: &str, length: usize) -> String {
     out.push('…');
     // Pad in case the ellipsis left us short (wide chars).
     pad_to(&out, length)
-}
-
-/// Stable per-author color like lazygit's AuthorStyle (HSL hashed -> RGB).
-fn author_color(name: &str) -> Color {
-    // FNV-1a for a stable hash without extra deps.
-    let mut h: u32 = 2_166_136_261;
-    for b in name.as_bytes() {
-        h ^= *b as u32;
-        h = h.wrapping_mul(16_777_619);
-    }
-    let hue = (h % 360) as f64;
-    let sat = 0.6 + ((h >> 9) % 40) as f64 / 100.0;
-    let light = 0.4 + ((h >> 15) % 20) as f64 / 100.0;
-    let (r, g, b) = hsl_to_rgb(hue, sat, light);
-    Color::Rgb(r, g, b)
-}
-
-fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
-    let m = l - c / 2.0;
-    let (r1, g1, b1) = match h as u32 {
-        0..=59 => (c, x, 0.0),
-        60..=119 => (x, c, 0.0),
-        120..=179 => (0.0, c, x),
-        180..=239 => (0.0, x, c),
-        240..=299 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    (
-        ((r1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-        ((g1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-        ((b1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-    )
 }
 
 #[cfg(test)]

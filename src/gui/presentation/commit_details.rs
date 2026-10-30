@@ -407,7 +407,7 @@ fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32) {
     (year, m, d, hour, minute)
 }
 
-fn avatar_color_for(email: &str, theme: &Theme) -> ratatui::style::Color {
+pub(super) fn avatar_color_for(email: &str, theme: &Theme) -> ratatui::style::Color {
     // Pick a stable color from the graph palette based on a cheap hash of the
     // email so each author has their own recognisable block.
     let mut h: u32 = 2_166_136_261;

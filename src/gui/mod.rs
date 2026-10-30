@@ -212,6 +212,12 @@ const DIFF_PREFETCH_BEHIND: usize = 1;
 /// At most this many prefetch loads queued or running at once.
 const DIFF_PREFETCH_INFLIGHT_MAX: usize = 2;
 const DIFF_PREFETCH_WORKERS: usize = 2;
+/// Warm commit shortstats ahead of the cursor so the details panel does not
+/// reveal the async metadata load during normal j/k navigation.
+const COMMIT_STAT_PREFETCH_AHEAD: usize = 6;
+const COMMIT_STAT_PREFETCH_BEHIND: usize = 2;
+const COMMIT_STAT_PREFETCH_INFLIGHT_MAX: usize = 4;
+const COMMIT_STAT_PREFETCH_WORKERS: usize = 2;
 const FETCH_MODEL_PART_COUNT: usize = 4;
 const PERIODIC_MODEL_PART_COUNT: usize = 2;
 
@@ -226,6 +232,27 @@ fn plain_char_key(key: KeyEvent, expected: char) -> bool {
 
 fn has_command_modifier(modifiers: KeyModifiers) -> bool {
     modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::META)
+}
+
+fn commit_stat_prefetch_indices(len: usize, selected: usize) -> Vec<usize> {
+    if len == 0 || selected >= len {
+        return Vec::new();
+    }
+    let mut indices = Vec::with_capacity(COMMIT_STAT_PREFETCH_AHEAD + COMMIT_STAT_PREFETCH_BEHIND);
+    for step in 1..=COMMIT_STAT_PREFETCH_AHEAD {
+        let index = selected.saturating_add(step);
+        if index >= len {
+            break;
+        }
+        indices.push(index);
+    }
+    for step in 1..=COMMIT_STAT_PREFETCH_BEHIND {
+        let Some(index) = selected.checked_sub(step) else {
+            break;
+        };
+        indices.push(index);
+    }
+    indices
 }
 
 pub(crate) fn textarea_input(
@@ -643,6 +670,44 @@ fn spawn_diff_prefetch_workers(
     }
 }
 
+struct CommitStatPrefetchJob {
+    generation: u64,
+    hash: String,
+    git: Arc<GitCommands>,
+}
+
+struct CommitStatPrefetchResult {
+    generation: u64,
+    hash: String,
+    result: Result<crate::model::commit::CommitStat>,
+}
+
+fn spawn_commit_stat_prefetch_workers(
+    rx: mpsc::Receiver<CommitStatPrefetchJob>,
+    result_tx: mpsc::Sender<CommitStatPrefetchResult>,
+) {
+    let rx = Arc::new(Mutex::new(rx));
+    for _ in 0..COMMIT_STAT_PREFETCH_WORKERS {
+        let rx = Arc::clone(&rx);
+        let result_tx = result_tx.clone();
+        std::thread::spawn(move || {
+            loop {
+                let job = match rx.lock() {
+                    Ok(guard) => guard.recv(),
+                    Err(_) => return,
+                };
+                let Ok(job) = job else { return };
+                let result = job.git.commit_stat(&job.hash);
+                let _ = result_tx.send(CommitStatPrefetchResult {
+                    generation: job.generation,
+                    hash: job.hash,
+                    result,
+                });
+            }
+        });
+    }
+}
+
 /// Load + parse one commit's diff — shared by interactive loads and prefetch
 /// so both produce byte-identical payloads for the same key.
 fn commit_diff_payload(git: &GitCommands, hash: &str, label_prefix: &str) -> DiffPayload {
@@ -797,6 +862,12 @@ pub struct Gui {
     /// Keys with a prefetch queued or running. An interactive request for one
     /// of these waits for the prefetch result instead of duplicating the work.
     diff_prefetch_inflight: HashSet<String>,
+    /// Low-priority shortstat prefetch lane for nearby commits.
+    commit_stat_prefetch_tx: mpsc::Sender<CommitStatPrefetchJob>,
+    commit_stat_prefetch_rx: mpsc::Receiver<CommitStatPrefetchResult>,
+    commit_stat_prefetch_inflight: HashSet<String>,
+    /// Invalidates prefetch results when switching repositories.
+    commit_stat_prefetch_generation: u64,
     /// Receiver for AI commit message generation results.
     ai_commit_rx: mpsc::Receiver<AiCommitResult>,
     /// Sender cloned into background threads for AI commit generation.
@@ -1202,6 +1273,8 @@ impl Gui {
         let (diff_tx, diff_rx) = mpsc::channel();
         let (diff_scheduler_tx, diff_scheduler_rx) = mpsc::channel();
         let (diff_prefetch_tx, diff_prefetch_rx) = mpsc::channel();
+        let (commit_stat_prefetch_tx, commit_stat_prefetch_job_rx) = mpsc::channel();
+        let (commit_stat_prefetch_result_tx, commit_stat_prefetch_rx) = mpsc::channel();
         let (commit_details_job_tx, commit_details_job_rx) = mpsc::channel();
         let (ai_commit_tx, ai_commit_rx) = mpsc::channel();
         let (commit_page_tx, commit_page_rx) = mpsc::channel();
@@ -1249,6 +1322,10 @@ impl Gui {
             Arc::clone(&index_mutation_busy),
         );
         spawn_diff_prefetch_workers(diff_prefetch_rx, diff_tx.clone());
+        spawn_commit_stat_prefetch_workers(
+            commit_stat_prefetch_job_rx,
+            commit_stat_prefetch_result_tx,
+        );
         spawn_latest_background_worker(commit_details_job_rx);
         // Compile tree-sitter highlight queries off the critical path so the
         // first diff shown doesn't pay the ~40-60ms lazy-init cost.
@@ -1353,6 +1430,10 @@ impl Gui {
             displayed_diff_key: String::new(),
             diff_prefetch_tx,
             diff_prefetch_inflight: HashSet::new(),
+            commit_stat_prefetch_tx,
+            commit_stat_prefetch_rx,
+            commit_stat_prefetch_inflight: HashSet::new(),
+            commit_stat_prefetch_generation: 0,
             ai_commit_rx,
             ai_commit_tx,
             commit_page_rx,
@@ -1683,14 +1764,17 @@ impl Gui {
             // Request diff loading on background thread if selection changed
             self.maybe_request_diff();
 
-            // Check for completed background diff results
+            // Check for completed background diff/metadata results
             self.receive_diff_results();
+            self.receive_commit_stat_prefetch_results();
             self.receive_index_mutation_results();
 
-            // Warm the preview cache with neighbor diffs while idle
+            // Warm caches with neighbor data while idle. Shortstats are tiny but
+            // otherwise visibly lag the rest of the commit-details panel.
             self.maybe_prefetch_diffs();
+            self.maybe_prefetch_commit_stats();
 
-            // Queue details for only the commit where navigation has settled.
+            // Queue full details for only the commit where navigation has settled.
             self.maybe_request_commit_details();
 
             // Check for AI commit message generation results
@@ -2107,6 +2191,7 @@ impl Gui {
             || self.remote_op_label.is_some()
             || self.background_mutation_label.is_some()
             || self.action_toast.is_some()
+            || !self.commit_stat_prefetch_inflight.is_empty()
             || self.needs_refresh
             || self.diff_loading
             || self.initial_load_rx.is_some()
@@ -2495,6 +2580,76 @@ impl Gui {
         let _ = self
             .diff_prefetch_tx
             .send(DiffPrefetchJob { diff_key, load });
+    }
+
+    fn receive_commit_stat_prefetch_results(&mut self) {
+        while let Ok(result) = self.commit_stat_prefetch_rx.try_recv() {
+            if result.generation != self.commit_stat_prefetch_generation {
+                continue;
+            }
+            self.commit_stat_prefetch_inflight.remove(&result.hash);
+            let Ok(stat) = result.result else {
+                continue;
+            };
+            if let (Ok(mut cache), Ok(mut order)) = (
+                self.commit_stats_cache.lock(),
+                self.commit_stats_cache_order.lock(),
+            ) {
+                bounded_cache_insert(&mut cache, &mut order, result.hash, stat);
+            }
+        }
+    }
+
+    /// Warm shortstats around the selected commit. The current commit remains on
+    /// the debounced details path; only neighbors are speculative so holding j/k
+    /// does not turn every transient selection into an immediate Git process.
+    fn maybe_prefetch_commit_stats(&mut self) {
+        if !self.show_commit_details
+            || self.commit_stat_prefetch_inflight.len() >= COMMIT_STAT_PREFETCH_INFLIGHT_MAX
+        {
+            return;
+        }
+
+        let active = self.context_mgr.active();
+        let selected = self.context_mgr.selected_active();
+        let hashes = {
+            let model = self.model.lock().unwrap();
+            let commits = match active {
+                ContextId::Commits => &model.commits,
+                ContextId::BranchCommits => &model.sub_commits,
+                ContextId::Reflog => &model.reflog_commits,
+                _ => return,
+            };
+            commit_stat_prefetch_indices(commits.len(), selected)
+                .into_iter()
+                .filter_map(|index| commits.get(index).map(|commit| commit.hash.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        for hash in hashes {
+            if self.commit_stat_prefetch_inflight.len() >= COMMIT_STAT_PREFETCH_INFLIGHT_MAX {
+                break;
+            }
+            let cached = self
+                .commit_stats_cache
+                .lock()
+                .map(|cache| cache.contains_key(&hash))
+                .unwrap_or(false);
+            if cached || self.commit_stat_prefetch_inflight.contains(&hash) {
+                continue;
+            }
+
+            self.commit_stat_prefetch_inflight.insert(hash.clone());
+            let job = CommitStatPrefetchJob {
+                generation: self.commit_stat_prefetch_generation,
+                hash: hash.clone(),
+                git: Arc::clone(&self.git),
+            };
+            if self.commit_stat_prefetch_tx.send(job).is_err() {
+                self.commit_stat_prefetch_inflight.remove(&hash);
+                break;
+            }
+        }
     }
 
     fn clear_diff_preview_cache(&mut self) {
@@ -7610,6 +7765,9 @@ impl Gui {
                                     gui.commit_list_cache = presentation::commits::CommitListCache::default();
                                     gui.commit_stats_cache.lock().unwrap().clear();
                                     gui.commit_stats_cache_order.lock().unwrap().clear();
+                                    gui.commit_stat_prefetch_inflight.clear();
+                                    gui.commit_stat_prefetch_generation =
+                                        gui.commit_stat_prefetch_generation.wrapping_add(1);
                                     gui.commit_messages_cache.lock().unwrap().clear();
                                     gui.commit_messages_cache_order.lock().unwrap().clear();
                                     gui.clear_diff_preview_cache();
@@ -10659,6 +10817,39 @@ mod terminal_mouse_tests {
 
         assert_eq!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 3);
         assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[test]
+    fn commit_stat_prefetch_prioritizes_forward_navigation() {
+        assert_eq!(
+            commit_stat_prefetch_indices(12, 3),
+            vec![4, 5, 6, 7, 8, 9, 2, 1]
+        );
+        assert_eq!(commit_stat_prefetch_indices(4, 3), vec![2, 1]);
+        assert_eq!(commit_stat_prefetch_indices(1, 0), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn commit_stat_prefetch_workers_return_results() {
+        let repo = TempRepo::new("commit-stat-prefetch");
+        let hash = repo.commit("file", "prefetch");
+        let git = Arc::new(crate::git::GitCommands::new(repo.path()).unwrap());
+        let (job_tx, job_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        spawn_commit_stat_prefetch_workers(job_rx, result_tx);
+
+        job_tx
+            .send(CommitStatPrefetchJob {
+                generation: 7,
+                hash: hash.clone(),
+                git,
+            })
+            .unwrap();
+
+        let result = result_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(result.generation, 7);
+        assert_eq!(result.hash, hash);
+        assert!(result.result.is_ok());
     }
 
     #[test]
