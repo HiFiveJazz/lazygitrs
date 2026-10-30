@@ -1047,11 +1047,11 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
     let save_hash = hash.clone();
 
     gui.popup = PopupState::Menu {
-        title: format!("Patch — {short}"),
+        title: format!("Patch {short}"),
         items: vec![
             MenuItem {
                 label: "Preview".to_string(),
-                description: "View formatted patch".to_string(),
+                description: "formatted patch".to_string(),
                 key: Some("v".to_string()),
                 action: Some(Box::new(move |gui| {
                     let patch = gui
@@ -1071,7 +1071,7 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
             },
             MenuItem {
                 label: "Copy".to_string(),
-                description: "Copy to clipboard".to_string(),
+                description: "clipboard".to_string(),
                 key: Some("y".to_string()),
                 action: Some(Box::new(move |gui| {
                     let patch = gui
@@ -1091,7 +1091,7 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
             },
             MenuItem {
                 label: "Save".to_string(),
-                description: "Save .patch in repo root".to_string(),
+                description: ".patch file".to_string(),
                 key: Some("s".to_string()),
                 action: Some(Box::new(move |gui| {
                     let result = gui
@@ -1120,7 +1120,7 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
             },
             MenuItem {
                 label: "Custom patch".to_string(),
-                description: "Choose files to stage".to_string(),
+                description: "select files".to_string(),
                 key: Some("b".to_string()),
                 action: Some(Box::new(move |gui| {
                     super::patch_building::show_patch_menu(gui)

@@ -464,7 +464,10 @@ pub fn render(
             model
                 .branches
                 .iter()
-                .position(|branch| branch.head)
+                .position(|branch| {
+                    !model.head_branch_name.is_empty() && branch.name == model.head_branch_name
+                })
+                .or_else(|| model.branches.iter().position(|branch| branch.head))
                 .unwrap_or_else(|| ctx_mgr.selected(ctx_id))
         } else {
             ctx_mgr.selected(ctx_id)

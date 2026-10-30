@@ -55,11 +55,34 @@ impl Default for RefresherConfig {
 }
 
 impl UserConfig {
+    fn normalize_legacy_keybindings(&mut self) {
+        // Older lazygitrs configs used Ctrl-K/J as the alternate preview-scroll
+        // bindings. Ctrl-K/J are now dedicated to smooth list scrolling, while
+        // Shift-K/J scroll the preview. Migrate only the exact legacy pair so
+        // unrelated user customizations remain untouched.
+        if self.keybinding.universal.scroll_up_main_alt1 == "<c-k>" {
+            self.keybinding.universal.scroll_up_main_alt1 = "K".to_string();
+        }
+        if self.keybinding.universal.scroll_down_main_alt1 == "<c-j>" {
+            self.keybinding.universal.scroll_down_main_alt1 = "J".to_string();
+        }
+
+        // Likewise, migrate historical J/K commit-reorder bindings so they
+        // cannot steal the new preview-scroll keys.
+        if self.keybinding.commits.move_up_commit == "K" {
+            self.keybinding.commits.move_up_commit = "{".to_string();
+        }
+        if self.keybinding.commits.move_down_commit == "J" {
+            self.keybinding.commits.move_down_commit = "}".to_string();
+        }
+    }
+
     pub fn load(config_dir: &Path) -> Result<Self> {
         let config_path = config_dir.join("config.yml");
         if config_path.exists() {
             let contents = std::fs::read_to_string(&config_path)?;
-            let config: UserConfig = serde_yaml::from_str(&contents)?;
+            let mut config: UserConfig = serde_yaml::from_str(&contents)?;
+            config.normalize_legacy_keybindings();
             Ok(config)
         } else {
             Ok(Self::default())
@@ -578,4 +601,30 @@ pub struct CustomCommandPrompt {
     pub key: Option<String>,
     pub command: Option<String>,
     pub filter: Option<String>,
+}
+
+
+#[cfg(test)]
+mod keybinding_migration_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_preview_scroll_bindings_are_migrated() {
+        let mut config = UserConfig::default();
+        config.keybinding.universal.scroll_up_main_alt1 = "<c-k>".to_string();
+        config.keybinding.universal.scroll_down_main_alt1 = "<c-j>".to_string();
+        config.normalize_legacy_keybindings();
+        assert_eq!(config.keybinding.universal.scroll_up_main_alt1, "K");
+        assert_eq!(config.keybinding.universal.scroll_down_main_alt1, "J");
+    }
+
+    #[test]
+    fn legacy_commit_reorder_bindings_do_not_steal_preview_keys() {
+        let mut config = UserConfig::default();
+        config.keybinding.commits.move_up_commit = "K".to_string();
+        config.keybinding.commits.move_down_commit = "J".to_string();
+        config.normalize_legacy_keybindings();
+        assert_eq!(config.keybinding.commits.move_up_commit, "{");
+        assert_eq!(config.keybinding.commits.move_down_commit, "}");
+    }
 }
