@@ -1074,15 +1074,13 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                 description: "Copy to clipboard".to_string(),
                 key: Some("y".to_string()),
                 action: Some(Box::new(move |gui| {
-                    let hash = copy_hash.clone();
-                    gui.start_menu_async(1, move |git| {
-                        let patch = git
-                            .git_cmd()
-                            .args(&["format-patch", "-1", "--stdout", &hash])
-                            .run_expecting_success()?
-                            .stdout;
-                        Ok(crate::gui::popup::MenuAsyncResult::CopyToClipboard(patch))
-                    });
+                    let patch = gui
+                        .git
+                        .git_cmd()
+                        .args(&["format-patch", "-1", "--stdout", &copy_hash])
+                        .run_expecting_success()?
+                        .stdout;
+                    Platform::copy_to_clipboard(&patch)?;
                     Ok(())
                 })),
             },
