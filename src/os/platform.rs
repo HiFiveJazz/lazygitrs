@@ -1,6 +1,6 @@
 use std::env;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Result};
 
@@ -88,10 +88,37 @@ impl Platform {
 }
 
 fn copy_with(program: &str, args: &[&str], text: &str) -> Result<()> {
-    CmdBuilder::new(program)
+    // Clipboard owners such as wl-copy and xclip intentionally fork into the
+    // background so they can continue serving the selection after this call
+    // returns. Do not use CmdBuilder here: it captures stdout/stderr and then
+    // waits for EOF on those pipes, but the background clipboard process
+    // inherits the pipe descriptors and can keep them open indefinitely.
+    //
+    // Redirect output to /dev/null and wait only for the short-lived parent
+    // process. The background clipboard owner is then free to keep serving the
+    // copied data without blocking the TUI.
+    let mut child = Command::new(program)
         .args(args)
-        .stdin(text.to_string())
-        .run_expecting_success()?;
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(text.as_bytes())?;
+    }
+
+    let status = child.wait()?;
+    if !status.success() {
+        bail!(
+            "Clipboard command failed (exit {}): {} {}",
+            status.code().unwrap_or(-1),
+            program,
+            args.join(" ")
+        );
+    }
+
     Ok(())
 }
 
