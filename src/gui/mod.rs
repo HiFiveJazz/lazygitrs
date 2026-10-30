@@ -1301,6 +1301,7 @@ impl Gui {
             initial_load_received: 0,
             initial_load_expected: MODEL_PART_COUNT,
             refresh_in_progress: false,
+            subview_refresh_generation: 0,
             context_mgr,
             layout: LayoutState::default(),
             popup: PopupState::None,
@@ -3446,7 +3447,7 @@ impl Gui {
         let title = title.to_string();
         std::thread::spawn(move || {
             let result = op(&git);
-            let _ = tx.send(Box::new(move |gui| {
+            let _ = tx.send(Box::new(move |gui: &mut Gui| {
                 gui.background_mutation_label = None;
                 // Even a failed apply/pop can leave conflict markers or partial
                 // worktree changes. Always refresh from Git's actual state.
@@ -9445,7 +9446,7 @@ impl Gui {
             let tx = self.ui_job_tx.clone();
             std::thread::spawn(move || {
                 let result = git.load_commits_for_branch(&branch, 300);
-                let _ = tx.send(Box::new(move |gui| {
+                let _ = tx.send(Box::new(move |gui: &mut Gui| {
                     if gui.subview_refresh_generation != generation
                         || gui.branch_commits_name != branch
                         || !matches!(
@@ -9476,7 +9477,7 @@ impl Gui {
             let tx = self.ui_job_tx.clone();
             std::thread::spawn(move || {
                 let result = git.commit_files(&hash);
-                let _ = tx.send(Box::new(move |gui| {
+                let _ = tx.send(Box::new(move |gui: &mut Gui| {
                     if gui.subview_refresh_generation != generation
                         || gui.commit_files_hash != hash
                         || !matches!(
