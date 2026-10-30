@@ -75,6 +75,15 @@ fn bounded_cache_insert<T>(
     order.push_back(key);
 }
 
+fn context_claims_global_repo_key(
+    active: ContextId,
+    key: KeyEvent,
+    kb: &crate::config::KeybindingConfig,
+) -> bool {
+    matches!(active, ContextId::Commits) && matches_key(key, &kb.commits.pick_commit)
+        || matches!(active, ContextId::Tags) && key.code == KeyCode::Char('P')
+}
+
 fn list_picker_visible_height(terminal_height: usize) -> usize {
     let popup_h = (terminal_height * 60 / 100)
         .max(10)
@@ -3796,10 +3805,8 @@ impl Gui {
         // universal pull also defaults to `p`.  Let the commits controller see
         // that key instead of consuming it here.  Likewise, `P` in Tags pushes
         // the selected tag rather than the current branch.
-        match self.context_mgr.active() {
-            ContextId::Commits if matches_key(key, &kb.commits.pick_commit) => return Ok(false),
-            ContextId::Tags if key.code == KeyCode::Char('P') => return Ok(false),
-            _ => {}
+        if context_claims_global_repo_key(self.context_mgr.active(), key, &kb) {
+            return Ok(false);
         }
 
         if matches_key(key, &kb.universal.push_files) || matches_key(key, &kb.universal.pull_files)
@@ -9963,6 +9970,22 @@ impl Command for EnableMouseCaptureWithoutHover {
 mod terminal_mouse_tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn contextual_commit_pick_wins_over_global_pull() {
+        let kb = crate::config::KeybindingConfig::default();
+        let key = crate::config::keybindings::parse_key(&kb.commits.pick_commit).unwrap();
+        assert!(context_claims_global_repo_key(ContextId::Commits, key, &kb));
+        assert!(!context_claims_global_repo_key(ContextId::Files, key, &kb));
+    }
+
+    #[test]
+    fn contextual_tag_push_wins_over_global_push() {
+        let kb = crate::config::KeybindingConfig::default();
+        let key = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+        assert!(context_claims_global_repo_key(ContextId::Tags, key, &kb));
+        assert!(!context_claims_global_repo_key(ContextId::Files, key, &kb));
+    }
 
     #[test]
     fn split_commit_message_keeps_summary_and_body_separate() {
