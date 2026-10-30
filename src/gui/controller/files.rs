@@ -125,6 +125,49 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
     Ok(())
 }
 
+fn next_file_row_after_toggle<F>(selected: usize, len: usize, is_file: F) -> usize
+where
+    F: Fn(usize) -> bool,
+{
+    if len <= 1 {
+        return selected.min(len.saturating_sub(1));
+    }
+
+    for idx in selected.saturating_add(1)..len {
+        if is_file(idx) {
+            return idx;
+        }
+    }
+
+    for idx in (0..selected.min(len)).rev() {
+        if is_file(idx) {
+            return idx;
+        }
+    }
+
+    selected.min(len - 1)
+}
+
+fn advance_selection_after_file_toggle(gui: &mut Gui, selected: usize) -> bool {
+    let next = if gui.show_file_tree {
+        next_file_row_after_toggle(selected, gui.file_tree_nodes.len(), |idx| {
+            gui.file_tree_nodes
+                .get(idx)
+                .is_some_and(|node| node.file_index.is_some())
+        })
+    } else {
+        let len = gui.model.lock().unwrap().files.len();
+        next_file_row_after_toggle(selected, len, |_| true)
+    };
+
+    if next == selected {
+        return false;
+    }
+
+    gui.context_mgr.set_selection(next);
+    true
+}
+
 fn toggle_stage(gui: &mut Gui) -> Result<()> {
     // If in tree view and a directory is selected, stage/unstage all child files.
     // Optimistic UI + background git so rapid Space presses stay snappy.
@@ -165,7 +208,6 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
                 }
                 drop(model);
                 gui.rebuild_file_tree_from_model();
-                gui.needs_diff_refresh = true;
 
                 if !to_stage.is_empty() {
                     gui.enqueue_stage_then_refresh(to_stage, true);
@@ -177,6 +219,7 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
         }
     }
 
+    let selected = gui.context_mgr.selected_active();
     let Some(file_idx) = gui.selected_file_index() else {
         return Ok(());
     };
@@ -198,7 +241,20 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
         }
         drop(model);
         gui.rebuild_file_tree_from_model();
-        gui.needs_diff_refresh = true;
+
+        // Space acts like a checklist: after toggling one file, advance to the
+        // next visible file. At the bottom, step back to the previous file;
+        // with a single file, keep the selection where it is.
+        //
+        // Only refresh the diff immediately when selection actually moved.
+        // For the toggled file itself, the model is optimistic but the Git
+        // index mutation runs asynchronously. Requesting its staged diff now
+        // can race `git add`/`git reset` and briefly return an empty diff,
+        // flashing "Select a file to view diff". The index worker requests
+        // the authoritative refresh once the mutation has completed.
+        if advance_selection_after_file_toggle(gui, selected) {
+            gui.needs_diff_refresh = true;
+        }
 
         if should_stage {
             gui.enqueue_stage_then_refresh(vec![add_path], true);
@@ -230,7 +286,6 @@ fn toggle_stage_all(gui: &mut Gui) -> Result<()> {
     }
     drop(model);
     gui.rebuild_file_tree_from_model();
-    gui.needs_diff_refresh = true;
     gui.enqueue_stage_all_then_refresh(stage);
     Ok(())
 }
@@ -988,5 +1043,36 @@ fn matches_key(key: KeyEvent, binding: &str) -> bool {
         key.code == expected.code && key.modifiers == expected.modifiers
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_file_row_after_toggle;
+
+    #[test]
+    fn file_toggle_advances_then_steps_back_at_bottom() {
+        assert_eq!(next_file_row_after_toggle(0, 3, |_| true), 1);
+        assert_eq!(next_file_row_after_toggle(1, 3, |_| true), 2);
+        assert_eq!(next_file_row_after_toggle(2, 3, |_| true), 1);
+    }
+
+    #[test]
+    fn file_toggle_keeps_single_file_selected() {
+        assert_eq!(next_file_row_after_toggle(0, 1, |_| true), 0);
+    }
+
+    #[test]
+    fn file_toggle_skips_directory_rows() {
+        // root, file A, directory, file B
+        let file_rows = [false, true, false, true];
+        assert_eq!(
+            next_file_row_after_toggle(1, file_rows.len(), |idx| file_rows[idx]),
+            3
+        );
+        assert_eq!(
+            next_file_row_after_toggle(3, file_rows.len(), |idx| file_rows[idx]),
+            1
+        );
     }
 }
