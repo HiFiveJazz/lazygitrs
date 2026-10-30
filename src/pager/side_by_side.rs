@@ -5,6 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::config::Theme;
 
@@ -374,6 +375,10 @@ pub struct DiffViewState {
     /// Graphics are suppressed while an overlay covers the diff pane.
     pub image_preview_hidden: bool,
     pub scroll_offset: usize,
+    /// Short easing animation used by keyboard preview scrolling (J/K).
+    smooth_scroll_from: f64,
+    smooth_scroll_target: f64,
+    smooth_scroll_started_at: Option<Instant>,
     pub horizontal_scroll: usize,
     pub lines: Vec<DiffLine>,
     pub hunk_starts: Vec<usize>,
@@ -437,6 +442,9 @@ impl Default for DiffViewState {
             inline_images: HashMap::new(),
             image_preview_hidden: false,
             scroll_offset: 0,
+            smooth_scroll_from: 0.0,
+            smooth_scroll_target: 0.0,
+            smooth_scroll_started_at: None,
             horizontal_scroll: 0,
             lines: Vec::new(),
             hunk_starts: Vec::new(),
@@ -487,6 +495,7 @@ impl DiffViewState {
     }
 
     pub fn toggle_view_layout(&mut self) {
+        self.cancel_smooth_scroll();
         // Convert scroll between DiffLine-index (split) and visual-row (unified)
         // so the same content stays near the top after toggling.
         let width = self.last_content_width.max(1);
@@ -1206,11 +1215,76 @@ impl DiffViewState {
         }
     }
 
+    /// Smoothly scroll the preview by a relative number of rows. Repeated
+    /// keypresses retarget from the pending destination so fast J/K input
+    /// accumulates naturally instead of restarting from each intermediate frame.
+    pub fn request_smooth_scroll(&mut self, delta: isize) {
+        let max = self.max_scroll();
+        let base = if self.smooth_scroll_started_at.is_some() {
+            self.smooth_scroll_target.round() as usize
+        } else {
+            self.scroll_offset
+        }
+        .min(max);
+
+        let target = if delta < 0 {
+            base.saturating_sub(delta.unsigned_abs())
+        } else {
+            base.saturating_add(delta as usize).min(max)
+        };
+
+        if target == self.scroll_offset {
+            self.cancel_smooth_scroll();
+            return;
+        }
+
+        self.smooth_scroll_from = self.scroll_offset as f64;
+        self.smooth_scroll_target = target as f64;
+        self.smooth_scroll_started_at = Some(Instant::now());
+    }
+
+    /// Advance the keyboard preview-scroll easing by one frame.
+    pub fn tick_smooth_scroll(&mut self) {
+        const DURATION: Duration = Duration::from_millis(100);
+        let Some(started_at) = self.smooth_scroll_started_at else {
+            return;
+        };
+
+        let t = (started_at.elapsed().as_secs_f64() / DURATION.as_secs_f64()).min(1.0);
+        let target = self.smooth_scroll_target.min(self.max_scroll() as f64);
+        if t >= 1.0 {
+            self.scroll_offset = target as usize;
+            self.smooth_scroll_started_at = None;
+            self.smooth_scroll_from = target;
+            self.smooth_scroll_target = target;
+            return;
+        }
+
+        let value = self.smooth_scroll_from + (target - self.smooth_scroll_from) * t;
+        self.scroll_offset = if target >= self.smooth_scroll_from {
+            value.floor() as usize
+        } else {
+            value.ceil() as usize
+        };
+    }
+
+    pub fn has_active_smooth_scroll(&self) -> bool {
+        self.smooth_scroll_started_at.is_some()
+    }
+
+    fn cancel_smooth_scroll(&mut self) {
+        self.smooth_scroll_started_at = None;
+        self.smooth_scroll_from = self.scroll_offset as f64;
+        self.smooth_scroll_target = self.scroll_offset as f64;
+    }
+
     pub fn scroll_up(&mut self, amount: usize) {
+        self.cancel_smooth_scroll();
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
     }
 
     pub fn scroll_down(&mut self, amount: usize) {
+        self.cancel_smooth_scroll();
         let max = self.max_scroll();
         self.scroll_offset = (self.scroll_offset + amount).min(max);
     }

@@ -1719,6 +1719,7 @@ impl Gui {
                 || self.rebase_mode.active
                 || self.patch_building.active;
             self.context_mgr.tick_selection_animations();
+            self.diff_view.tick_smooth_scroll();
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
@@ -1989,6 +1990,7 @@ impl Gui {
     fn input_wait_timeout(&self) -> Duration {
         if self.context_mgr.has_active_scroll_animation()
             || self.context_mgr.has_active_selection_animation()
+            || self.diff_view.has_active_smooth_scroll()
         {
             Duration::from_millis(8)
         } else if self.shell_command_job.is_some()
@@ -4411,13 +4413,14 @@ impl Gui {
             return Ok(());
         }
 
-        // Main panel scroll (J/K or shift+arrows for diff scrolling)
+        // Smooth preview scrolling (J/K by default). Keep this separate from
+        // Ctrl-J/K, which performs smooth multi-row navigation in the active list.
         if matches_key(key, &keybindings.universal.scroll_down_main_alt1) {
-            self.diff_view.scroll_down(1);
+            self.diff_view.request_smooth_scroll(1);
             return Ok(());
         }
         if matches_key(key, &keybindings.universal.scroll_up_main_alt1) {
-            self.diff_view.scroll_up(1);
+            self.diff_view.request_smooth_scroll(-1);
             return Ok(());
         }
         if key.code == KeyCode::PageDown {
@@ -6545,6 +6548,8 @@ impl Gui {
                     kb.universal.prev_match.clone(),
                     "Previous search match".into(),
                 ),
+                CommandEntry::keybinding("<c-k>".into(), "Scroll list up".into()),
+                CommandEntry::keybinding("<c-j>".into(), "Scroll list down".into()),
                 CommandEntry::keybinding(
                     kb.universal.scroll_up_main_alt1.clone(),
                     "Scroll preview up".into(),

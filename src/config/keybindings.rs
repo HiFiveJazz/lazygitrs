@@ -172,8 +172,8 @@ impl Default for UniversalKeybinding {
             open_file: "o".into(),
             scroll_up_main: "<pgup>".into(),
             scroll_down_main: "<pgdown>".into(),
-            scroll_up_main_alt1: "<c-k>".into(),
-            scroll_down_main_alt1: "<c-j>".into(),
+            scroll_up_main_alt1: "K".into(),
+            scroll_down_main_alt1: "J".into(),
             undo: "z".into(),
             redo: "<c-z>".into(),
             filtering_menu: "<c-s>".into(),
@@ -481,8 +481,8 @@ mod tests {
         assert_eq!(config.commits.patch_options, "p");
         assert_eq!(config.commits.move_up_commit, "{");
         assert_eq!(config.commits.move_down_commit, "}");
-        assert_eq!(config.universal.scroll_up_main_alt1, "<c-k>");
-        assert_eq!(config.universal.scroll_down_main_alt1, "<c-j>");
+        assert_eq!(config.universal.scroll_up_main_alt1, "K");
+        assert_eq!(config.universal.scroll_down_main_alt1, "J");
 
         assert_eq!(
             parse_key(&config.commits.patch_options),
@@ -490,7 +490,7 @@ mod tests {
         );
         assert_eq!(
             parse_key(&config.universal.scroll_down_main_alt1),
-            Some(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
+            Some(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT))
         );
     }
 
