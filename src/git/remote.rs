@@ -267,11 +267,7 @@ impl GitCommands {
     ///
     /// `services` mirrors lazygit's services map (`gitDomain: provider:webDomain`)
     /// so self-hosted GitLab/Gitea/etc. instances can override auto-detection.
-    pub fn get_commit_url(
-        &self,
-        hash: &str,
-        services: &HashMap<String, String>,
-    ) -> Result<String> {
+    pub fn get_commit_url(&self, hash: &str, services: &HashMap<String, String>) -> Result<String> {
         let remote_url = self.origin_remote_url()?;
         commit_web_url(&remote_url, hash, services)
             .ok_or_else(|| anyhow!("unsupported remote URL: {remote_url}"))
@@ -284,10 +280,7 @@ impl GitCommands {
 
     /// Get a browser-friendly repository URL, honoring self-hosted service
     /// mappings from the user's lazygit-compatible `services` config.
-    pub fn get_repo_url_with_services(
-        &self,
-        services: &HashMap<String, String>,
-    ) -> Result<String> {
+    pub fn get_repo_url_with_services(&self, services: &HashMap<String, String>) -> Result<String> {
         let remote_url = self.origin_remote_url()?;
         repo_web_url(&remote_url, services)
             .ok_or_else(|| anyhow!("unsupported remote URL: {remote_url}"))
@@ -574,7 +567,10 @@ fn authority_host(authority: &str) -> &str {
             .map(|(host, _)| host.trim_start_matches('['))
             .unwrap_or(authority);
     }
-    authority.split_once(':').map(|(host, _)| host).unwrap_or(authority)
+    authority
+        .split_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(authority)
 }
 
 fn auto_provider(host: &str) -> WebProvider {
@@ -649,11 +645,7 @@ fn repo_web_url(url: &str, services: &HashMap<String, String>) -> Option<String>
     Some(format!("{}/{}", root.trim_end_matches('/'), path))
 }
 
-fn commit_web_url(
-    url: &str,
-    hash: &str,
-    services: &HashMap<String, String>,
-) -> Option<String> {
+fn commit_web_url(url: &str, hash: &str, services: &HashMap<String, String>) -> Option<String> {
     let location = parse_remote_location(url)?;
     let provider = configured_service(&location.host, services)
         .map(|(provider, _)| provider)

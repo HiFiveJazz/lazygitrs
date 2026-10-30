@@ -45,7 +45,9 @@ fn copy_menu(gui: &mut Gui) -> Result<()> {
         description: String::new(),
         key: Some("r".to_string()),
         action: Some(Box::new(move |gui| {
-            let url = gui.git.get_repo_url_with_services(&gui.config.user_config.services)?;
+            let url = gui
+                .git
+                .get_repo_url_with_services(&gui.config.user_config.services)?;
             Platform::copy_to_clipboard(&url)?;
             Ok(())
         })),
@@ -112,7 +114,9 @@ fn open_menu(gui: &mut Gui) -> Result<()> {
         description: String::new(),
         key: Some("r".to_string()),
         action: Some(Box::new(move |gui| {
-            let url = gui.git.get_repo_url_with_services(&gui.config.user_config.services)?;
+            let url = gui
+                .git
+                .get_repo_url_with_services(&gui.config.user_config.services)?;
             Platform::open_file(&url)?;
             Ok(())
         })),
