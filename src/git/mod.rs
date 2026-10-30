@@ -4,6 +4,7 @@ pub mod branch;
 pub mod commit;
 pub mod diff;
 pub(crate) mod diff_paths;
+pub mod email;
 pub mod file;
 pub mod loader;
 mod read_backend;

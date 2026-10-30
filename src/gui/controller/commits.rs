@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
 use crate::git::rebase::RebaseAction;
 use crate::gui::popup::{
-    BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, MenuItem, MessageKind,
-    PopupState, make_textarea,
+    BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, EmailPatchFocus, MenuItem,
+    MessageKind, PopupState, make_textarea,
 };
 use crate::gui::{Gui, RemoteOpKind};
 use crate::model::Branch;
@@ -1046,6 +1047,8 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
     let preview_hash = hash.clone();
     let copy_hash = hash.clone();
     let save_hash = hash.clone();
+    let email_hash = hash.clone();
+    let email_short = short.clone();
 
     gui.popup = PopupState::Menu {
         title: format!("Patch {short}"),
@@ -1115,14 +1118,166 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
             },
             MenuItem {
                 label: "Email".to_string(),
-                description: "Coming soon".to_string(),
-                key: None,
-                action: None,
+                description: "Send with git send-email".to_string(),
+                key: Some("e".to_string()),
+                action: Some(Box::new(move |gui| {
+                    show_email_patch_popup(gui, email_hash.clone(), email_short.clone());
+                    Ok(())
+                })),
             },
         ],
         selected: 0,
         loading_index: None,
     };
+    Ok(())
+}
+
+static EMAIL_RECIPIENT_RESOLUTION_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn show_email_patch_popup(gui: &mut Gui, hash: String, short: String) {
+    let (default_to, default_cc) = gui.git.send_email_defaults();
+
+    // Resolve Git's automatic author/trailer/ccCmd recipients immediately so
+    // the compose form opens with the complete recipient list. The user can
+    // then remove any address before sending, and the real send treats the
+    // visible To/Cc fields as authoritative.
+    if let Err(err) = resolve_send_patch_recipients(gui, hash, short, default_to, default_cc, false)
+    {
+        gui.popup = PopupState::Message {
+            title: "Could not resolve email recipients".to_string(),
+            message: format!("{err}"),
+            kind: MessageKind::Error,
+        };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_email_patch_popup_with_values(
+    gui: &mut Gui,
+    hash: String,
+    short: String,
+    to: String,
+    cc: String,
+    dry_run: bool,
+    reviewing: bool,
+    resolving_recipients: bool,
+    resolution_request_id: u64,
+    focus: EmailPatchFocus,
+) {
+    let mut to_textarea = make_textarea("maintainer@example.com, list@example.org");
+    let mut cc_textarea = make_textarea("Optional");
+    if !to.is_empty() {
+        to_textarea.insert_str(&to);
+    }
+    if !cc.is_empty() {
+        cc_textarea.insert_str(&cc);
+    }
+
+    gui.popup = PopupState::EmailPatch {
+        title: format!("Email patch {short}"),
+        to_textarea,
+        cc_textarea,
+        focus,
+        dry_run,
+        reviewing,
+        resolving_recipients,
+        resolution_request_id,
+        on_confirm: Box::new(move |gui, to, cc, dry_run| {
+            send_patch_email(gui, hash.clone(), to, cc, dry_run)
+        }),
+    };
+}
+
+fn resolve_send_patch_recipients(
+    gui: &mut Gui,
+    hash: String,
+    short: String,
+    to: String,
+    cc: String,
+    dry_run: bool,
+) -> Result<()> {
+    let request_id = EMAIL_RECIPIENT_RESOLUTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    // Show the compose popup immediately while Git resolves
+    // author/trailer/ccCmd recipients, but lock editing until the complete
+    // recipient list is available.
+    show_email_patch_popup_with_values(
+        gui,
+        hash.clone(),
+        short.clone(),
+        to.clone(),
+        cc.clone(),
+        dry_run,
+        false,
+        true,
+        request_id,
+        EmailPatchFocus::To,
+    );
+
+    let git = Arc::clone(&gui.git);
+    let tx = gui.ui_job_tx.clone();
+    let command_log = gui.command_log.clone();
+    std::thread::spawn(move || {
+        crate::os::cmd::set_thread_command_log(command_log);
+        let result = git.resolve_commit_email_recipients(&hash, &to, &cc);
+        let _ = tx.send(Box::new(move |gui: &mut Gui| {
+            let still_current = matches!(
+                &gui.popup,
+                PopupState::EmailPatch {
+                    resolving_recipients: true,
+                    resolution_request_id: active_request_id,
+                    ..
+                } if *active_request_id == request_id
+            );
+            if !still_current {
+                return;
+            }
+
+            match result {
+                Ok(recipients) => {
+                    show_email_patch_popup_with_values(
+                        gui,
+                        hash,
+                        short,
+                        recipients.to,
+                        recipients.cc,
+                        dry_run,
+                        false,
+                        false,
+                        0,
+                        EmailPatchFocus::To,
+                    );
+                    gui.show_action_toast("Automatic recipients added");
+                }
+                Err(err) => {
+                    gui.popup = PopupState::Message {
+                        title: "Could not resolve email recipients".to_string(),
+                        message: format!("{err}"),
+                        kind: MessageKind::Error,
+                    };
+                }
+            }
+        }) as crate::gui::UiJob);
+    });
+
+    Ok(())
+}
+
+fn send_patch_email(
+    gui: &mut Gui,
+    hash: String,
+    to: String,
+    cc: String,
+    dry_run: bool,
+) -> Result<()> {
+    let title = if dry_run {
+        "Checking patch email"
+    } else {
+        "Sending patch email"
+    };
+    gui.start_remote_op(RemoteOpKind::Email(dry_run), title, "", move |git| {
+        git.send_commit_email(&hash, &to, &cc, dry_run)
+    });
     Ok(())
 }
 

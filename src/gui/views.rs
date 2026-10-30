@@ -19,7 +19,7 @@ use crate::pager::side_by_side::{self, DiffPanel, DiffPanelLayout, DiffViewLayou
 use super::ScreenMode;
 use super::context::{ContextId, ContextManager, SideWindow};
 use super::layout::{self, LayoutState};
-use super::popup::{CommitInputFocus, PopupState, list_picker_matching_indices};
+use super::popup::{CommitInputFocus, EmailPatchFocus, PopupState, list_picker_matching_indices};
 use super::presentation;
 
 pub fn render(
@@ -4059,6 +4059,209 @@ pub fn render_popup(
                 } else {
                     frame.render_widget(textarea, inner);
                 }
+            }
+        }
+        PopupState::EmailPatch {
+            title,
+            to_textarea,
+            cc_textarea,
+            focus,
+            dry_run,
+            reviewing,
+            resolving_recipients,
+            ..
+        } => {
+            let width = (area.width * 75 / 100).min(84).max(40).min(area.width);
+            if width < 20 {
+                return;
+            }
+
+            if *reviewing {
+                let to = to_textarea.lines().join("");
+                let cc = cc_textarea.lines().join("");
+                let to_label = if to.trim().is_empty() {
+                    "(none)"
+                } else {
+                    to.trim()
+                };
+                let cc_label = if cc.trim().is_empty() {
+                    "(none)"
+                } else {
+                    cc.trim()
+                };
+                let action = if *dry_run { "Check" } else { "Send" };
+                let message = format!(
+                    "{action} this patch?\n\nTo: {to_label}\nCc: {cc_label}\n\nOnly the recipients shown above will be used."
+                );
+                let inner_width = width.saturating_sub(4) as usize;
+                let wrapped = wrap_popup_lines(&message, inner_width);
+                let wrapped = visible_popup_lines(&wrapped, area.height.saturating_sub(5) as usize);
+                let review_height = clamped_popup_height(wrapped.len(), 5, area.height);
+                let rect = Rect::new(
+                    area.x + area.width.saturating_sub(width) / 2,
+                    area.y + area.height.saturating_sub(review_height) / 2,
+                    width,
+                    review_height,
+                );
+                frame.render_widget(Clear, rect);
+                let block = Block::default()
+                    .title(format!(" Review {title} "))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.accent_secondary));
+
+                let mut text: Vec<Line> = Vec::new();
+                text.push(Line::from(""));
+                for line in &wrapped {
+                    text.push(Line::from(format!(" {line}")));
+                }
+                text.push(Line::from(""));
+                let key_style = Style::default()
+                    .fg(theme.accent_secondary)
+                    .add_modifier(Modifier::BOLD);
+                let desc_style = Style::default().fg(theme.text_dimmed);
+                text.push(Line::from(vec![
+                    Span::styled(" enter ", key_style),
+                    Span::styled(if *dry_run { "check  " } else { "send  " }, desc_style),
+                    Span::styled("ctrl+d ", key_style),
+                    Span::styled("dry-run  ", desc_style),
+                    Span::styled("esc/n ", key_style),
+                    Span::styled("back", desc_style),
+                ]));
+
+                frame.render_widget(Paragraph::new(text).block(block), rect);
+            } else {
+                let height = 12u16.min(area.height);
+                if height < 8 || width < 20 {
+                    return;
+                }
+                let rect = Rect::new(
+                    area.x + area.width.saturating_sub(width) / 2,
+                    area.y + area.height.saturating_sub(height) / 2,
+                    width,
+                    height,
+                );
+                frame.render_widget(Clear, rect);
+                let outer = Block::default()
+                    .title(format!(" {title} "))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.popup_border));
+                frame.render_widget(outer, rect);
+
+                let inner = rect.inner(ratatui::layout::Margin {
+                    horizontal: 2,
+                    vertical: 1,
+                });
+                let label_style = Style::default().fg(theme.text_dimmed);
+                let focused_border = Style::default().fg(theme.accent_secondary);
+                let idle_border = theme.inactive_border;
+
+                let to_label = Rect::new(inner.x, inner.y, 4.min(inner.width), 1);
+                let to_box = Rect::new(
+                    inner.x.saturating_add(4),
+                    inner.y,
+                    inner.width.saturating_sub(4),
+                    3,
+                );
+                frame.render_widget(Paragraph::new("To:").style(label_style), to_label);
+                let to_block = Block::default().borders(Borders::ALL).border_style(
+                    if *focus == EmailPatchFocus::To {
+                        focused_border
+                    } else {
+                        idle_border
+                    },
+                );
+                let to_inner = to_box.inner(ratatui::layout::Margin {
+                    horizontal: 1,
+                    vertical: 1,
+                });
+                frame.render_widget(to_block, to_box);
+                frame.render_widget(to_textarea, to_inner);
+
+                let cc_y = inner.y.saturating_add(3);
+                let cc_label = Rect::new(inner.x, cc_y, 4.min(inner.width), 1);
+                let cc_box = Rect::new(
+                    inner.x.saturating_add(4),
+                    cc_y,
+                    inner.width.saturating_sub(4),
+                    3,
+                );
+                frame.render_widget(Paragraph::new("Cc:").style(label_style), cc_label);
+                let cc_block = Block::default().borders(Borders::ALL).border_style(
+                    if *focus == EmailPatchFocus::Cc {
+                        focused_border
+                    } else {
+                        idle_border
+                    },
+                );
+                let cc_inner = cc_box.inner(ratatui::layout::Margin {
+                    horizontal: 1,
+                    vertical: 1,
+                });
+                frame.render_widget(cc_block, cc_box);
+                frame.render_widget(cc_textarea, cc_inner);
+
+                let options_y = inner.y.saturating_add(6);
+                let checkbox = if *dry_run { "[x]" } else { "[ ]" };
+                let dry_style = Style::default().fg(theme.text);
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(format!(" {checkbox} "), dry_style),
+                        Span::styled("Dry run", dry_style),
+                    ])),
+                    Rect::new(inner.x, options_y, inner.width, 1),
+                );
+
+                let send_text = if *resolving_recipients {
+                    let spinner = SPINNER_CHARS[(spinner_frame / 8) % SPINNER_CHARS.len()];
+                    format!(" {spinner} Resolving ")
+                } else {
+                    " Review ".to_string()
+                };
+                let send_width = send_text.len() as u16;
+                let send_rect = Rect::new(
+                    inner.x + inner.width.saturating_sub(send_width),
+                    options_y,
+                    send_width.min(inner.width),
+                    1,
+                );
+                let send_style = if *resolving_recipients {
+                    Style::default().fg(theme.text_dimmed)
+                } else {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(send_text, send_style))),
+                    send_rect,
+                );
+
+                let hint_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+                let key_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
+                let desc_style = Style::default().fg(theme.text_dimmed);
+                let hint = if *resolving_recipients {
+                    Line::from(vec![
+                        Span::styled(" resolving recipients…  ", desc_style),
+                        Span::styled("esc ", key_style),
+                        Span::styled("cancel", desc_style),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::styled(" tab ", key_style),
+                        Span::styled("field  ", desc_style),
+                        Span::styled("ctrl+d ", key_style),
+                        Span::styled("dry-run  ", desc_style),
+                        Span::styled("enter ", key_style),
+                        Span::styled("review  ", desc_style),
+                        Span::styled("esc ", key_style),
+                        Span::styled("cancel", desc_style),
+                    ])
+                };
+                frame.render_widget(
+                    Paragraph::new(hint),
+                    Rect::new(inner.x, hint_y, inner.width, 1),
+                );
             }
         }
         PopupState::CommitInput {

@@ -340,6 +340,9 @@ pub(crate) enum RemoteOpKind {
     /// HEAD was rewritten in place (amend or reword).
     LocalRewriteHead,
     LocalHistory,
+    /// `git send-email` is network-adjacent work that should share the
+    /// serialized remote lane, but it does not mutate repository refs/model.
+    Email(bool),
     Other,
 }
 
@@ -2190,6 +2193,13 @@ impl Gui {
             || self.ai_commit_generation_active()
             || self.remote_op_label.is_some()
             || self.background_mutation_label.is_some()
+            || matches!(
+                self.popup,
+                PopupState::EmailPatch {
+                    resolving_recipients: true,
+                    ..
+                }
+            )
             || self.action_toast.is_some()
             || !self.commit_stat_prefetch_inflight.is_empty()
             || self.needs_refresh
@@ -3286,11 +3296,20 @@ impl Gui {
                         RemoteOpKind::LocalHistory => {
                             self.request_history_refresh();
                         }
+                        RemoteOpKind::Email(dry_run) => {
+                            self.show_action_toast(if dry_run {
+                                "Email dry run passed"
+                            } else {
+                                "Patch emailed"
+                            });
+                        }
                         RemoteOpKind::FetchAndCheckout | RemoteOpKind::Other => {
                             self.needs_refresh = true;
                         }
                     }
-                    self.remote_op_success_at = Some(Instant::now());
+                    if !matches!(kind, RemoteOpKind::Email(_)) {
+                        self.remote_op_success_at = Some(Instant::now());
+                    }
                     if was_checkout {
                         // A pre-checkout stream must not overwrite confirmed HEAD
                         // or files. Its workers can finish, but drop their results.
@@ -5392,6 +5411,30 @@ impl Gui {
                     }
                 }
             }
+            PopupState::EmailPatch {
+                focus,
+                to_textarea,
+                cc_textarea,
+                reviewing,
+                resolving_recipients,
+                ..
+            } => {
+                if *resolving_recipients || *reviewing {
+                    return;
+                }
+                let cleaned: String = data.replace('\r', "").replace('\n', " ");
+                if cleaned.is_empty() {
+                    return;
+                }
+                match *focus {
+                    popup::EmailPatchFocus::To => {
+                        to_textarea.insert_str(&cleaned);
+                    }
+                    popup::EmailPatchFocus::Cc => {
+                        cc_textarea.insert_str(&cleaned);
+                    }
+                }
+            }
             PopupState::CommandPalette {
                 selected,
                 scroll_offset,
@@ -5522,44 +5565,31 @@ impl Gui {
                         old_cursor
                     }
                     .min(last);
-                    let mut new_cursor = old_cursor;
-                    let mut animate_cursor = false;
-
-                    match (key.modifiers, key.code) {
+                    let (new_cursor, animate_cursor) = match (key.modifiers, key.code) {
                         (m, KeyCode::Char('j')) if m.contains(KeyModifiers::CONTROL) => {
-                            new_cursor = pending_cursor.saturating_add(22).min(last);
-                            animate_cursor = true;
+                            (pending_cursor.saturating_add(22).min(last), true)
                         }
                         (m, KeyCode::Char('k')) if m.contains(KeyModifiers::CONTROL) => {
-                            new_cursor = pending_cursor.saturating_sub(22);
-                            animate_cursor = true;
+                            (pending_cursor.saturating_sub(22), true)
                         }
                         (_, KeyCode::Char('j') | KeyCode::Down) => {
-                            new_cursor = old_cursor.saturating_add(1).min(last);
+                            (old_cursor.saturating_add(1).min(last), false)
                         }
                         (_, KeyCode::Char('k') | KeyCode::Up) => {
-                            new_cursor = old_cursor.saturating_sub(1);
+                            (old_cursor.saturating_sub(1), false)
                         }
                         (_, KeyCode::PageDown) => {
-                            new_cursor = pending_cursor.saturating_add(rows).min(last);
-                            animate_cursor = true;
+                            (pending_cursor.saturating_add(rows).min(last), true)
                         }
-                        (_, KeyCode::PageUp) => {
-                            new_cursor = pending_cursor.saturating_sub(rows);
-                            animate_cursor = true;
-                        }
-                        (_, KeyCode::Home | KeyCode::Char('g')) => {
-                            new_cursor = 0;
-                        }
-                        (_, KeyCode::End | KeyCode::Char('G')) => {
-                            new_cursor = last;
-                        }
+                        (_, KeyCode::PageUp) => (pending_cursor.saturating_sub(rows), true),
+                        (_, KeyCode::Home | KeyCode::Char('g')) => (0, false),
+                        (_, KeyCode::End | KeyCode::Char('G')) => (last, false),
                         (_, KeyCode::Char('y')) => {
                             let _ = Platform::copy_to_clipboard(message);
                             return Ok(());
                         }
                         _ => return Ok(()),
-                    }
+                    };
 
                     if animate_cursor && new_cursor != old_cursor {
                         *smooth_cursor_from = old_cursor as f64;
@@ -5633,6 +5663,115 @@ impl Gui {
                 // Any key dismisses the message
                 self.popup = PopupState::None;
                 self.deferred_notification_visible = false;
+            }
+            PopupState::EmailPatch {
+                reviewing,
+                resolving_recipients,
+                ..
+            } => {
+                use crossterm::event::KeyModifiers;
+
+                let reviewing = *reviewing;
+                let resolving_recipients = *resolving_recipients;
+
+                if resolving_recipients {
+                    if key.code == KeyCode::Esc {
+                        self.popup = PopupState::None;
+                    }
+                    return Ok(());
+                }
+
+                let toggle_dry_run =
+                    key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL);
+                if toggle_dry_run {
+                    if let PopupState::EmailPatch { dry_run, .. } = &mut self.popup {
+                        *dry_run = !*dry_run;
+                    }
+                    return Ok(());
+                }
+
+                if reviewing {
+                    if key.code == KeyCode::Enter || key.code == KeyCode::Char('y') {
+                        let popup = std::mem::replace(&mut self.popup, PopupState::None);
+                        if let PopupState::EmailPatch {
+                            to_textarea,
+                            cc_textarea,
+                            dry_run,
+                            on_confirm,
+                            ..
+                        } = popup
+                        {
+                            let to = to_textarea.lines().join("");
+                            let cc = cc_textarea.lines().join("");
+                            if let Err(e) = on_confirm(self, to, cc, dry_run) {
+                                self.popup = PopupState::Message {
+                                    title: "Error".to_string(),
+                                    message: format!("{}", e),
+                                    kind: MessageKind::Error,
+                                };
+                            }
+                        }
+                    } else if key.code == KeyCode::Esc || key.code == KeyCode::Char('n') {
+                        if let PopupState::EmailPatch {
+                            reviewing, focus, ..
+                        } = &mut self.popup
+                        {
+                            *reviewing = false;
+                            *focus = popup::EmailPatchFocus::To;
+                        }
+                    }
+                    return Ok(());
+                }
+
+                if key.code == KeyCode::Esc {
+                    self.popup = PopupState::None;
+                } else if key.code == KeyCode::Enter {
+                    let missing_to = if let PopupState::EmailPatch {
+                        to_textarea,
+                        reviewing,
+                        focus,
+                        ..
+                    } = &mut self.popup
+                    {
+                        if to_textarea.lines().join("").trim().is_empty() {
+                            *focus = popup::EmailPatchFocus::To;
+                            true
+                        } else {
+                            *reviewing = true;
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if missing_to {
+                        self.show_action_toast("Enter a To recipient");
+                    }
+                } else if key.code == KeyCode::BackTab
+                    || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+                {
+                    if let PopupState::EmailPatch { focus, .. } = &mut self.popup {
+                        *focus = focus.previous();
+                    }
+                } else if key.code == KeyCode::Tab {
+                    if let PopupState::EmailPatch { focus, .. } = &mut self.popup {
+                        *focus = focus.next();
+                    }
+                } else if let PopupState::EmailPatch {
+                    focus,
+                    to_textarea,
+                    cc_textarea,
+                    ..
+                } = &mut self.popup
+                {
+                    match *focus {
+                        popup::EmailPatchFocus::To => {
+                            textarea_input(to_textarea, key);
+                        }
+                        popup::EmailPatchFocus::Cc => {
+                            textarea_input(cc_textarea, key);
+                        }
+                    }
+                }
             }
             PopupState::Menu {
                 items,
@@ -8086,6 +8225,7 @@ impl Gui {
         match &mut self.popup {
             PopupState::ShellCommand { .. } => return,
             PopupState::PatchPreview { .. } => return,
+            PopupState::EmailPatch { .. } => return,
             PopupState::CommandOutput {
                 message, scroll, ..
             } => {

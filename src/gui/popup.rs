@@ -459,6 +459,7 @@ impl BodySoftWrap {
 pub type ConfirmAction = Box<dyn FnOnce(&mut Gui) -> Result<()>>;
 pub type InputAction = Box<dyn FnOnce(&mut Gui, &str) -> Result<()>>;
 pub type MenuAction = Box<dyn Fn(&mut Gui) -> Result<()>>;
+pub type EmailPatchAction = Box<dyn FnOnce(&mut Gui, String, String, bool) -> Result<()>>;
 
 /// Result sent back from a menu item's background operation.
 pub enum MenuAsyncResult {
@@ -487,6 +488,25 @@ pub enum CommitInputKind {
     Reword,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmailPatchFocus {
+    To,
+    Cc,
+}
+
+impl EmailPatchFocus {
+    pub fn next(self) -> Self {
+        match self {
+            Self::To => Self::Cc,
+            Self::Cc => Self::To,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        self.next()
+    }
+}
+
 impl CommitInputKind {
     pub fn title(self) -> &'static str {
         match self {
@@ -512,6 +532,21 @@ pub enum PopupState {
         is_commit: bool,
         /// When true, focus is on the Confirm button instead of the textarea.
         confirm_focused: bool,
+    },
+    /// Compose recipients for a single-commit `git send-email` operation.
+    EmailPatch {
+        title: String,
+        to_textarea: TextArea<'static>,
+        cc_textarea: TextArea<'static>,
+        focus: EmailPatchFocus,
+        dry_run: bool,
+        /// True while the final, editable recipient list is being reviewed.
+        reviewing: bool,
+        /// True while the initial dry-run recipient resolution is running in the background.
+        resolving_recipients: bool,
+        /// Identifies the active async resolution so stale completions are ignored.
+        resolution_request_id: u64,
+        on_confirm: EmailPatchAction,
     },
     /// Two-field commit message editor (summary + body), like lazygit.
     CommitInput {
