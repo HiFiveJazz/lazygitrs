@@ -1,4 +1,4 @@
-//! Ctrl-F diff-content grep: a synchronous [`PopupState::ListPicker`] dialog.
+//! Ctrl-F diff-content grep: an asynchronous [`PopupState::ListPicker`] dialog.
 //!
 //! Stays in the originating context — the Files worktree list, the
 //! CommitFiles/StashFiles/BranchCommitFiles list, or the compare `diff_mode`
@@ -8,7 +8,8 @@
 //! case-insensitive), and Enter selects that file in the current list
 //! (no context switch, no borrowed screen).
 //!
-//! No new deps, no threads.
+//! Diff generation and parsing run off the UI thread so huge repository diffs
+//! cannot freeze navigation.
 
 use std::collections::HashSet;
 
@@ -19,8 +20,8 @@ use crate::gui::Gui;
 use crate::gui::context::ContextId;
 use crate::gui::popup::{ListPickerItem, MessageKind, PopupState};
 
-/// Max grep candidate rows built synchronously; the dialog title notes when
-/// the build stopped early at this cap.
+/// Max grep candidate rows retained; the dialog title notes when parsing
+/// stopped early at this cap.
 pub const DIFF_GREP_MAX_ITEMS: usize = 5000;
 /// Untracked files larger than this are skipped in the Files scope synthesis.
 const MAX_UNTRACKED_BYTES: u64 = 1_000_000;
@@ -49,14 +50,14 @@ enum DiffGrepScope {
 /// from existing git diff plumbing, and open the [`PopupState::ListPicker`]
 /// dialog (empty free-entry category = confirm real matches only).
 pub fn open_diff_grep_picker(gui: &mut Gui) -> Result<()> {
-    let scope: DiffGrepScope;
-    let scope_title: String;
-    let diff_text: String;
-    // Untracked worktree files have no `git diff` output; their content lines
-    // are appended after the tracked diff below.
-    let mut untracked_paths: Vec<String> = Vec::new();
+    #[derive(Clone)]
+    enum Source {
+        Commit(String),
+        Refs(String, String),
+        Worktree(Vec<String>),
+    }
 
-    if gui.diff_mode.active {
+    let (scope, scope_title, source) = if gui.diff_mode.active {
         if !gui.diff_mode.has_both_refs() {
             gui.popup = PopupState::Message {
                 title: "Grep diff".to_string(),
@@ -69,18 +70,20 @@ pub fn open_diff_grep_picker(gui: &mut Gui) -> Result<()> {
             super::diff_mode::open_selected_commit_files(gui)?;
         }
         if let Some(hash) = &gui.diff_mode.files_commit {
-            diff_text = gui.git.diff_commit(hash).unwrap_or_default();
-            scope_title = format!("Grep {}", &hash[..8.min(hash.len())]);
+            (
+                DiffGrepScope::Compare,
+                format!("Grep {}", &hash[..8.min(hash.len())]),
+                Source::Commit(hash.clone()),
+            )
         } else {
             let ref_a = gui.diff_mode.ref_a.clone();
             let ref_b = gui.diff_mode.ref_b.clone();
-            diff_text = gui
-                .git
-                .diff_refs_paths(&ref_a, &ref_b, &[])
-                .unwrap_or_default();
-            scope_title = format!("Grep {ref_a}..{ref_b}");
+            (
+                DiffGrepScope::Compare,
+                format!("Grep {ref_a}..{ref_b}"),
+                Source::Refs(ref_a, ref_b),
+            )
         }
-        scope = DiffGrepScope::Compare;
     } else {
         match gui.context_mgr.active() {
             ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
@@ -94,76 +97,109 @@ pub fn open_diff_grep_picker(gui: &mut Gui) -> Result<()> {
                     };
                     return Ok(());
                 }
-                diff_text = gui.git.diff_commit(&hash).unwrap_or_default();
                 let short: String = hash.chars().take(7).collect();
-                scope_title = format!("Grep {short}");
-                scope = DiffGrepScope::CommitFiles { ctx };
+                (
+                    DiffGrepScope::CommitFiles { ctx },
+                    format!("Grep {short}"),
+                    Source::Commit(hash),
+                )
             }
             ContextId::Files => {
-                // `git diff HEAD` covers staged+unstaged tracked changes; on
-                // unborn HEAD (or any error) fall back to just untracked text.
-                diff_text = gui.git.diff_all().unwrap_or_default();
-                let model = gui.model.lock().unwrap();
-                untracked_paths = model
-                    .files
-                    .iter()
-                    .filter(|f| !f.tracked)
-                    .map(|f| f.current_path().to_string())
-                    .collect();
-                drop(model);
-                scope_title = "Grep worktree diff".to_string();
-                scope = DiffGrepScope::Worktree;
+                let untracked_paths = {
+                    let model = gui.model.lock().unwrap();
+                    model
+                        .files
+                        .iter()
+                        .filter(|f| !f.tracked)
+                        .map(|f| f.current_path().to_string())
+                        .collect()
+                };
+                (
+                    DiffGrepScope::Worktree,
+                    "Grep worktree diff".to_string(),
+                    Source::Worktree(untracked_paths),
+                )
             }
             _ => return Ok(()),
         }
-    }
+    };
 
-    let mut items: Vec<ListPickerItem> = Vec::new();
-    let mut truncated = parse_unified_diff_items(&diff_text, &mut items, DIFF_GREP_MAX_ITEMS);
+    gui.popup = PopupState::Message {
+        title: "Grep diff".to_string(),
+        message: "Searching diff...".to_string(),
+        kind: MessageKind::Info,
+    };
 
-    for path in &untracked_paths {
-        if items.len() >= DIFF_GREP_MAX_ITEMS {
-            truncated = true;
-            break;
-        }
-        let abs = gui.git.repo_path().join(path);
-        if std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0) > MAX_UNTRACKED_BYTES {
-            continue;
-        }
-        // Empty covers binary/unreadable/empty files — all skipped per spec.
-        let content = gui.git.file_content(path).unwrap_or_default();
-        if content.is_empty() {
-            continue;
-        }
-        for (i, line) in content.lines().enumerate() {
+    let git = std::sync::Arc::clone(&gui.git);
+    let tx = gui.ui_job_tx.clone();
+    std::thread::spawn(move || {
+        let (diff_text, untracked_paths) = match source {
+            Source::Commit(hash) => (git.diff_commit(&hash).unwrap_or_default(), Vec::new()),
+            Source::Refs(ref_a, ref_b) => (
+                git.diff_refs_paths(&ref_a, &ref_b, &[]).unwrap_or_default(),
+                Vec::new(),
+            ),
+            Source::Worktree(paths) => (git.diff_all().unwrap_or_default(), paths),
+        };
+
+        let mut items: Vec<ListPickerItem> = Vec::new();
+        let mut truncated = parse_unified_diff_items(&diff_text, &mut items, DIFF_GREP_MAX_ITEMS);
+
+        for path in &untracked_paths {
             if items.len() >= DIFF_GREP_MAX_ITEMS {
                 truncated = true;
                 break;
             }
-            push_grep_item(&mut items, path, i + 1, '+', "new", line);
+            let abs = git.repo_path().join(path);
+            if std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0) > MAX_UNTRACKED_BYTES {
+                continue;
+            }
+            let content = git.file_content(path).unwrap_or_default();
+            if content.is_empty() {
+                continue;
+            }
+            for (i, line) in content.lines().enumerate() {
+                if items.len() >= DIFF_GREP_MAX_ITEMS {
+                    truncated = true;
+                    break;
+                }
+                push_grep_item(&mut items, path, i + 1, '+', "new", line);
+            }
         }
-    }
 
-    if items.is_empty() {
-        gui.popup = PopupState::Message {
-            title: "Grep diff".to_string(),
-            message: "No diff content to search.".to_string(),
-            kind: MessageKind::Info,
-        };
-        return Ok(());
-    }
+        let _ = tx.send(Box::new(move |gui: &mut Gui| {
+            // Esc while the search is running cancels presentation of the result.
+            let still_waiting = matches!(
+                &gui.popup,
+                PopupState::Message { title, message, .. }
+                    if title == "Grep diff" && message == "Searching diff..."
+            );
+            if !still_waiting {
+                return;
+            }
+            if items.is_empty() {
+                gui.popup = PopupState::Message {
+                    title: "Grep diff".to_string(),
+                    message: "No diff content to search.".to_string(),
+                    kind: MessageKind::Info,
+                };
+                return;
+            }
 
-    let title = if truncated {
-        format!("{scope_title} (first {DIFF_GREP_MAX_ITEMS} lines — keep typing to filter)")
-    } else {
-        format!("{scope_title} ({} lines)", items.len())
-    };
-    gui.show_list_picker(
-        title,
-        items,
-        String::new(),
-        Box::new(move |gui, value| confirm_diff_grep(gui, scope, value)),
-    );
+            let title = if truncated {
+                format!("{scope_title} (first {DIFF_GREP_MAX_ITEMS} lines — keep typing to filter)")
+            } else {
+                format!("{scope_title} ({} lines)", items.len())
+            };
+            gui.show_list_picker(
+                title,
+                items,
+                String::new(),
+                Box::new(move |gui, value| confirm_diff_grep(gui, scope, value)),
+            );
+        }));
+    });
+
     Ok(())
 }
 
