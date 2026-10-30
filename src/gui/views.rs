@@ -3172,16 +3172,23 @@ fn render_status_bar(
             _ => {}
         }
         if !diff_view.is_empty() {
-            hints.push(("J/K", "scroll diff"));
+            // Keep the Commits footer focused on high-value tutorial actions.
+            // Preview scrolling is documented in `?` instead of consuming
+            // scarce footer width.
+            if active != ContextId::Commits {
+                hints.push(("J/K", "scroll diff"));
+            }
             hints.push(("{/}", "hunks"));
         }
     }
 
-    // Global hints (always last)
+    // Global hints (always last). Panel/list navigation is intentionally
+    // omitted from the footer; it is discoverable in `?` and otherwise
+    // overwhelms the contextual tutorial-style hints.
     if !shell_key.is_empty() {
         hints.push((shell_key.as_str(), "shell"));
     }
-    hints.extend([("q", "quit"), ("tab/1-5", "panels"), ("j/k", "nav")]);
+    hints.push(("q", "quit"));
 
     let key_style = Style::default()
         .fg(_theme.text)

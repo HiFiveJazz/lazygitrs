@@ -4416,11 +4416,13 @@ impl Gui {
         // Smooth preview scrolling (J/K by default). Keep this separate from
         // Ctrl-J/K, which performs smooth multi-row navigation in the active list.
         if matches_key(key, &keybindings.universal.scroll_down_main_alt1) {
-            self.diff_view.request_smooth_scroll(1);
+            let amount = self.config.user_config.gui.scroll_height.max(1) as isize;
+            self.diff_view.request_smooth_scroll(amount);
             return Ok(());
         }
         if matches_key(key, &keybindings.universal.scroll_up_main_alt1) {
-            self.diff_view.request_smooth_scroll(-1);
+            let amount = self.config.user_config.gui.scroll_height.max(1) as isize;
+            self.diff_view.request_smooth_scroll(-amount);
             return Ok(());
         }
         if key.code == KeyCode::PageDown {
