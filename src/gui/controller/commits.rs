@@ -1047,11 +1047,11 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
     let save_hash = hash.clone();
 
     gui.popup = PopupState::Menu {
-        title: format!("Patch actions — {short}"),
+        title: format!("Patch — {short}"),
         items: vec![
             MenuItem {
-                label: "Preview patch".to_string(),
-                description: "Show git format-patch output for this commit".to_string(),
+                label: "Preview".to_string(),
+                description: "View formatted patch".to_string(),
                 key: Some("v".to_string()),
                 action: Some(Box::new(move |gui| {
                     let patch = gui
@@ -1070,8 +1070,8 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                 })),
             },
             MenuItem {
-                label: "Copy patch".to_string(),
-                description: "Copy git format-patch output to the clipboard".to_string(),
+                label: "Copy".to_string(),
+                description: "Copy to clipboard".to_string(),
                 key: Some("y".to_string()),
                 action: Some(Box::new(move |gui| {
                     let patch = gui
@@ -1090,8 +1090,8 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                 })),
             },
             MenuItem {
-                label: "Save patch to repository root".to_string(),
-                description: "Write a numbered .patch file with git format-patch".to_string(),
+                label: "Save".to_string(),
+                description: "Save .patch in repo root".to_string(),
                 key: Some("s".to_string()),
                 action: Some(Box::new(move |gui| {
                     let result = gui
@@ -1119,16 +1119,16 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                 })),
             },
             MenuItem {
-                label: "Build custom patch".to_string(),
-                description: "Select files from this commit and apply them to the index".to_string(),
+                label: "Custom patch".to_string(),
+                description: "Choose files to stage".to_string(),
                 key: Some("b".to_string()),
                 action: Some(Box::new(move |gui| {
                     super::patch_building::show_patch_menu(gui)
                 })),
             },
             MenuItem {
-                label: "Email patch".to_string(),
-                description: "git send-email integration is not implemented yet".to_string(),
+                label: "Email".to_string(),
+                description: "Coming soon".to_string(),
                 key: None,
                 action: None,
             },
