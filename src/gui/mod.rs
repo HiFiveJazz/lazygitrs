@@ -463,7 +463,6 @@ type BackgroundJob = Box<dyn FnOnce() + Send>;
 pub(crate) type UiJob = Box<dyn FnOnce(&mut Gui) + Send>;
 
 fn spawn_index_mutation_worker(
-    git: Arc<GitCommands>,
     rx: mpsc::Receiver<IndexMutationCommand>,
     tx: mpsc::Sender<IndexMutationResult>,
     busy: Arc<AtomicBool>,
@@ -473,6 +472,7 @@ fn spawn_index_mutation_worker(
             busy.store(true, Ordering::Release);
             let mut mutation_error = None;
             let mut generation = first.generation;
+            let mut current_git = first.git;
             let mut current = Some(first.mutation);
 
             loop {
@@ -480,13 +480,13 @@ fn spawn_index_mutation_worker(
                 let result = match mutation {
                     IndexMutation::Paths { paths, stage } => {
                         if stage {
-                            git.stage_files(&paths)
+                            current_git.stage_files(&paths)
                         } else {
-                            git.unstage_files(&paths)
+                            current_git.unstage_files(&paths)
                         }
                     }
                     IndexMutation::All { stage } => {
-                        if stage { git.stage_all() } else { git.unstage_all() }
+                        if stage { current_git.stage_all() } else { current_git.unstage_all() }
                     }
                 };
                 if let Err(err) = result
@@ -498,6 +498,7 @@ fn spawn_index_mutation_worker(
                 match rx.try_recv() {
                     Ok(next) => {
                         generation = next.generation;
+                        current_git = next.git;
                         current = Some(next.mutation);
                     },
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -505,7 +506,7 @@ fn spawn_index_mutation_worker(
                 }
             }
 
-            let files = git.refresh_files_status_only();
+            let files = current_git.refresh_files_status_only();
             busy.store(false, Ordering::Release);
             if tx
                 .send(IndexMutationResult {
@@ -701,6 +702,7 @@ enum IndexMutation {
 
 struct IndexMutationCommand {
     generation: u64,
+    git: Arc<GitCommands>,
     mutation: IndexMutation,
 }
 
@@ -1231,7 +1233,6 @@ impl Gui {
             Arc::clone(&diff_generation),
         );
         spawn_index_mutation_worker(
-            Arc::clone(&git),
             index_mutation_cmd_rx,
             index_mutation_result_tx,
             Arc::clone(&index_mutation_busy),
@@ -3143,6 +3144,7 @@ impl Gui {
             .index_mutation_tx
             .send(IndexMutationCommand {
                 generation: self.index_mutation_generation,
+                git: Arc::clone(&self.git),
                 mutation: IndexMutation::Paths { paths, stage },
             })
             .is_err()
@@ -3162,6 +3164,7 @@ impl Gui {
             .index_mutation_tx
             .send(IndexMutationCommand {
                 generation: self.index_mutation_generation,
+                git: Arc::clone(&self.git),
                 mutation: IndexMutation::All { stage },
             })
             .is_err()
