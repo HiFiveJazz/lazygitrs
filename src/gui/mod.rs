@@ -464,7 +464,7 @@ pub(crate) type UiJob = Box<dyn FnOnce(&mut Gui) + Send>;
 
 fn spawn_index_mutation_worker(
     git: Arc<GitCommands>,
-    rx: mpsc::Receiver<IndexMutation>,
+    rx: mpsc::Receiver<IndexMutationCommand>,
     tx: mpsc::Sender<IndexMutationResult>,
     busy: Arc<AtomicBool>,
 ) {
@@ -472,7 +472,8 @@ fn spawn_index_mutation_worker(
         while let Ok(first) = rx.recv() {
             busy.store(true, Ordering::Release);
             let mut mutation_error = None;
-            let mut current = Some(first);
+            let mut generation = first.generation;
+            let mut current = Some(first.mutation);
 
             loop {
                 let mutation = current.take().expect("index mutation present");
@@ -495,7 +496,10 @@ fn spawn_index_mutation_worker(
                 }
 
                 match rx.try_recv() {
-                    Ok(next) => current = Some(next),
+                    Ok(next) => {
+                        generation = next.generation;
+                        current = Some(next.mutation);
+                    },
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => break,
                 }
@@ -505,6 +509,7 @@ fn spawn_index_mutation_worker(
             busy.store(false, Ordering::Release);
             if tx
                 .send(IndexMutationResult {
+                    generation,
                     files,
                     mutation_error,
                 })
@@ -694,7 +699,13 @@ enum IndexMutation {
     All { stage: bool },
 }
 
+struct IndexMutationCommand {
+    generation: u64,
+    mutation: IndexMutation,
+}
+
 struct IndexMutationResult {
+    generation: u64,
     files: Result<Vec<crate::model::File>>,
     mutation_error: Option<String>,
 }
@@ -817,9 +828,10 @@ pub struct Gui {
     /// One long-lived worker owns all index mutations so rapid staging cannot
     /// race on `.git/index.lock`. The worker drains bursts in order and emits
     /// one status snapshot after each burst.
-    index_mutation_tx: mpsc::Sender<IndexMutation>,
+    index_mutation_tx: mpsc::Sender<IndexMutationCommand>,
     index_mutation_rx: mpsc::Receiver<IndexMutationResult>,
     index_mutation_busy: Arc<AtomicBool>,
+    index_mutation_generation: u64,
     /// Background `git ls-files` for the path-filter picker (ctrl-s → path).
     filter_paths_rx: Option<mpsc::Receiver<Result<Vec<String>>>>,
     /// Receiver for silent auto-fetch results. Kept separate from remote_op
@@ -1347,6 +1359,7 @@ impl Gui {
             index_mutation_tx,
             index_mutation_rx,
             index_mutation_busy,
+            index_mutation_generation: 0,
             filter_paths_rx: None,
             auto_fetch_rx,
             auto_fetch_tx,
@@ -2696,6 +2709,10 @@ impl Gui {
                         model.prepend_commits(new_commits);
                         if model.commits.len() > MAX_LOADED_COMMITS {
                             model.truncate_commits(MAX_LOADED_COMMITS);
+                            // The previous tail (possibly the end of history)
+                            // was evicted, so scrolling down must be allowed to
+                            // page it back in later.
+                            self.commit_history_complete = false;
                         }
                         self.commit_window_start = result.skip;
                         let selected = self.context_mgr.selected(ContextId::Commits);
@@ -3120,9 +3137,13 @@ impl Gui {
         if paths.is_empty() {
             return;
         }
+        self.index_mutation_generation = self.index_mutation_generation.wrapping_add(1);
         if self
             .index_mutation_tx
-            .send(IndexMutation::Paths { paths, stage })
+            .send(IndexMutationCommand {
+                generation: self.index_mutation_generation,
+                mutation: IndexMutation::Paths { paths, stage },
+            })
             .is_err()
         {
             self.popup = PopupState::Message {
@@ -3135,9 +3156,13 @@ impl Gui {
 
     /// Queue stage/unstage-all through the same serialized index worker.
     pub(crate) fn enqueue_stage_all_then_refresh(&mut self, stage: bool) {
+        self.index_mutation_generation = self.index_mutation_generation.wrapping_add(1);
         if self
             .index_mutation_tx
-            .send(IndexMutation::All { stage })
+            .send(IndexMutationCommand {
+                generation: self.index_mutation_generation,
+                mutation: IndexMutation::All { stage },
+            })
             .is_err()
         {
             self.popup = PopupState::Message {
@@ -3150,8 +3175,9 @@ impl Gui {
 
     fn receive_index_mutation_results(&mut self) {
         while let Ok(result) = self.index_mutation_rx.try_recv() {
+            let is_latest = result.generation == self.index_mutation_generation;
             match result.files {
-                Ok(files) => {
+                Ok(files) if is_latest => {
                     let mut model = self.model.lock().unwrap();
                     model.set_files(files);
                     if self.show_file_tree {
@@ -3164,7 +3190,9 @@ impl Gui {
                     drop(model);
                     self.needs_diff_refresh = true;
                 }
-                Err(err) => self.show_error("Refresh failed", err),
+                Ok(_) => {}
+                Err(err) if is_latest => self.show_error("Refresh failed", err),
+                Err(_) => {}
             }
             if let Some(message) = result.mutation_error {
                 self.show_notification(PopupState::Message {
