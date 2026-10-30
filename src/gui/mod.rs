@@ -9488,6 +9488,23 @@ impl Gui {
         }
     }
 
+    /// Drop a still-running checkout refresh before starting another checkout.
+    ///
+    /// The worker threads observe the disconnected receiver at their next
+    /// result boundary and stop doing follow-up work. Other refresh kinds are
+    /// left alone; only checkout refreshes are safe and useful to supersede
+    /// this aggressively.
+    pub(crate) fn cancel_checkout_refresh_if_running(&mut self) {
+        if self.refresh_in_progress
+            && self.initial_load_expected == CHECKOUT_MODEL_PART_COUNT
+            && self.initial_load_rx.is_some()
+        {
+            self.initial_load_rx = None;
+            self.initial_load_received = 0;
+            self.refresh_in_progress = false;
+        }
+    }
+
     /// Kick off the model refresh required after a successful checkout.
     fn start_background_checkout_refresh(&mut self) -> bool {
         if self.refresh_in_progress || self.initial_load_rx.is_some() {
@@ -11181,6 +11198,31 @@ mod terminal_mouse_tests {
             gui.refresh().unwrap();
             assert_checkout_head(&gui, "main", &repo.git(&["rev-parse", "main"]));
         }
+    }
+
+    #[test]
+    fn new_checkout_cancels_previous_checkout_refresh_immediately() {
+        let repo = TempRepo::new("checkout-supersedes-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        request_test_checkout(&mut gui, ' ', "main");
+        wait_for_test_checkout(&mut gui);
+        assert!(gui.refresh_in_progress);
+        assert_eq!(gui.initial_load_expected, CHECKOUT_MODEL_PART_COUNT);
+        assert!(gui.initial_load_rx.is_some());
+
+        // Starting another checkout should disconnect the old targeted refresh
+        // immediately, rather than keeping its workers alive until this second
+        // checkout finishes.
+        request_test_checkout(&mut gui, ' ', "feature");
+        assert!(gui.remote_op_label.is_some());
+        assert!(!gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_none());
+
+        wait_for_test_checkout(&mut gui);
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_checkout_head(&gui, "feature", &repo.git(&["rev-parse", "feature"]));
     }
 
     #[test]

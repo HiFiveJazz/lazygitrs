@@ -82,6 +82,16 @@ struct RepoPaths {
     repo_path: PathBuf,
 }
 
+#[inline]
+fn trim_process_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        // SAFETY: no pointers are passed. This is only used when a checkout
+        // refresh has been abandoned and its temporary allocations are dead.
+        libc::malloc_trim(0);
+    }
+}
+
 /// Facade for all git operations. Mirrors lazygit's GitCommand.
 pub struct GitCommands {
     repo_path: PathBuf,
@@ -355,10 +365,17 @@ impl GitCommands {
         self: &Arc<Self>,
         tx: &mpsc::Sender<ModelPart>,
         include_file_stats: bool,
+        trim_on_disconnect: bool,
     ) {
         let tx = tx.clone();
         let git = Arc::clone(self);
         std::thread::spawn(move || {
+            let trim_if_abandoned = || {
+                if trim_on_disconnect {
+                    trim_process_heap();
+                }
+            };
+
             let files = if include_file_stats {
                 git.load_files()
             } else {
@@ -371,6 +388,7 @@ impl GitCommands {
                 // superseded an in-flight refresh), do not launch the next
                 // expensive worktree scan for a result nobody can use.
                 if tx.send(ModelPart::Files(files)).is_err() {
+                    trim_if_abandoned();
                     return;
                 }
 
@@ -378,16 +396,23 @@ impl GitCommands {
                 // (or one containing only untracked files) therefore has an
                 // exact 0/0 answer without another full-tree Git process.
                 if !has_tracked_changes {
-                    let _ = tx.send(ModelPart::DiffStats {
-                        added: 0,
-                        deleted: 0,
-                    });
+                    if tx
+                        .send(ModelPart::DiffStats {
+                            added: 0,
+                            deleted: 0,
+                        })
+                        .is_err()
+                    {
+                        trim_if_abandoned();
+                    }
                     return;
                 }
             }
 
-            if let Ok((added, deleted)) = git.diff_shortstat() {
-                let _ = tx.send(ModelPart::DiffStats { added, deleted });
+            if let Ok((added, deleted)) = git.diff_shortstat()
+                && tx.send(ModelPart::DiffStats { added, deleted }).is_err()
+            {
+                trim_if_abandoned();
             }
         });
     }
@@ -421,7 +446,7 @@ impl GitCommands {
 
         // Preserve full-refresh per-file stats, but avoid racing the aggregate
         // shortstat against the same status/diff work.
-        self.stream_files_then_diff_stats(tx, true);
+        self.stream_files_then_diff_stats(tx, true, false);
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
         if let Some(filter) = commit_filter {
             let tx = tx.clone();
@@ -602,7 +627,7 @@ impl GitCommands {
         // expensive per-file numstat/hunk scans immediately. The selected diff
         // is refreshed separately by the GUI. Serialize shortstat behind status
         // so the two full-tree scans do not compete with each other.
-        self.stream_files_then_diff_stats(tx, false);
+        self.stream_files_then_diff_stats(tx, false, false);
 
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
 
@@ -701,88 +726,78 @@ impl GitCommands {
         tx: &mpsc::Sender<ModelPart>,
         mut commits: Vec<crate::model::Commit>,
     ) {
-        macro_rules! spawn_part {
-            ($tx:expr, $self:expr, $variant:ident, $expr:expr) => {{
-                let tx = $tx.clone();
-                let git = Arc::clone($self);
-                std::thread::spawn(move || {
-                    if let Ok(data) = $expr(&git) {
-                        let _ = tx.send(ModelPart::$variant(data));
-                    }
-                });
-            }};
-        }
+        // Keep the worktree scan on its own worker: on very large repositories
+        // (notably Linux) status dominates checkout refresh latency. If this
+        // refresh is superseded by another checkout, the dropped receiver makes
+        // the worker stop before shortstat and trim any allocator residue.
+        self.stream_files_then_diff_stats(tx, false, true);
 
-        // Checkout can change HEAD-relative file status, but we don't need the
-        // expensive per-file numstat/hunk scans immediately. The selected diff
-        // is refreshed separately by the GUI. Serialize shortstat behind status
-        // so the latency-critical status scan gets the filesystem to itself.
-        self.stream_files_then_diff_stats(tx, false);
-
-        spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
-
-        {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-
-            std::thread::spawn(move || {
-                // HEAD changes commit decorations, but checkout does not change the
-                // commit graph itself. Reuse the already-loaded history rather than
-                // walking every ref again.
-                if let Ok(head) = git.head_state() {
-                    GitCommands::apply_checkout_head_state(&mut commits, &head);
-
-                    if tx
-                        .send(ModelPart::Head {
-                            hash: head.hash,
-                            branch_name: head.branch_name,
-                        })
-                        .is_err()
-                    {
+        // Everything else is intentionally serialized on one worker. These
+        // reads are individually cheap compared with status, and avoiding a
+        // fresh fan-out of short-lived threads on every checkout prevents rapid
+        // branch toggling from stacking workers and glibc thread arenas.
+        let tx = tx.clone();
+        let git = Arc::clone(self);
+        std::thread::spawn(move || {
+            macro_rules! send_or_abandon {
+                ($part:expr) => {
+                    if tx.send($part).is_err() {
+                        trim_process_heap();
                         return;
                     }
-                }
+                };
+            }
 
-                let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
-                GitCommands::apply_unpushed_status(&mut commits, &unpushed);
+            if let Ok(branches) = git.load_branches() {
+                send_or_abandon!(ModelPart::Branches(branches));
+            }
 
-                let _ = tx.send(ModelPart::Commits(commits));
-            });
-        }
+            // HEAD changes commit decorations, but checkout does not change the
+            // commit graph itself. Reuse the already-loaded history rather than
+            // walking every ref again.
+            if let Ok(head) = git.head_state() {
+                GitCommands::apply_checkout_head_state(&mut commits, &head);
+                send_or_abandon!(ModelPart::Head {
+                    hash: head.hash,
+                    branch_name: head.branch_name,
+                });
+            }
 
-        // Pull can move the current worktree's HEAD.
-        spawn_part!(tx, self, Worktrees, |g: &GitCommands| {
-            g.load_worktrees()
+            let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
+            GitCommands::apply_unpushed_status(&mut commits, &unpushed);
+            send_or_abandon!(ModelPart::Commits(commits));
+
+            if let Ok(worktrees) = git
+                .load_worktrees()
                 .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
-        });
+            {
+                send_or_abandon!(ModelPart::Worktrees(worktrees));
+            }
 
-        // A changed superproject HEAD can change gitlink state.
-        spawn_part!(tx, self, Submodules, |g: &GitCommands| {
-            g.load_submodules()
+            if let Ok(submodules) = git
+                .load_submodules()
                 .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
-        });
+            {
+                send_or_abandon!(ModelPart::Submodules(submodules));
+            }
 
-        // Checkout moving HEAD changes reflog history.
-        spawn_part!(tx, self, Reflog, |g: &GitCommands| {
-            g.load_reflog(100)
+            if let Ok(reflog) = git
+                .load_reflog(100)
                 .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
-        });
+            {
+                send_or_abandon!(ModelPart::Reflog(reflog));
+            }
 
-        {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-            std::thread::spawn(move || {
-                if let Ok(status) = git.repo_status() {
-                    let _ = tx.send(ModelPart::RepoStatus {
-                        is_rebasing: status.is_rebasing,
-                        is_merging: status.is_merging,
-                        is_cherry_picking: status.is_cherry_picking,
-                        is_bisecting: status.is_bisecting,
-                        rebase_onto_hash: status.rebase_onto_hash,
-                    });
-                }
-            });
-        }
+            if let Ok(status) = git.repo_status() {
+                send_or_abandon!(ModelPart::RepoStatus {
+                    is_rebasing: status.is_rebasing,
+                    is_merging: status.is_merging,
+                    is_cherry_picking: status.is_cherry_picking,
+                    is_bisecting: status.is_bisecting,
+                    rebase_onto_hash: status.rebase_onto_hash,
+                });
+            }
+        });
     }
 
     pub fn load_model_after_history_change_streaming(
@@ -805,7 +820,7 @@ impl GitCommands {
         // Local history changes can affect working-tree status, but the selected
         // diff is refreshed separately by the GUI, so avoid per-file diff stats.
         // Serialize shortstat behind status to avoid two competing worktree scans.
-        self.stream_files_then_diff_stats(tx, false);
+        self.stream_files_then_diff_stats(tx, false, false);
 
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
 
