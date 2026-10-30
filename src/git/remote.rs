@@ -677,6 +677,7 @@ fn gh_url_from_result(result: &CmdResult) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn github_remote_repos_from_remote_v_output(output: &str) -> Vec<GithubRemoteRepo> {
     let mut repos = Vec::new();
 

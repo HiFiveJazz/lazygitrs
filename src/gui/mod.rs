@@ -3739,6 +3739,18 @@ impl Gui {
     /// (including the diff panel). Returns Ok(true) if the key was consumed.
     fn try_handle_global_repo_keys(&mut self, key: KeyEvent) -> Result<bool> {
         let kb = self.config.user_config.keybinding.clone();
+
+        // Context-specific bindings take precedence over universal push/pull.
+        // In particular, the commits view uses `p` for Pick / Drop commit, while
+        // universal pull also defaults to `p`.  Let the commits controller see
+        // that key instead of consuming it here.  Likewise, `P` in Tags pushes
+        // the selected tag rather than the current branch.
+        match self.context_mgr.active() {
+            ContextId::Commits if matches_key(key, &kb.commits.pick_commit) => return Ok(false),
+            ContextId::Tags if key.code == KeyCode::Char('P') => return Ok(false),
+            _ => {}
+        }
+
         if matches_key(key, &kb.universal.push_files) || matches_key(key, &kb.universal.pull_files)
         {
             controller::remotes::handle_key(self, key, &kb)?;
