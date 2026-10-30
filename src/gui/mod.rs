@@ -895,6 +895,9 @@ pub struct Gui {
     /// True while a background `load_model_streaming` refresh is in flight.
     /// Prevents stacking concurrent full refreshes on the UI thread.
     refresh_in_progress: bool,
+    /// Invalidates selection-dependent background reloads started after a
+    /// model refresh (branch commits / commit files).
+    subview_refresh_generation: u64,
     /// Frame counter for the loading spinner animation.
     spinner_frame: usize,
     /// Label shown on the head branch during a remote operation (e.g. "Pushing", "Pulling").
@@ -9320,105 +9323,116 @@ impl Gui {
     fn after_model_refresh(&mut self) -> Result<()> {
         // Commits arrive already filtered via load_model_streaming(commit_filter)
         // or reload_filtered_commits_async — don't re-fetch here.
-        let mut model = self.model.lock().unwrap();
-        self.commit_history_complete = model.commits.len() < DEFAULT_COMMIT_LIMIT;
+        self.subview_refresh_generation = self.subview_refresh_generation.wrapping_add(1);
+        let generation = self.subview_refresh_generation;
 
-        // Rebuild file tree inline to avoid borrow issues
-        if self.show_file_tree {
-            self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
-            self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
-        } else {
-            self.file_tree_nodes.clear();
-            self.context_mgr.files_list_len_override = None;
-        }
-
-        // If we're viewing branch commits, re-load them (refresh wipes the model)
-        if (self.context_mgr.active() == ContextId::BranchCommits
-            || self.context_mgr.active() == ContextId::BranchCommitFiles)
-            && !self.branch_commits_name.is_empty()
         {
-            if let Ok(commits) = self
-                .git
-                .load_commits_for_branch(&self.branch_commits_name, 300)
-            {
-                model.set_sub_commits(commits);
+            let mut model = self.model.lock().unwrap();
+            self.commit_history_complete = model.commits.len() < DEFAULT_COMMIT_LIMIT;
+
+            if self.show_file_tree {
+                self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
+                self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
+            } else {
+                self.file_tree_nodes.clear();
+                self.context_mgr.files_list_len_override = None;
             }
-        }
 
-        // If we're viewing remote branches (or drilled into commits/files from them), re-load them
-        if !self.remote_branches_name.is_empty()
-            && (self.context_mgr.active() == ContextId::RemoteBranches
-                || ((self.context_mgr.active() == ContextId::BranchCommits
-                    || self.context_mgr.active() == ContextId::BranchCommitFiles)
-                    && self.sub_commits_parent_context == ContextId::RemoteBranches))
-        {
-            if let Some(remote) = model
-                .remotes
-                .iter()
-                .find(|r| r.name == self.remote_branches_name)
+            // Remote-branch rows are already present in the refreshed model;
+            // copying the selected remote's list is cheap and purely in-memory.
+            if !self.remote_branches_name.is_empty()
+                && (self.context_mgr.active() == ContextId::RemoteBranches
+                    || ((self.context_mgr.active() == ContextId::BranchCommits
+                        || self.context_mgr.active() == ContextId::BranchCommitFiles)
+                        && self.sub_commits_parent_context == ContextId::RemoteBranches))
+                && let Some(remote) = model
+                    .remotes
+                    .iter()
+                    .find(|r| r.name == self.remote_branches_name)
             {
                 model.sub_remote_branches = remote.branches.clone();
             }
         }
 
-        // If we're viewing commit/stash files, re-load them (refresh wipes the model)
-        if (self.context_mgr.active() == ContextId::CommitFiles
-            || self.context_mgr.active() == ContextId::StashFiles
+        // Refreshing the whole model used to synchronously call git again for
+        // these selection-dependent views. On large repositories that created
+        // a visible hitch *after* the background refresh had supposedly ended.
+        if (self.context_mgr.active() == ContextId::BranchCommits
             || self.context_mgr.active() == ContextId::BranchCommitFiles)
-            && !self.commit_files_hash.is_empty()
+            && !self.branch_commits_name.is_empty()
         {
-            if let Ok(cf) = self.git.commit_files(&self.commit_files_hash) {
-                model.commit_files = cf;
-            }
-            if self.show_commit_file_tree {
-                self.commit_file_tree_nodes = crate::model::file_tree::build_commit_file_tree(
-                    &model.commit_files,
-                    &self.commit_files_collapsed_dirs,
-                );
-                self.context_mgr.commit_files_list_len_override =
-                    Some(self.commit_file_tree_nodes.len());
-            }
+            let branch = self.branch_commits_name.clone();
+            let git = Arc::clone(&self.git);
+            let tx = self.ui_job_tx.clone();
+            std::thread::spawn(move || {
+                let result = git.load_commits_for_branch(&branch, 300);
+                let _ = tx.send(Box::new(move |gui| {
+                    if gui.subview_refresh_generation != generation
+                        || gui.branch_commits_name != branch
+                        || !matches!(
+                            gui.context_mgr.active(),
+                            ContextId::BranchCommits | ContextId::BranchCommitFiles
+                        )
+                    {
+                        return;
+                    }
+                    match result {
+                        Ok(commits) => {
+                            gui.model.lock().unwrap().set_sub_commits(commits);
+                            gui.needs_diff_refresh = true;
+                        }
+                        Err(err) => gui.show_error("Branch commits refresh failed", err),
+                    }
+                }) as UiJob);
+            });
         }
 
-        let is_rebasing = model.is_rebasing;
-        drop(model);
+        if matches!(
+            self.context_mgr.active(),
+            ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles
+        ) && !self.commit_files_hash.is_empty()
+        {
+            let hash = self.commit_files_hash.clone();
+            let git = Arc::clone(&self.git);
+            let tx = self.ui_job_tx.clone();
+            std::thread::spawn(move || {
+                let result = git.commit_files(&hash);
+                let _ = tx.send(Box::new(move |gui| {
+                    if gui.subview_refresh_generation != generation
+                        || gui.commit_files_hash != hash
+                        || !matches!(
+                            gui.context_mgr.active(),
+                            ContextId::CommitFiles
+                                | ContextId::StashFiles
+                                | ContextId::BranchCommitFiles
+                        )
+                    {
+                        return;
+                    }
+                    match result {
+                        Ok(commit_files) => {
+                            {
+                                gui.model.lock().unwrap().commit_files = commit_files;
+                            }
+                            if gui.show_commit_file_tree {
+                                let model = gui.model.lock().unwrap();
+                                gui.commit_file_tree_nodes =
+                                    crate::model::file_tree::build_commit_file_tree(
+                                        &model.commit_files,
+                                        &gui.commit_files_collapsed_dirs,
+                                    );
+                                gui.context_mgr.commit_files_list_len_override =
+                                    Some(gui.commit_file_tree_nodes.len());
+                            }
+                            gui.needs_diff_refresh = true;
+                        }
+                        Err(err) => gui.show_error("Commit files refresh failed", err),
+                    }
+                }) as UiJob);
+            });
+        }
 
-        // Auto-enter or resync rebase InProgress mode when a rebase is
-        // detected on disk. If the view is already open, keep its todo status
-        // in step with Git so `rebase --continue` can advance to the next
-        // paused commit without leaving the old entry marked current.
-        if is_rebasing {
-            let should_open = !self.rebase_mode.active && !self.rebase_mode.in_progress_dismissed;
-            let should_resync =
-                self.rebase_mode.active && self.rebase_mode.phase == RebasePhase::InProgress;
-            if should_open || should_resync {
-                self.sync_rebase_progress_view();
-            }
-        }
-        // If rebase mode was active but the rebase completed, exit and show success.
-        if !is_rebasing && self.rebase_mode.active {
-            if self.rebase_mode.phase == RebasePhase::InProgress {
-                let branch = self.rebase_mode.branch_name.clone();
-                let count = self.rebase_mode.total_count;
-                self.rebase_mode.exit();
-                self.show_notification(PopupState::Message {
-                    title: "Rebase ended".to_string(),
-                    message: format!(
-                        "Rebase of '{}' is no longer in progress ({} commit{}). It may have completed or been aborted.",
-                        branch,
-                        count,
-                        if count == 1 { "" } else { "s" },
-                    ),
-                    kind: MessageKind::Info,
-                });
-            }
-        }
-        // Clear the dismissal flag once no rebase is in progress, so the next
-        // rebase (or new conflict) can auto-open the InProgress view again.
-        if !is_rebasing && self.rebase_mode.in_progress_dismissed {
-            self.rebase_mode.in_progress_dismissed = false;
-        }
-
+        self.last_refresh_at = Instant::now();
         Ok(())
     }
 
