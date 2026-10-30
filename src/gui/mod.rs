@@ -443,6 +443,7 @@ fn estimate_diff_view_bytes(view: &DiffViewState) -> usize {
 }
 
 type BackgroundJob = Box<dyn FnOnce() + Send>;
+pub(crate) type UiJob = Box<dyn FnOnce(&mut Gui) + Send>;
 
 fn spawn_diff_scheduler(
     rx: mpsc::Receiver<DiffSchedulerEvent>,
@@ -736,6 +737,9 @@ pub struct Gui {
     menu_async_rx: mpsc::Receiver<Result<popup::MenuAsyncResult>>,
     /// Sender cloned into background threads for menu async operations.
     pub(crate) menu_async_tx: mpsc::Sender<Result<popup::MenuAsyncResult>>,
+    /// Small completion jobs produced by background work that must mutate GUI state.
+    ui_job_rx: mpsc::Receiver<UiJob>,
+    pub(crate) ui_job_tx: mpsc::Sender<UiJob>,
     /// Undo stack: stores reflog hashes for undo/redo.
     undo_reflog_idx: usize,
     /// Patch building mode state.
@@ -1073,6 +1077,7 @@ impl Gui {
         let (remote_op_tx, remote_op_rx) = mpsc::channel();
         let (auto_fetch_tx, auto_fetch_rx) = mpsc::channel();
         let (menu_async_tx, menu_async_rx) = mpsc::channel();
+        let (ui_job_tx, ui_job_rx) = mpsc::channel();
         let show_file_tree = config
             .app_state
             .show_file_tree
@@ -1229,6 +1234,8 @@ impl Gui {
             auto_fetch_in_flight: false,
             menu_async_rx,
             menu_async_tx,
+            ui_job_rx,
+            ui_job_tx,
             undo_reflog_idx: 0,
             patch_building: PatchBuildingState::new(),
             diff_mode: DiffModeState::new(),
@@ -1554,6 +1561,7 @@ impl Gui {
             // Check for completed background menu item operations
             controller::custom_commands::receive_command_result(self);
             self.receive_menu_async_results();
+            self.receive_ui_jobs();
 
             // Advance spinner animation
             self.spinner_frame = self.spinner_frame.wrapping_add(1);
@@ -3039,6 +3047,12 @@ impl Gui {
                     }
                 }
             }
+        }
+    }
+
+    fn receive_ui_jobs(&mut self) {
+        while let Ok(job) = self.ui_job_rx.try_recv() {
+            job(self);
         }
     }
 
@@ -7043,32 +7057,70 @@ impl Gui {
                     description: String::new(),
                     key: None,
                     action: Some(Box::new(move |gui| {
-                        // Switch to the selected repo
-                        let new_git = crate::git::GitCommands::new(std::path::Path::new(&p))?;
-                        let new_model = new_git.load_model()?;
-                        gui.git = std::sync::Arc::new(new_git);
-                        *gui.model.lock().unwrap() = new_model;
-                        gui.commit_list_cache = presentation::commits::CommitListCache::default();
-                        gui.commit_stats_cache.lock().unwrap().clear();
-                        gui.commit_stats_cache_order.lock().unwrap().clear();
-                        gui.commit_messages_cache.lock().unwrap().clear();
-                        gui.commit_messages_cache_order.lock().unwrap().clear();
-                        gui.clear_diff_preview_cache();
-                        gui.last_commit_details_key.clear();
-                        gui.commit_details_generation
-                            .fetch_add(1, Ordering::Relaxed);
-                        gui.last_diff_key.clear();
-                        gui.diff_generation.fetch_add(1, Ordering::Relaxed);
-                        gui.diff_loading = false;
-                        gui.diff_loading_since = None;
-                        gui.needs_refresh = false;
-                        gui.needs_diff_refresh = true;
-                        gui.context_mgr = context::ContextManager::new();
-                        gui.displayed_diff_key.clear();
-                        gui.diff_view.reset_keep_prefs();
-                        if gui.show_file_tree {
-                            gui.update_file_tree_state();
+                        if gui.remote_op_label.is_some() {
+                            gui.popup = PopupState::Message {
+                                title: "Repository busy".to_string(),
+                                message: "Wait for the current Git operation to finish before switching repositories.".to_string(),
+                                kind: MessageKind::Info,
+                            };
+                            return Ok(());
                         }
+                        let tx = gui.ui_job_tx.clone();
+                        gui.popup = PopupState::Message {
+                            title: "Switching repository".to_string(),
+                            message: format!("Loading {p}..."),
+                            kind: MessageKind::Info,
+                        };
+                        std::thread::spawn(move || {
+                            let result = crate::git::GitCommands::new(std::path::Path::new(&p))
+                                .and_then(|git| git.load_model().map(|model| (git, model)));
+                            let _ = tx.send(Box::new(move |gui: &mut Gui| match result {
+                                Ok((new_git, new_model)) => {
+                                    // Invalidate/drop any work still tied to the previous repository
+                                    // before installing the new model. Background workers may finish,
+                                    // but their receivers/generations can no longer overwrite this repo.
+                                    gui.initial_load_rx = None;
+                                    gui.refresh_in_progress = false;
+                                    gui.files_refresh_rx = None;
+                                    gui.files_refresh_in_progress = false;
+                                    gui.filter_paths_rx = None;
+                                    gui.commit_page_generation = gui.commit_page_generation.wrapping_add(1);
+                                    gui.commit_page_loading = false;
+                                    gui.diff_generation.fetch_add(1, Ordering::Relaxed);
+
+                                    gui.git = std::sync::Arc::new(new_git);
+                                    *gui.model.lock().unwrap() = new_model;
+                                    gui.commit_list_cache = presentation::commits::CommitListCache::default();
+                                    gui.commit_stats_cache.lock().unwrap().clear();
+                                    gui.commit_stats_cache_order.lock().unwrap().clear();
+                                    gui.commit_messages_cache.lock().unwrap().clear();
+                                    gui.commit_messages_cache_order.lock().unwrap().clear();
+                                    gui.clear_diff_preview_cache();
+                                    gui.last_commit_details_key.clear();
+                                    gui.commit_details_generation.fetch_add(1, Ordering::Relaxed);
+                                    gui.last_diff_key.clear();
+                                    gui.diff_loading = false;
+                                    gui.diff_loading_since = None;
+                                    gui.needs_refresh = false;
+                                    gui.needs_diff_refresh = true;
+                                    gui.context_mgr = context::ContextManager::new();
+                                    gui.displayed_diff_key.clear();
+                                    gui.diff_view.reset_keep_prefs();
+                                    gui.reset_commit_pagination();
+                                    gui.popup = PopupState::None;
+                                    if gui.show_file_tree {
+                                        gui.update_file_tree_state();
+                                    }
+                                }
+                                Err(err) => {
+                                    gui.popup = PopupState::Message {
+                                        title: "Could not switch repository".to_string(),
+                                        message: format!("{err:#}"),
+                                        kind: MessageKind::Error,
+                                    };
+                                }
+                            }));
+                        });
                         Ok(())
                     })),
                 }
