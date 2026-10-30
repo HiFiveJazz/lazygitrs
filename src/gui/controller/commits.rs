@@ -1068,6 +1068,9 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                         smooth_scroll_from: 0.0,
                         smooth_scroll_target: 0.0,
                         smooth_scroll_started_at: None,
+                        smooth_cursor_from: 0.0,
+                        smooth_cursor_target: 0.0,
+                        smooth_cursor_started_at: None,
                     };
                     Ok(())
                 })),

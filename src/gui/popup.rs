@@ -548,9 +548,9 @@ pub enum PopupState {
         kind: MessageKind,
         scroll: usize,
     },
-    /// `git format-patch` preview with patch-aware coloring and a smooth
-    /// keyboard cursor. Ctrl-J/K moves the cursor by 22 visual rows while the
-    /// viewport eases to keep it visible.
+    /// `git format-patch` preview with patch-aware coloring. Ctrl-J/K moves
+    /// the cursor by 22 visual rows using the same short easing as commit-list
+    /// navigation, while the viewport follows only as needed to keep it visible.
     PatchPreview {
         title: String,
         message: String,
@@ -559,6 +559,9 @@ pub enum PopupState {
         smooth_scroll_from: f64,
         smooth_scroll_target: f64,
         smooth_scroll_started_at: Option<Instant>,
+        smooth_cursor_from: f64,
+        smooth_cursor_target: f64,
+        smooth_cursor_started_at: Option<Instant>,
     },
     /// Shown while a background operation (like AI commit generation) is running.
     #[allow(dead_code)]

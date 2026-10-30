@@ -1726,7 +1726,7 @@ impl Gui {
                 || self.patch_building.active;
             self.context_mgr.tick_selection_animations();
             self.diff_view.tick_smooth_scroll();
-            self.tick_patch_preview_scroll();
+            self.tick_patch_preview_animation();
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
@@ -1987,50 +1987,80 @@ impl Gui {
         Ok(())
     }
 
-    fn patch_preview_scroll_active(&self) -> bool {
+    fn patch_preview_animation_active(&self) -> bool {
         matches!(
             self.popup,
             PopupState::PatchPreview {
                 smooth_scroll_started_at: Some(_),
                 ..
             }
+        ) || matches!(
+            self.popup,
+            PopupState::PatchPreview {
+                smooth_cursor_started_at: Some(_),
+                ..
+            }
         )
     }
 
-    fn tick_patch_preview_scroll(&mut self) {
-        const DURATION: Duration = Duration::from_millis(100);
+    fn tick_patch_preview_animation(&mut self) {
+        let duration = scroll::LIST_SCROLL_DURATION;
         let PopupState::PatchPreview {
             scroll,
+            cursor_line,
             smooth_scroll_from,
             smooth_scroll_target,
             smooth_scroll_started_at,
+            smooth_cursor_from,
+            smooth_cursor_target,
+            smooth_cursor_started_at,
             message,
             ..
         } = &mut self.popup
         else {
             return;
         };
-        let Some(started_at) = *smooth_scroll_started_at else {
-            return;
-        };
+
         let area = Rect::new(0, 0, self.layout.width, self.layout.height);
         let (rows, total) = views::patch_preview_metrics(message, area);
-        let max = total.saturating_sub(rows);
-        let t = (started_at.elapsed().as_secs_f64() / DURATION.as_secs_f64()).min(1.0);
-        let target = smooth_scroll_target.min(max as f64);
-        if t >= 1.0 {
-            *scroll = target as usize;
-            *smooth_scroll_started_at = None;
-            *smooth_scroll_from = target;
-            *smooth_scroll_target = target;
-            return;
+        let last = total.saturating_sub(1);
+        let max_scroll = total.saturating_sub(rows);
+
+        if let Some(started_at) = *smooth_cursor_started_at {
+            let t = (started_at.elapsed().as_secs_f64() / duration.as_secs_f64()).min(1.0);
+            let target = smooth_cursor_target.min(last as f64);
+            if t >= 1.0 {
+                *cursor_line = target as usize;
+                *smooth_cursor_started_at = None;
+                *smooth_cursor_from = target;
+                *smooth_cursor_target = target;
+            } else {
+                let value = *smooth_cursor_from + (target - *smooth_cursor_from) * t;
+                *cursor_line = if target >= *smooth_cursor_from {
+                    value.floor() as usize
+                } else {
+                    value.ceil() as usize
+                };
+            }
         }
-        let value = *smooth_scroll_from + (target - *smooth_scroll_from) * t;
-        *scroll = if target >= *smooth_scroll_from {
-            value.floor() as usize
-        } else {
-            value.ceil() as usize
-        };
+
+        if let Some(started_at) = *smooth_scroll_started_at {
+            let t = (started_at.elapsed().as_secs_f64() / duration.as_secs_f64()).min(1.0);
+            let target = smooth_scroll_target.min(max_scroll as f64);
+            if t >= 1.0 {
+                *scroll = target as usize;
+                *smooth_scroll_started_at = None;
+                *smooth_scroll_from = target;
+                *smooth_scroll_target = target;
+            } else {
+                let value = *smooth_scroll_from + (target - *smooth_scroll_from) * t;
+                *scroll = if target >= *smooth_scroll_from {
+                    value.floor() as usize
+                } else {
+                    value.ceil() as usize
+                };
+            }
+        }
     }
 
     fn shell_command_ui_active(&self) -> bool {
@@ -2046,7 +2076,7 @@ impl Gui {
         if self.context_mgr.has_active_scroll_animation()
             || self.context_mgr.has_active_selection_animation()
             || self.diff_view.has_active_smooth_scroll()
-            || self.patch_preview_scroll_active()
+            || self.patch_preview_animation_active()
         {
             Duration::from_millis(8)
         } else if self.shell_command_job.is_some()
@@ -5296,6 +5326,9 @@ impl Gui {
                     smooth_scroll_from,
                     smooth_scroll_target,
                     smooth_scroll_started_at,
+                    smooth_cursor_from,
+                    smooth_cursor_target,
+                    smooth_cursor_started_at,
                     ..
                 } = &mut self.popup
                 {
@@ -5304,17 +5337,23 @@ impl Gui {
                     let last = total.saturating_sub(1);
                     let max_scroll = total.saturating_sub(rows);
                     let old_cursor = (*cursor_line).min(last);
+                    let pending_cursor = if smooth_cursor_started_at.is_some() {
+                        smooth_cursor_target.round() as usize
+                    } else {
+                        old_cursor
+                    }
+                    .min(last);
                     let mut new_cursor = old_cursor;
-                    let mut smooth = false;
+                    let mut animate_cursor = false;
 
                     match (key.modifiers, key.code) {
                         (m, KeyCode::Char('j')) if m.contains(KeyModifiers::CONTROL) => {
-                            new_cursor = old_cursor.saturating_add(22).min(last);
-                            smooth = true;
+                            new_cursor = pending_cursor.saturating_add(22).min(last);
+                            animate_cursor = true;
                         }
                         (m, KeyCode::Char('k')) if m.contains(KeyModifiers::CONTROL) => {
-                            new_cursor = old_cursor.saturating_sub(22);
-                            smooth = true;
+                            new_cursor = pending_cursor.saturating_sub(22);
+                            animate_cursor = true;
                         }
                         (_, KeyCode::Char('j') | KeyCode::Down) => {
                             new_cursor = old_cursor.saturating_add(1).min(last);
@@ -5323,20 +5362,18 @@ impl Gui {
                             new_cursor = old_cursor.saturating_sub(1);
                         }
                         (_, KeyCode::PageDown) => {
-                            new_cursor = old_cursor.saturating_add(rows).min(last);
-                            smooth = true;
+                            new_cursor = pending_cursor.saturating_add(rows).min(last);
+                            animate_cursor = true;
                         }
                         (_, KeyCode::PageUp) => {
-                            new_cursor = old_cursor.saturating_sub(rows);
-                            smooth = true;
+                            new_cursor = pending_cursor.saturating_sub(rows);
+                            animate_cursor = true;
                         }
                         (_, KeyCode::Home | KeyCode::Char('g')) => {
                             new_cursor = 0;
-                            smooth = true;
                         }
                         (_, KeyCode::End | KeyCode::Char('G')) => {
                             new_cursor = last;
-                            smooth = true;
                         }
                         (_, KeyCode::Char('y')) => {
                             let _ = Platform::copy_to_clipboard(message);
@@ -5345,12 +5382,20 @@ impl Gui {
                         _ => return Ok(()),
                     }
 
-                    *cursor_line = new_cursor;
+                    if animate_cursor && new_cursor != old_cursor {
+                        *smooth_cursor_from = old_cursor as f64;
+                        *smooth_cursor_target = new_cursor as f64;
+                        *smooth_cursor_started_at = Some(Instant::now());
+                    } else {
+                        *cursor_line = new_cursor;
+                        *smooth_cursor_from = new_cursor as f64;
+                        *smooth_cursor_target = new_cursor as f64;
+                        *smooth_cursor_started_at = None;
+                    }
+
                     let viewport_start = (*scroll).min(max_scroll);
                     let viewport_end = viewport_start.saturating_add(rows.saturating_sub(1));
-                    let target = if smooth {
-                        new_cursor.saturating_sub(rows / 2).min(max_scroll)
-                    } else if new_cursor < viewport_start {
+                    let target = if new_cursor < viewport_start {
                         new_cursor.min(max_scroll)
                     } else if new_cursor > viewport_end {
                         new_cursor
@@ -5364,6 +5409,14 @@ impl Gui {
                         *smooth_scroll_from = *scroll as f64;
                         *smooth_scroll_target = target as f64;
                         *smooth_scroll_started_at = Some(Instant::now());
+                    } else {
+                        // A new navigation command can invalidate an older pending
+                        // viewport destination even when the desired offset is the
+                        // row currently on screen. Do not let that stale animation
+                        // keep pulling the preview after the cursor was retargeted.
+                        *smooth_scroll_from = *scroll as f64;
+                        *smooth_scroll_target = *scroll as f64;
+                        *smooth_scroll_started_at = None;
                     }
                 }
             }
