@@ -4416,12 +4416,27 @@ impl Gui {
         // Smooth preview scrolling (J/K by default). Keep this separate from
         // Ctrl-J/K, which performs smooth multi-row navigation in the active list.
         if matches_key(key, &keybindings.universal.scroll_down_main_alt1) {
-            let amount = self.config.user_config.gui.scroll_height.max(1) as isize;
+            // Preview scrolling is intentionally a little faster than list
+            // selection: move two configured scroll steps per press while
+            // preserving the same 100 ms easing.
+            let amount = self
+                .config
+                .user_config
+                .gui
+                .scroll_height
+                .max(1)
+                .saturating_mul(2) as isize;
             self.diff_view.request_smooth_scroll(amount);
             return Ok(());
         }
         if matches_key(key, &keybindings.universal.scroll_up_main_alt1) {
-            let amount = self.config.user_config.gui.scroll_height.max(1) as isize;
+            let amount = self
+                .config
+                .user_config
+                .gui
+                .scroll_height
+                .max(1)
+                .saturating_mul(2) as isize;
             self.diff_view.request_smooth_scroll(-amount);
             return Ok(());
         }
