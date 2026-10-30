@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -60,19 +61,6 @@ pub(crate) struct ReflogRead {
     pub parents: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct StatusRead {
-    /// Current repository-relative path.
-    pub path: String,
-    /// Source path for a staged rename/copy.
-    pub source_path: Option<String>,
-    /// Porcelain-v1 compatible index/HEAD status column.
-    pub index_status: char,
-    /// Porcelain-v1 compatible worktree/index status column.
-    pub worktree_status: char,
-    pub tracked: bool,
-}
-
 /// Paths discovered while opening a repository with gix.
 pub(crate) struct DiscoveredRepository {
     pub read_repo: ReadRepository,
@@ -80,24 +68,61 @@ pub(crate) struct DiscoveredRepository {
     pub repo_path: PathBuf,
 }
 
-/// Persistent gix repository state used for hot read-only queries.
+/// Lightweight locator for read-only gix queries.
 ///
-/// Mutating/network operations intentionally remain on the system Git CLI. The
-/// repository handle is kept alive so its object cache survives across UI
-/// actions. gix metadata reads are short, so a mutex is preferable to creating
-/// a fresh thread-local handle (and fresh cache) for every query.
+/// Mutating/network operations intentionally remain on the system Git CLI.
+/// Unlike the earlier persistent repository handle, this stores only a path and
+/// opens a short-lived gix repository for each query. Dropping that handle after
+/// the query releases pack/MIDX mappings and other ODB resources instead of
+/// charging them to lazygitrs' idle RSS for the lifetime of the application.
 pub struct ReadRepository {
-    repo: Mutex<gix::Repository>,
+    path: PathBuf,
+    query_lock: Mutex<()>,
+}
+
+struct ReadRepositoryHandle<'a> {
+    // Drop the repository before unlocking the gate so the next query cannot
+    // overlap its ODB mappings with the previous query's mappings.
+    repo: gix::Repository,
+    _gate: MutexGuard<'a, ()>,
+}
+
+impl Deref for ReadRepositoryHandle<'_> {
+    type Target = gix::Repository;
+
+    fn deref(&self) -> &Self::Target {
+        &self.repo
+    }
 }
 
 impl ReadRepository {
-    fn from_repo(mut repo: gix::Repository) -> Self {
-        // Recent commit objects are repeatedly touched by commit/amend/refresh
-        // paths. The cache grows lazily up to this cap.
-        repo.object_cache_size_if_unset(32 * 1024 * 1024);
+    fn from_repo(repo: gix::Repository) -> Self {
+        let path = repo
+            .workdir()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| repo.common_dir().to_path_buf());
+        let path = path.canonicalize().unwrap_or(path);
         Self {
-            repo: Mutex::new(repo),
+            path,
+            query_lock: Mutex::new(()),
         }
+    }
+
+    fn open_for_read(&self) -> Result<ReadRepositoryHandle<'_>> {
+        let gate = self
+            .query_lock
+            .lock()
+            .expect("gix read repository query lock poisoned");
+        let mut repo = gix::open(&self.path)
+            .with_context(|| format!("failed to open {} with gix", self.path.display()))?;
+
+        // Keep each in-process Git read deliberately low-memory. We already
+        // cache parsed/application-level results where it matters, while gix's
+        // decoded-object cache and reusable-buffer freelist can retain tens of
+        // MiB after a large repository scan.
+        repo.object_cache_size(None);
+        repo.set_freelist(None);
+        Ok(ReadRepositoryHandle { repo, _gate: gate })
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -106,18 +131,15 @@ impl ReadRepository {
         Ok(Self::from_repo(repo))
     }
 
-    /// Refresh configuration after a Git CLI mutation such as changing remotes
-    /// or upstream tracking. These operations are rare, so dropping gix's
-    /// caches here is preferable to serving stale config-derived metadata.
+    /// Kept for callers that mutate repository configuration through Git. Each
+    /// read now opens a fresh gix handle, so there is no persistent state to
+    /// refresh and the next query will observe the mutation automatically.
     pub fn reload(&self) -> Result<()> {
-        let mut repo = self.repo.lock().expect("gix read repository poisoned");
-        repo.reload()?;
-        repo.object_cache_size_if_unset(32 * 1024 * 1024);
         Ok(())
     }
 
     /// Discover and open a repository in one pass so startup doesn't need two
-    /// `git rev-parse` subprocesses before creating the persistent gix handle.
+    /// `git rev-parse` subprocesses before creating the lightweight gix locator.
     pub fn discover(path: &Path) -> Result<DiscoveredRepository> {
         let repo = gix::discover(path)
             .with_context(|| format!("failed to discover {} with gix", path.display()))?;
@@ -157,7 +179,7 @@ impl ReadRepository {
     }
 
     pub fn head_state(&self) -> Result<HeadState> {
-        let repo = self.repo.lock().expect("gix read repository poisoned");
+        let repo = self.open_for_read()?;
         let head = repo.head()?;
         let hash = head
             .id()
@@ -172,7 +194,7 @@ impl ReadRepository {
     }
 
     pub fn first_parent_hash(&self, hash: &str) -> Result<Option<String>> {
-        let repo = self.repo.lock().expect("gix read repository poisoned");
+        let repo = self.open_for_read()?;
         let id = hash
             .parse::<gix::ObjectId>()
             .with_context(|| format!("invalid commit id {hash}"))?;
@@ -183,7 +205,7 @@ impl ReadRepository {
     }
 
     pub fn ref_snapshot(&self) -> Result<RefSnapshot> {
-        let repo = self.repo.lock().expect("gix read repository poisoned");
+        let repo = self.open_for_read()?;
         let head = repo.head()?.id().map(|id| id.to_string());
         let mut refs = Vec::new();
 
@@ -210,7 +232,7 @@ impl ReadRepository {
     }
 
     pub fn branches(&self) -> Result<Vec<BranchRead>> {
-        let repo = self.repo.lock().expect("gix read repository poisoned");
+        let repo = self.open_for_read()?;
         let head_name = repo
             .head()?
             .referent_name()
@@ -261,7 +283,7 @@ impl ReadRepository {
     }
 
     pub fn unpushed_commit_hashes(&self) -> Result<Vec<String>> {
-        let repo = self.repo.lock().expect("gix read repository poisoned");
+        let repo = self.open_for_read()?;
         let mut head_ref = match repo.head_ref()? {
             Some(reference) => reference,
             None => return Ok(Vec::new()),
@@ -287,7 +309,7 @@ impl ReadRepository {
     }
 
     pub fn remotes(&self) -> Result<Vec<RemoteRead>> {
-        let repo = self.repo.lock().expect("gix read repository poisoned");
+        let repo = self.open_for_read()?;
         let names: Vec<String> = repo
             .remote_names()
             .into_iter()
@@ -352,7 +374,7 @@ impl ReadRepository {
     }
 
     pub fn origin_url(&self) -> Result<Option<String>> {
-        let repo = self.repo.lock().expect("gix read repository poisoned");
+        let repo = self.open_for_read()?;
         let Some(remote) = repo.try_find_remote("origin") else {
             return Ok(None);
         };
@@ -363,7 +385,7 @@ impl ReadRepository {
     }
 
     pub fn tags(&self) -> Result<Vec<TagRead>> {
-        let repo = self.repo.lock().expect("gix read repository poisoned");
+        let repo = self.open_for_read()?;
 
         // Collect names first so the packed-refs iterator can release its
         // buffer before we follow/peel individual refs. This also lets us
@@ -427,187 +449,8 @@ impl ReadRepository {
         Ok(tags)
     }
 
-    /// Return a porcelain-v1-compatible status snapshot using gix.
-    ///
-    /// Individual untracked files are requested to preserve the existing
-    /// `git status --porcelain -uall` behavior.  Complex conflict states and
-    /// worktree-side rewrite detection deliberately return an error so the
-    /// caller can fall back to Git's porcelain parser rather than risk
-    /// changing staging/discard semantics.
-    pub fn status_untracked_all(&self) -> Result<Vec<StatusRead>> {
-        use gix::bstr::ByteSlice;
-
-        let repo = self.repo.lock().expect("gix read repository poisoned");
-        let platform = repo
-            .status(gix::progress::Discard)?
-            .untracked_files(gix::status::UntrackedFiles::Files);
-        let mut iter = platform.into_iter(None::<gix::bstr::BString>)?;
-
-        let mut tracked: HashMap<String, StatusRead> = HashMap::new();
-        let mut untracked = Vec::new();
-        let mut untracked_paths = HashSet::new();
-        let mut intent_to_add_paths = HashSet::new();
-
-        for item in iter.by_ref() {
-            match item? {
-                gix::status::Item::TreeIndex(change) => {
-                    use gix::diff::index::Change;
-
-                    let (path, source_path, code) = match change {
-                        Change::Addition { location, .. } => {
-                            (location.as_ref().to_str_lossy().into_owned(), None, 'A')
-                        }
-                        Change::Deletion { location, .. } => {
-                            (location.as_ref().to_str_lossy().into_owned(), None, 'D')
-                        }
-                        Change::Modification {
-                            location,
-                            previous_entry_mode,
-                            entry_mode,
-                            ..
-                        } => (
-                            location.as_ref().to_str_lossy().into_owned(),
-                            None,
-                            if previous_entry_mode == entry_mode {
-                                'M'
-                            } else {
-                                'T'
-                            },
-                        ),
-                        Change::Rewrite {
-                            source_location,
-                            location,
-                            copy,
-                            ..
-                        } => (
-                            location.as_ref().to_str_lossy().into_owned(),
-                            Some(source_location.as_ref().to_str_lossy().into_owned()),
-                            if copy { 'C' } else { 'R' },
-                        ),
-                    };
-
-                    if untracked_paths.contains(&path) {
-                        return Err(anyhow!(
-                            "gix tracked/untracked collision for {path} requires porcelain fallback"
-                        ));
-                    }
-                    let effective_code = if code == 'A' && intent_to_add_paths.contains(&path) {
-                        ' '
-                    } else {
-                        code
-                    };
-                    let status = tracked.entry(path.clone()).or_insert_with(|| StatusRead {
-                        path,
-                        source_path: None,
-                        index_status: ' ',
-                        worktree_status: ' ',
-                        tracked: true,
-                    });
-                    if effective_code != ' ' {
-                        if status.index_status != ' ' && status.index_status != effective_code {
-                            return Err(anyhow!(
-                                "gix produced multiple staged status codes for {}",
-                                status.path
-                            ));
-                        }
-                        status.index_status = effective_code;
-                        status.source_path = source_path;
-                    }
-                }
-                gix::status::Item::IndexWorktree(change) => {
-                    use gix::status::index_worktree::Item;
-                    use gix::status::plumbing::index_as_worktree::{
-                        Change as WorktreeChange, EntryStatus,
-                    };
-
-                    match change {
-                        Item::Modification {
-                            rela_path, status, ..
-                        } => {
-                            let path = rela_path.to_str_lossy().into_owned();
-                            let intent_to_add = matches!(&status, EntryStatus::IntentToAdd);
-                            let code = match status {
-                                EntryStatus::Conflict { .. } => {
-                                    return Err(anyhow!(
-                                        "gix conflict status for {path} requires porcelain fallback"
-                                    ));
-                                }
-                                EntryStatus::Change(WorktreeChange::Removed) => 'D',
-                                EntryStatus::Change(WorktreeChange::Type { .. }) => 'T',
-                                EntryStatus::Change(
-                                    WorktreeChange::Modification { .. }
-                                    | WorktreeChange::SubmoduleModification(_),
-                                ) => 'M',
-                                EntryStatus::NeedsUpdate(_) => continue,
-                                // Git porcelain intentionally suppresses the
-                                // staged-add column for intent-to-add entries.
-                                EntryStatus::IntentToAdd => 'A',
-                            };
-
-                            let entry = tracked.entry(path.clone()).or_insert_with(|| StatusRead {
-                                path: path.clone(),
-                                source_path: None,
-                                index_status: ' ',
-                                worktree_status: ' ',
-                                tracked: true,
-                            });
-                            if intent_to_add {
-                                intent_to_add_paths.insert(path.clone());
-                                entry.index_status = ' ';
-                            }
-                            entry.worktree_status = code;
-                        }
-                        Item::DirectoryContents { entry, .. } => {
-                            if entry.status != gix::dir::entry::Status::Untracked {
-                                continue;
-                            }
-                            let path = entry.rela_path.to_str_lossy().into_owned();
-                            // A staged deletion followed by a new untracked
-                            // file at the same path is represented by two
-                            // porcelain records. Keep that rare case exact by
-                            // falling back instead of merging the records.
-                            if tracked.contains_key(&path) {
-                                return Err(anyhow!(
-                                    "gix tracked/untracked collision for {path} requires porcelain fallback"
-                                ));
-                            }
-                            untracked_paths.insert(path.clone());
-                            untracked.push(StatusRead {
-                                path,
-                                source_path: None,
-                                index_status: '?',
-                                worktree_status: '?',
-                                tracked: false,
-                            });
-                        }
-                        Item::Rewrite { .. } => {
-                            return Err(anyhow!(
-                                "gix worktree rewrite status requires porcelain fallback"
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Like `git status`, opportunistically refresh cached index stat data.
-        // gix documents these changes as safe bookkeeping that avoids paying
-        // the same work on subsequent status calls. A failure to persist them
-        // does not invalidate the status snapshot we already produced.
-        if let Some(mut outcome) = iter.into_outcome()
-            && let Some(write_result) = outcome.write_changes()
-        {
-            let _ = write_result;
-        }
-
-        let mut out: Vec<_> = tracked.into_values().collect();
-        out.extend(untracked);
-        out.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(out)
-    }
-
     pub fn reflog(&self, limit: usize) -> Result<Vec<ReflogRead>> {
-        let repo = self.repo.lock().expect("gix read repository poisoned");
+        let repo = self.open_for_read()?;
         let head = repo.head()?;
 
         let mut log_iter = head.log_iter();

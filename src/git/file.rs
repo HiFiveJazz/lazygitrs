@@ -21,16 +21,12 @@ impl GitCommands {
 
     /// Fast status-only load (no numstat / hunk-count subprocesses).
     /// Rapid stage/unstage stays responsive; stats catch up on full refresh.
+    ///
+    /// Keep status in a short-lived Git subprocess instead of gix. On very
+    /// large repositories, in-process gix status can fault hundreds of MiB of
+    /// pack/MIDX pages into lazygitrs and retain allocator state in the main
+    /// process. The subprocess releases all of that memory when it exits.
     pub fn load_files_status_only(&self) -> Result<Vec<File>> {
-        // gix is now the primary status backend. Keep Git porcelain as a
-        // correctness fallback for conflict/rewrite edge cases that we
-        // deliberately do not approximate in-process.
-        if let Some(repo) = &self.read_repo
-            && let Ok(entries) = repo.status_untracked_all()
-        {
-            return Ok(entries.into_iter().map(file_from_gix_status).collect());
-        }
-
         self.load_files_status_only_git()
     }
 
@@ -450,113 +446,9 @@ mod tests {
             .collect()
     }
 
-    fn status_signature(files: &[File]) -> Vec<(String, String, FileStatus, bool, bool, bool)> {
-        let mut out = files
-            .iter()
-            .map(|file| {
-                (
-                    file.short_status.clone(),
-                    file.name.clone(),
-                    file.status,
-                    file.has_staged_changes,
-                    file.has_unstaged_changes,
-                    file.tracked,
-                )
-            })
-            .collect::<Vec<_>>();
-        out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-        out
-    }
-
     #[test]
-    fn gix_status_matches_porcelain_for_common_file_states() {
-        let temp = TempDir::new("gix-status-parity");
-        let repo = &temp.path;
-        init_repo(repo);
-
-        for name in [
-            "modified.txt",
-            "staged.txt",
-            "both.txt",
-            "rename.txt",
-            "deleted.txt",
-            "staged-delete.txt",
-        ] {
-            std::fs::write(repo.join(name), "original\n").expect("seed file");
-        }
-        git(repo, &["add", "."]);
-        git(repo, &["commit", "-qm", "init"]);
-
-        std::fs::write(repo.join("modified.txt"), "modified\n").expect("modify");
-
-        std::fs::write(repo.join("staged.txt"), "staged\n").expect("modify staged");
-        git(repo, &["add", "staged.txt"]);
-
-        std::fs::write(repo.join("both.txt"), "staged\n").expect("modify both");
-        git(repo, &["add", "both.txt"]);
-        std::fs::write(repo.join("both.txt"), "unstaged\n").expect("modify both again");
-
-        git(repo, &["mv", "rename.txt", "renamed.txt"]);
-        std::fs::write(repo.join("renamed.txt"), "renamed and modified\n").expect("modify rename");
-
-        std::fs::remove_file(repo.join("deleted.txt")).expect("delete tracked");
-        git(repo, &["rm", "-q", "staged-delete.txt"]);
-
-        std::fs::write(repo.join("added.txt"), "added\n").expect("write added");
-        git(repo, &["add", "added.txt"]);
-        std::fs::write(repo.join("untracked.txt"), "untracked\n").expect("write untracked");
-
-        let git_cmds = GitCommands::new(repo).expect("git commands");
-        let gix_entries = git_cmds
-            .read_repo
-            .as_ref()
-            .expect("gix repo")
-            .status_untracked_all()
-            .expect("gix status");
-        let gix_files = gix_entries
-            .into_iter()
-            .map(file_from_gix_status)
-            .collect::<Vec<_>>();
-        let git_files = git_cmds
-            .load_files_status_only_git()
-            .expect("git porcelain status");
-
-        assert_eq!(status_signature(&gix_files), status_signature(&git_files));
-    }
-
-    #[test]
-    fn gix_status_matches_porcelain_for_intent_to_add() {
-        let temp = TempDir::new("gix-status-intent-to-add");
-        let repo = &temp.path;
-        init_repo(repo);
-        std::fs::write(repo.join("base.txt"), "base\n").expect("base");
-        git(repo, &["add", "base.txt"]);
-        git(repo, &["commit", "-qm", "init"]);
-
-        std::fs::write(repo.join("intent.txt"), "intent\n").expect("intent");
-        git(repo, &["add", "-N", "intent.txt"]);
-
-        let git_cmds = GitCommands::new(repo).expect("git commands");
-        let gix_entries = git_cmds
-            .read_repo
-            .as_ref()
-            .expect("gix repo")
-            .status_untracked_all()
-            .expect("gix status");
-        let gix_files = gix_entries
-            .into_iter()
-            .map(file_from_gix_status)
-            .collect::<Vec<_>>();
-        let git_files = git_cmds
-            .load_files_status_only_git()
-            .expect("git porcelain status");
-
-        assert_eq!(status_signature(&gix_files), status_signature(&git_files));
-    }
-
-    #[test]
-    fn conflict_status_falls_back_to_git_porcelain() {
-        let temp = TempDir::new("gix-status-conflict-fallback");
+    fn porcelain_status_reports_conflicts() {
+        let temp = TempDir::new("porcelain-status-conflict");
         let repo = &temp.path;
         init_repo(repo);
         std::fs::write(repo.join("conflict.txt"), "base\n").expect("base");
@@ -579,17 +471,7 @@ mod tests {
         assert!(!merge.success(), "merge should conflict");
 
         let git_cmds = GitCommands::new(repo).expect("git commands");
-        assert!(
-            git_cmds
-                .read_repo
-                .as_ref()
-                .expect("gix repo")
-                .status_untracked_all()
-                .is_err(),
-            "gix conflict path should request porcelain fallback"
-        );
-
-        let files = git_cmds.load_files_status_only().expect("fallback status");
+        let files = git_cmds.load_files_status_only().expect("porcelain status");
         assert!(files.iter().any(|file| file.has_merge_conflicts));
     }
 
@@ -756,17 +638,6 @@ fn chunk_paths(paths: &[String], max_arg_bytes: usize) -> Vec<&[String]> {
         start = end;
     }
     chunks
-}
-
-fn file_from_gix_status(entry: super::read_backend::StatusRead) -> File {
-    let x = entry.index_status;
-    let y = entry.worktree_status;
-    let (_, _, _, status) = parse_status_codes(x, y);
-    let name = match entry.source_path {
-        Some(source) => format!("{} -> {}", source, entry.path),
-        None => entry.path,
-    };
-    file_from_status_parts(x, y, name, entry.tracked, status)
 }
 
 fn file_from_status_parts(
