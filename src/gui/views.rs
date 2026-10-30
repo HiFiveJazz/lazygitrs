@@ -3713,6 +3713,82 @@ pub(super) fn patch_preview_metrics(message: &str, area: Rect) -> (usize, usize)
     (rows.max(1), total.max(1))
 }
 
+fn email_recipient_lines(
+    recipients: &[String],
+    selected: usize,
+    focused: bool,
+    max_rows: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    if recipients.is_empty() {
+        return vec![Line::from(Span::styled(
+            "   (none — press a to add)",
+            Style::default().fg(theme.text_dimmed),
+        ))];
+    }
+
+    let max_rows = max_rows.max(1);
+    let selected = selected.min(recipients.len().saturating_sub(1));
+    let start = if recipients.len() <= max_rows {
+        0
+    } else {
+        selected
+            .saturating_sub(max_rows / 2)
+            .min(recipients.len().saturating_sub(max_rows))
+    };
+    let end = (start + max_rows).min(recipients.len());
+    let number_width = recipients.len().to_string().len().max(1);
+
+    (start..end)
+        .map(|index| {
+            let is_selected = index == selected;
+            let marker = if is_selected && focused { "›" } else { " " };
+            let number = format!("{:>width$}", index + 1, width = number_width);
+            let recipient_style = if is_selected && focused {
+                Style::default()
+                    .fg(theme.accent_secondary)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text)
+            };
+            let number_style = if is_selected && focused {
+                Style::default().fg(theme.accent_secondary)
+            } else {
+                Style::default().fg(theme.text_dimmed)
+            };
+            Line::from(vec![
+                Span::styled(format!("{marker} {number} "), number_style),
+                Span::styled(recipients[index].clone(), recipient_style),
+            ])
+        })
+        .collect()
+}
+
+fn email_review_message(
+    action: &str,
+    to_recipients: &[String],
+    cc_recipients: &[String],
+) -> String {
+    let mut message = format!("{action} this patch?\n\nTo:\n");
+    if to_recipients.is_empty() {
+        message.push_str("  (none)\n");
+    } else {
+        for (index, recipient) in to_recipients.iter().enumerate() {
+            message.push_str(&format!("  {}. {}\n", index + 1, recipient));
+        }
+    }
+    message.push_str("Cc:\n");
+    if cc_recipients.is_empty() {
+        message.push_str("  (none)\n");
+    } else {
+        for (index, recipient) in cc_recipients.iter().enumerate() {
+            message.push_str(&format!("  {}. {}\n", index + 1, recipient));
+        }
+    }
+    message.push_str("\nOnly the recipients shown above will be used.");
+    message
+}
+
 pub fn render_popup(
     frame: &mut Frame,
     popup: &PopupState,
@@ -4063,36 +4139,25 @@ pub fn render_popup(
         }
         PopupState::EmailPatch {
             title,
-            to_textarea,
-            cc_textarea,
+            to_recipients,
+            cc_recipients,
             focus,
+            to_selected,
+            cc_selected,
+            recipient_editor,
             dry_run,
             reviewing,
             resolving_recipients,
             ..
         } => {
-            let width = (area.width * 75 / 100).min(84).max(40).min(area.width);
-            if width < 20 {
+            let width = (area.width * 80 / 100).min(92).max(44).min(area.width);
+            if width < 24 {
                 return;
             }
 
             if *reviewing {
-                let to = to_textarea.lines().join("");
-                let cc = cc_textarea.lines().join("");
-                let to_label = if to.trim().is_empty() {
-                    "(none)"
-                } else {
-                    to.trim()
-                };
-                let cc_label = if cc.trim().is_empty() {
-                    "(none)"
-                } else {
-                    cc.trim()
-                };
                 let action = if *dry_run { "Check" } else { "Send" };
-                let message = format!(
-                    "{action} this patch?\n\nTo: {to_label}\nCc: {cc_label}\n\nOnly the recipients shown above will be used."
-                );
+                let message = email_review_message(action, to_recipients, cc_recipients);
                 let inner_width = width.saturating_sub(4) as usize;
                 let wrapped = wrap_popup_lines(&message, inner_width);
                 let wrapped = visible_popup_lines(&wrapped, area.height.saturating_sub(5) as usize);
@@ -4130,10 +4195,19 @@ pub fn render_popup(
 
                 frame.render_widget(Paragraph::new(text).block(block), rect);
             } else {
-                let height = 12u16.min(area.height);
-                if height < 8 || width < 20 {
+                let editor_extra = if recipient_editor.is_some() { 4u16 } else { 0 };
+                let fixed_height = 11u16.saturating_add(editor_extra);
+                if area.height <= fixed_height.saturating_add(1) {
                     return;
                 }
+                let available_rows = area.height.saturating_sub(fixed_height) as usize;
+                let max_rows = (available_rows / 2).clamp(1, 5);
+                let to_rows = to_recipients.len().max(1).min(max_rows);
+                let cc_rows = cc_recipients.len().max(1).min(max_rows);
+                let height = fixed_height
+                    .saturating_add(to_rows as u16)
+                    .saturating_add(cc_rows as u16)
+                    .min(area.height);
                 let rect = Rect::new(
                     area.x + area.width.saturating_sub(width) / 2,
                     area.y + area.height.saturating_sub(height) / 2,
@@ -4151,62 +4225,62 @@ pub fn render_popup(
                     horizontal: 2,
                     vertical: 1,
                 });
-                let label_style = Style::default().fg(theme.text_dimmed);
-                let focused_border = Style::default().fg(theme.accent_secondary);
-                let idle_border = theme.inactive_border;
+                let focused_label = Style::default()
+                    .fg(theme.accent_secondary)
+                    .add_modifier(Modifier::BOLD);
+                let idle_label = Style::default().fg(theme.text_dimmed);
 
-                let to_label = Rect::new(inner.x, inner.y, 4.min(inner.width), 1);
-                let to_box = Rect::new(
-                    inner.x.saturating_add(4),
-                    inner.y,
-                    inner.width.saturating_sub(4),
-                    3,
-                );
-                frame.render_widget(Paragraph::new("To:").style(label_style), to_label);
-                let to_block = Block::default().borders(Borders::ALL).border_style(
-                    if *focus == EmailPatchFocus::To {
-                        focused_border
+                let to_label = format!("To ({})", to_recipients.len());
+                frame.render_widget(
+                    Paragraph::new(to_label).style(if *focus == EmailPatchFocus::To {
+                        focused_label
                     } else {
-                        idle_border
-                    },
+                        idle_label
+                    }),
+                    Rect::new(inner.x, inner.y, inner.width, 1),
                 );
-                let to_inner = to_box.inner(ratatui::layout::Margin {
-                    horizontal: 1,
-                    vertical: 1,
-                });
-                frame.render_widget(to_block, to_box);
-                frame.render_widget(to_textarea, to_inner);
+                let to_y = inner.y.saturating_add(1);
+                let to_lines = email_recipient_lines(
+                    to_recipients,
+                    *to_selected,
+                    *focus == EmailPatchFocus::To,
+                    to_rows,
+                    theme,
+                );
+                frame.render_widget(
+                    Paragraph::new(to_lines),
+                    Rect::new(inner.x, to_y, inner.width, to_rows as u16),
+                );
 
-                let cc_y = inner.y.saturating_add(3);
-                let cc_label = Rect::new(inner.x, cc_y, 4.min(inner.width), 1);
-                let cc_box = Rect::new(
-                    inner.x.saturating_add(4),
-                    cc_y,
-                    inner.width.saturating_sub(4),
-                    3,
-                );
-                frame.render_widget(Paragraph::new("Cc:").style(label_style), cc_label);
-                let cc_block = Block::default().borders(Borders::ALL).border_style(
-                    if *focus == EmailPatchFocus::Cc {
-                        focused_border
+                let cc_label_y = to_y.saturating_add(to_rows as u16).saturating_add(1);
+                let cc_label = format!("Cc ({})", cc_recipients.len());
+                frame.render_widget(
+                    Paragraph::new(cc_label).style(if *focus == EmailPatchFocus::Cc {
+                        focused_label
                     } else {
-                        idle_border
-                    },
+                        idle_label
+                    }),
+                    Rect::new(inner.x, cc_label_y, inner.width, 1),
                 );
-                let cc_inner = cc_box.inner(ratatui::layout::Margin {
-                    horizontal: 1,
-                    vertical: 1,
-                });
-                frame.render_widget(cc_block, cc_box);
-                frame.render_widget(cc_textarea, cc_inner);
+                let cc_y = cc_label_y.saturating_add(1);
+                let cc_lines = email_recipient_lines(
+                    cc_recipients,
+                    *cc_selected,
+                    *focus == EmailPatchFocus::Cc,
+                    cc_rows,
+                    theme,
+                );
+                frame.render_widget(
+                    Paragraph::new(cc_lines),
+                    Rect::new(inner.x, cc_y, inner.width, cc_rows as u16),
+                );
 
-                let options_y = inner.y.saturating_add(6);
+                let options_y = cc_y.saturating_add(cc_rows as u16).saturating_add(1);
                 let checkbox = if *dry_run { "[x]" } else { "[ ]" };
-                let dry_style = Style::default().fg(theme.text);
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
-                        Span::styled(format!(" {checkbox} "), dry_style),
-                        Span::styled("Dry run", dry_style),
+                        Span::styled(format!(" {checkbox} "), Style::default().fg(theme.text)),
+                        Span::styled("Dry run", Style::default().fg(theme.text)),
                     ])),
                     Rect::new(inner.x, options_y, inner.width, 1),
                 );
@@ -4237,7 +4311,34 @@ pub fn render_popup(
                     send_rect,
                 );
 
-                let hint_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+                let mut hint_y = options_y.saturating_add(1);
+                if let Some(editor) = recipient_editor {
+                    let verb = if editor.index.is_some() {
+                        "Edit"
+                    } else {
+                        "Add"
+                    };
+                    frame.render_widget(
+                        Paragraph::new(format!("{verb} {} recipient", editor.field.label()))
+                            .style(focused_label),
+                        Rect::new(inner.x, hint_y, inner.width, 1),
+                    );
+                    hint_y = hint_y.saturating_add(1);
+                    let editor_box = Rect::new(inner.x, hint_y, inner.width, 3);
+                    let editor_inner = editor_box.inner(ratatui::layout::Margin {
+                        horizontal: 1,
+                        vertical: 1,
+                    });
+                    frame.render_widget(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(theme.accent_secondary)),
+                        editor_box,
+                    );
+                    frame.render_widget(&editor.textarea, editor_inner);
+                    hint_y = hint_y.saturating_add(3);
+                }
+
                 let key_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
                 let desc_style = Style::default().fg(theme.text_dimmed);
                 let hint = if *resolving_recipients {
@@ -4246,24 +4347,38 @@ pub fn render_popup(
                         Span::styled("esc ", key_style),
                         Span::styled("cancel", desc_style),
                     ])
+                } else if recipient_editor.is_some() {
+                    Line::from(vec![
+                        Span::styled(" enter ", key_style),
+                        Span::styled("save  ", desc_style),
+                        Span::styled("esc ", key_style),
+                        Span::styled("cancel edit", desc_style),
+                    ])
                 } else {
                     Line::from(vec![
-                        Span::styled(" tab ", key_style),
-                        Span::styled("field  ", desc_style),
-                        Span::styled("ctrl+d ", key_style),
-                        Span::styled("dry-run  ", desc_style),
+                        Span::styled("j/k ", key_style),
+                        Span::styled("move  ", desc_style),
+                        Span::styled("a ", key_style),
+                        Span::styled("add  ", desc_style),
+                        Span::styled("e ", key_style),
+                        Span::styled("edit  ", desc_style),
+                        Span::styled("d ", key_style),
+                        Span::styled("delete  ", desc_style),
+                        Span::styled("tab ", key_style),
+                        Span::styled("To/Cc  ", desc_style),
                         Span::styled("enter ", key_style),
-                        Span::styled("review  ", desc_style),
-                        Span::styled("esc ", key_style),
-                        Span::styled("cancel", desc_style),
+                        Span::styled("review", desc_style),
                     ])
                 };
-                frame.render_widget(
-                    Paragraph::new(hint),
-                    Rect::new(inner.x, hint_y, inner.width, 1),
-                );
+                if hint_y < inner.y.saturating_add(inner.height) {
+                    frame.render_widget(
+                        Paragraph::new(hint),
+                        Rect::new(inner.x, hint_y, inner.width, 1),
+                    );
+                }
             }
         }
+
         PopupState::CommitInput {
             kind,
             summary_textarea,

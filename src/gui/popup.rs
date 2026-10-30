@@ -505,6 +505,81 @@ impl EmailPatchFocus {
     pub fn previous(self) -> Self {
         self.next()
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::To => "To",
+            Self::Cc => "Cc",
+        }
+    }
+}
+
+pub struct EmailRecipientEditor {
+    pub field: EmailPatchFocus,
+    /// Existing recipient being edited. `None` means a new recipient.
+    pub index: Option<usize>,
+    pub textarea: TextArea<'static>,
+}
+
+/// Split a Git send-email recipient header into individual addresses while
+/// preserving quoted display names such as `"Doe, Jane" <jane@example.com>`.
+pub fn split_email_recipients(value: &str) -> Vec<String> {
+    let mut recipients = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut angle_depth = 0usize;
+
+    for ch in value.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if quoted => {
+                current.push(ch);
+                escaped = true;
+            }
+            '"' => {
+                quoted = !quoted;
+                current.push(ch);
+            }
+            '<' if !quoted => {
+                angle_depth = angle_depth.saturating_add(1);
+                current.push(ch);
+            }
+            '>' if !quoted => {
+                angle_depth = angle_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if !quoted && angle_depth == 0 => {
+                let recipient = current.trim();
+                if !recipient.is_empty() {
+                    recipients.push(recipient.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    let recipient = current.trim();
+    if !recipient.is_empty() {
+        recipients.push(recipient.to_string());
+    }
+
+    recipients
+}
+
+pub fn join_email_recipients(recipients: &[String]) -> String {
+    recipients
+        .iter()
+        .map(|recipient| recipient.trim())
+        .filter(|recipient| !recipient.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl CommitInputKind {
@@ -536,9 +611,12 @@ pub enum PopupState {
     /// Compose recipients for a single-commit `git send-email` operation.
     EmailPatch {
         title: String,
-        to_textarea: TextArea<'static>,
-        cc_textarea: TextArea<'static>,
+        to_recipients: Vec<String>,
+        cc_recipients: Vec<String>,
         focus: EmailPatchFocus,
+        to_selected: usize,
+        cc_selected: usize,
+        recipient_editor: Option<EmailRecipientEditor>,
         dry_run: bool,
         /// True while the final, editable recipient list is being reviewed.
         reviewing: bool,
@@ -1522,5 +1600,36 @@ mod checklist_free_entry_tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "Alice <a@example.com>");
         assert!(items[0].checked);
+    }
+}
+
+#[cfg(test)]
+mod email_recipient_tests {
+    use super::{join_email_recipients, split_email_recipients};
+
+    #[test]
+    fn splits_recipient_list_without_breaking_quoted_names() {
+        assert_eq!(
+            split_email_recipients(
+                "Jens Axboe <axboe@kernel.dk>, \"Doe, Jane\" <jane@example.com>, list@example.org"
+            ),
+            vec![
+                "Jens Axboe <axboe@kernel.dk>",
+                "\"Doe, Jane\" <jane@example.com>",
+                "list@example.org",
+            ]
+        );
+    }
+
+    #[test]
+    fn joins_visible_recipients_for_send_email() {
+        let recipients = vec![
+            "Jens Axboe <axboe@kernel.dk>".to_string(),
+            "list@example.org".to_string(),
+        ];
+        assert_eq!(
+            join_email_recipients(&recipients),
+            "Jens Axboe <axboe@kernel.dk>, list@example.org"
+        );
     }
 }

@@ -5413,8 +5413,11 @@ impl Gui {
             }
             PopupState::EmailPatch {
                 focus,
-                to_textarea,
-                cc_textarea,
+                to_recipients,
+                cc_recipients,
+                to_selected,
+                cc_selected,
+                recipient_editor,
                 reviewing,
                 resolving_recipients,
                 ..
@@ -5423,15 +5426,26 @@ impl Gui {
                     return;
                 }
                 let cleaned: String = data.replace('\r', "").replace('\n', " ");
-                if cleaned.is_empty() {
+                if cleaned.trim().is_empty() {
+                    return;
+                }
+                if let Some(editor) = recipient_editor.as_mut() {
+                    editor.textarea.insert_str(&cleaned);
+                    return;
+                }
+
+                let pasted = popup::split_email_recipients(&cleaned);
+                if pasted.is_empty() {
                     return;
                 }
                 match *focus {
                     popup::EmailPatchFocus::To => {
-                        to_textarea.insert_str(&cleaned);
+                        to_recipients.extend(pasted);
+                        *to_selected = to_recipients.len().saturating_sub(1);
                     }
                     popup::EmailPatchFocus::Cc => {
-                        cc_textarea.insert_str(&cleaned);
+                        cc_recipients.extend(pasted);
+                        *cc_selected = cc_recipients.len().saturating_sub(1);
                     }
                 }
             }
@@ -5694,15 +5708,15 @@ impl Gui {
                     if key.code == KeyCode::Enter || key.code == KeyCode::Char('y') {
                         let popup = std::mem::replace(&mut self.popup, PopupState::None);
                         if let PopupState::EmailPatch {
-                            to_textarea,
-                            cc_textarea,
+                            to_recipients,
+                            cc_recipients,
                             dry_run,
                             on_confirm,
                             ..
                         } = popup
                         {
-                            let to = to_textarea.lines().join("");
-                            let cc = cc_textarea.lines().join("");
+                            let to = popup::join_email_recipients(&to_recipients);
+                            let cc = popup::join_email_recipients(&cc_recipients);
                             if let Err(e) = on_confirm(self, to, cc, dry_run) {
                                 self.popup = PopupState::Message {
                                     title: "Error".to_string(),
@@ -5723,17 +5737,89 @@ impl Gui {
                     return Ok(());
                 }
 
+                let editor_active = matches!(
+                    &self.popup,
+                    PopupState::EmailPatch {
+                        recipient_editor: Some(_),
+                        ..
+                    }
+                );
+                if editor_active {
+                    if key.code == KeyCode::Esc {
+                        if let PopupState::EmailPatch {
+                            recipient_editor, ..
+                        } = &mut self.popup
+                        {
+                            *recipient_editor = None;
+                        }
+                        return Ok(());
+                    }
+
+                    if key.code == KeyCode::Enter {
+                        let value = if let PopupState::EmailPatch {
+                            recipient_editor: Some(editor),
+                            ..
+                        } = &self.popup
+                        {
+                            editor.textarea.lines().join(" ").trim().to_string()
+                        } else {
+                            String::new()
+                        };
+                        let parsed = popup::split_email_recipients(&value);
+                        if parsed.is_empty() {
+                            self.show_action_toast("Enter a recipient");
+                            return Ok(());
+                        }
+
+                        if let PopupState::EmailPatch {
+                            to_recipients,
+                            cc_recipients,
+                            to_selected,
+                            cc_selected,
+                            recipient_editor,
+                            ..
+                        } = &mut self.popup
+                        {
+                            let editor = recipient_editor.take().expect("email editor disappeared");
+                            let (recipients, selected) = match editor.field {
+                                popup::EmailPatchFocus::To => (to_recipients, to_selected),
+                                popup::EmailPatchFocus::Cc => (cc_recipients, cc_selected),
+                            };
+                            if let Some(index) =
+                                editor.index.filter(|index| *index < recipients.len())
+                            {
+                                let inserted = parsed.len();
+                                recipients.splice(index..=index, parsed);
+                                *selected = index.saturating_add(inserted.saturating_sub(1));
+                            } else {
+                                recipients.extend(parsed);
+                                *selected = recipients.len().saturating_sub(1);
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    if let PopupState::EmailPatch {
+                        recipient_editor: Some(editor),
+                        ..
+                    } = &mut self.popup
+                    {
+                        textarea_input(&mut editor.textarea, key);
+                    }
+                    return Ok(());
+                }
+
                 if key.code == KeyCode::Esc {
                     self.popup = PopupState::None;
                 } else if key.code == KeyCode::Enter {
                     let missing_to = if let PopupState::EmailPatch {
-                        to_textarea,
+                        to_recipients,
                         reviewing,
                         focus,
                         ..
                     } = &mut self.popup
                     {
-                        if to_textarea.lines().join("").trim().is_empty() {
+                        if to_recipients.is_empty() {
                             *focus = popup::EmailPatchFocus::To;
                             true
                         } else {
@@ -5744,7 +5830,7 @@ impl Gui {
                         false
                     };
                     if missing_to {
-                        self.show_action_toast("Enter a To recipient");
+                        self.show_action_toast("Add a To recipient");
                     }
                 } else if key.code == KeyCode::BackTab
                     || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
@@ -5756,19 +5842,139 @@ impl Gui {
                     if let PopupState::EmailPatch { focus, .. } = &mut self.popup {
                         *focus = focus.next();
                     }
-                } else if let PopupState::EmailPatch {
-                    focus,
-                    to_textarea,
-                    cc_textarea,
-                    ..
-                } = &mut self.popup
-                {
-                    match *focus {
-                        popup::EmailPatchFocus::To => {
-                            textarea_input(to_textarea, key);
+                } else if matches!(key.code, KeyCode::Char('j') | KeyCode::Down) {
+                    if let PopupState::EmailPatch {
+                        focus,
+                        to_recipients,
+                        cc_recipients,
+                        to_selected,
+                        cc_selected,
+                        ..
+                    } = &mut self.popup
+                    {
+                        let (recipients, selected) = match *focus {
+                            popup::EmailPatchFocus::To => (to_recipients, to_selected),
+                            popup::EmailPatchFocus::Cc => (cc_recipients, cc_selected),
+                        };
+                        if !recipients.is_empty() {
+                            *selected = selected.saturating_add(1).min(recipients.len() - 1);
                         }
-                        popup::EmailPatchFocus::Cc => {
-                            textarea_input(cc_textarea, key);
+                    }
+                } else if matches!(key.code, KeyCode::Char('k') | KeyCode::Up) {
+                    if let PopupState::EmailPatch {
+                        focus,
+                        to_selected,
+                        cc_selected,
+                        ..
+                    } = &mut self.popup
+                    {
+                        let selected = match *focus {
+                            popup::EmailPatchFocus::To => to_selected,
+                            popup::EmailPatchFocus::Cc => cc_selected,
+                        };
+                        *selected = selected.saturating_sub(1);
+                    }
+                } else if matches!(key.code, KeyCode::Char('g') | KeyCode::Home) {
+                    if let PopupState::EmailPatch {
+                        focus,
+                        to_selected,
+                        cc_selected,
+                        ..
+                    } = &mut self.popup
+                    {
+                        match *focus {
+                            popup::EmailPatchFocus::To => *to_selected = 0,
+                            popup::EmailPatchFocus::Cc => *cc_selected = 0,
+                        }
+                    }
+                } else if matches!(key.code, KeyCode::Char('G') | KeyCode::End) {
+                    if let PopupState::EmailPatch {
+                        focus,
+                        to_recipients,
+                        cc_recipients,
+                        to_selected,
+                        cc_selected,
+                        ..
+                    } = &mut self.popup
+                    {
+                        match *focus {
+                            popup::EmailPatchFocus::To => {
+                                *to_selected = to_recipients.len().saturating_sub(1)
+                            }
+                            popup::EmailPatchFocus::Cc => {
+                                *cc_selected = cc_recipients.len().saturating_sub(1)
+                            }
+                        }
+                    }
+                } else if matches!(key.code, KeyCode::Char('d') | KeyCode::Delete) {
+                    if let PopupState::EmailPatch {
+                        focus,
+                        to_recipients,
+                        cc_recipients,
+                        to_selected,
+                        cc_selected,
+                        ..
+                    } = &mut self.popup
+                    {
+                        let (recipients, selected) = match *focus {
+                            popup::EmailPatchFocus::To => (to_recipients, to_selected),
+                            popup::EmailPatchFocus::Cc => (cc_recipients, cc_selected),
+                        };
+                        if !recipients.is_empty() {
+                            let index = (*selected).min(recipients.len() - 1);
+                            recipients.remove(index);
+                            *selected = index.min(recipients.len().saturating_sub(1));
+                        }
+                    }
+                } else if key.code == KeyCode::Char('a') || key.code == KeyCode::Char('e') {
+                    if let PopupState::EmailPatch {
+                        focus,
+                        to_recipients,
+                        cc_recipients,
+                        to_selected,
+                        cc_selected,
+                        recipient_editor,
+                        ..
+                    } = &mut self.popup
+                    {
+                        let field = *focus;
+                        let (recipients, selected) = match field {
+                            popup::EmailPatchFocus::To => (to_recipients, to_selected),
+                            popup::EmailPatchFocus::Cc => (cc_recipients, cc_selected),
+                        };
+                        let editing = key.code == KeyCode::Char('e') && !recipients.is_empty();
+                        let index = editing.then_some((*selected).min(recipients.len() - 1));
+                        let mut textarea = popup::make_textarea("Name <email@example.com>");
+                        if let Some(index) = index {
+                            textarea.insert_str(&recipients[index]);
+                        }
+                        *recipient_editor = Some(popup::EmailRecipientEditor {
+                            field,
+                            index,
+                            textarea,
+                        });
+                    }
+                } else if let KeyCode::Char(digit @ '1'..='9') = key.code {
+                    if key.modifiers.is_empty() {
+                        let index = digit.to_digit(10).unwrap_or(1) as usize - 1;
+                        if let PopupState::EmailPatch {
+                            focus,
+                            to_recipients,
+                            cc_recipients,
+                            to_selected,
+                            cc_selected,
+                            ..
+                        } = &mut self.popup
+                        {
+                            match *focus {
+                                popup::EmailPatchFocus::To if index < to_recipients.len() => {
+                                    *to_selected = index
+                                }
+                                popup::EmailPatchFocus::Cc if index < cc_recipients.len() => {
+                                    *cc_selected = index
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }

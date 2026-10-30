@@ -7,7 +7,7 @@ use crate::config::keybindings::parse_key;
 use crate::git::rebase::RebaseAction;
 use crate::gui::popup::{
     BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, EmailPatchFocus, MenuItem,
-    MessageKind, PopupState, make_textarea,
+    MessageKind, PopupState, make_textarea, split_email_recipients,
 };
 use crate::gui::{Gui, RemoteOpKind};
 use crate::model::Branch;
@@ -1164,20 +1164,17 @@ fn show_email_patch_popup_with_values(
     resolution_request_id: u64,
     focus: EmailPatchFocus,
 ) {
-    let mut to_textarea = make_textarea("maintainer@example.com, list@example.org");
-    let mut cc_textarea = make_textarea("Optional");
-    if !to.is_empty() {
-        to_textarea.insert_str(&to);
-    }
-    if !cc.is_empty() {
-        cc_textarea.insert_str(&cc);
-    }
+    let to_recipients = split_email_recipients(&to);
+    let cc_recipients = split_email_recipients(&cc);
 
     gui.popup = PopupState::EmailPatch {
         title: format!("Email patch {short}"),
-        to_textarea,
-        cc_textarea,
+        to_recipients,
+        cc_recipients,
         focus,
+        to_selected: 0,
+        cc_selected: 0,
+        recipient_editor: None,
         dry_run,
         reviewing,
         resolving_recipients,
