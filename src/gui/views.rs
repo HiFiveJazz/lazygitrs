@@ -453,7 +453,22 @@ pub fn render(
         let rect = fl.side_panels[i];
         let ctx_id = ctx_mgr.active_context_for_window(*window);
         let is_active = ctx_mgr.active_window() == *window;
-        let selected = ctx_mgr.selected(ctx_id);
+        // While browsing commits, keep the inactive Branches panel visually
+        // anchored to the checked-out branch. Its remembered interactive
+        // selection is left untouched, so returning to the Branches panel can
+        // still restore where the user was browsing.
+        let selected = if *window == SideWindow::Branches
+            && ctx_id == ContextId::Branches
+            && ctx_mgr.active_window() == SideWindow::Commits
+        {
+            model
+                .branches
+                .iter()
+                .position(|branch| branch.head)
+                .unwrap_or_else(|| ctx_mgr.selected(ctx_id))
+        } else {
+            ctx_mgr.selected(ctx_id)
+        };
 
         let border_style = if is_active && !diff_focused {
             theme.active_border
