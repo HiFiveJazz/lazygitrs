@@ -187,7 +187,13 @@ impl GitCommands {
         let before = self.ref_snapshot().ok();
 
         self.git()
-            .args(&["fetch", "--all", "--no-write-fetch-head"])
+            .args(&[
+                "fetch",
+                "--all",
+                "--no-write-fetch-head",
+                "--quiet",
+                "--no-show-forced-updates",
+            ])
             .env("GIT_TERMINAL_PROMPT", "0")
             .run_expecting_success()?;
 
@@ -214,7 +220,9 @@ impl GitCommands {
 
     pub fn push(&self, force: bool) -> Result<()> {
         let mut cmd = self.git();
-        cmd = cmd.arg("push");
+        // Successful push output is captured and discarded by the TUI. Ask Git
+        // not to spend time formatting progress/ref summaries we never render.
+        cmd = cmd.args(&["push", "--quiet"]);
         if force {
             cmd = cmd.arg("--force-with-lease");
         }
@@ -235,7 +243,7 @@ impl GitCommands {
 
     pub fn delete_remote_branch(&self, remote: &str, branch: &str) -> Result<()> {
         self.git()
-            .args(&["push", remote, "--delete", branch])
+            .args(&["push", "--quiet", remote, "--delete", branch])
             .run_expecting_success()?;
         Ok(())
     }
@@ -262,7 +270,7 @@ impl GitCommands {
 
     pub fn push_with_upstream(&self, remote: &str, branch: &str) -> Result<()> {
         self.git()
-            .args(&["push", "-u", remote, branch])
+            .args(&["push", "--quiet", "-u", remote, branch])
             .run_expecting_success()?;
         if let Some(repo) = &self.read_repo {
             let _ = repo.reload();

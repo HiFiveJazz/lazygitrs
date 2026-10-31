@@ -239,7 +239,10 @@ const COMMIT_STAT_PREFETCH_WORKERS: usize = 2;
 const COMMIT_STAT_PREFETCH_BATCH_MAX: usize = 4;
 const COMMIT_STAT_PREFETCH_BATCH_WAIT: Duration = Duration::from_millis(2);
 const FETCH_MODEL_PART_COUNT: usize = 5;
+const PUSH_MODEL_PART_COUNT: usize = 3;
 const PERIODIC_MODEL_PART_COUNT: usize = 2;
+/// Keep speculative auto-fetch out of the way of interactive work.
+const AUTO_FETCH_IDLE_GRACE: Duration = Duration::from_secs(2);
 
 fn plain_char_key(key: KeyEvent, expected: char) -> bool {
     let modifiers = if expected.is_uppercase() {
@@ -998,9 +1001,13 @@ pub struct Gui {
     auto_fetch_rx: mpsc::Receiver<Result<bool>>,
     /// Sender cloned into background threads for auto-fetch.
     auto_fetch_tx: mpsc::Sender<Result<bool>>,
-    /// When the last auto-fetch started. `None` means we haven't fetched yet;
-    /// the main loop kicks off an immediate fetch on startup.
+    /// When the last auto-fetch interval started. Initialized at startup so the
+    /// first speculative network operation waits a full interval instead of
+    /// competing with startup navigation/checkout/push.
     last_auto_fetch_at: Option<Instant>,
+    /// Last terminal interaction. Auto-fetch only starts after a short idle
+    /// grace period so a user actively navigating toward Push/Pull/Checkout wins.
+    last_user_activity_at: Instant,
     /// True while a background auto-fetch is in flight, so we don't stack them.
     auto_fetch_in_flight: bool,
     /// Receiver for background menu item operations (e.g. fetching PR URLs).
@@ -1540,7 +1547,8 @@ impl Gui {
             filter_paths_rx: None,
             auto_fetch_rx,
             auto_fetch_tx,
-            last_auto_fetch_at: None,
+            last_auto_fetch_at: Some(Instant::now()),
+            last_user_activity_at: Instant::now(),
             auto_fetch_in_flight: false,
             menu_async_rx,
             menu_async_tx,
@@ -1775,7 +1783,17 @@ impl Gui {
                             model.commits_revision = model.commits_revision.wrapping_add(1);
                         }
                         ModelPart::Stash(v) => model.stash_entries = v,
-                        ModelPart::Remotes(v) => model.remotes = v,
+                        ModelPart::Remotes(v) => {
+                            model.remotes = v;
+                            if !self.remote_branches_name.is_empty()
+                                && let Some(remote) = model
+                                    .remotes
+                                    .iter()
+                                    .find(|remote| remote.name == self.remote_branches_name)
+                            {
+                                model.sub_remote_branches = remote.branches.clone();
+                            }
+                        }
                         ModelPart::Tags(v) => model.tags = v,
                         ModelPart::Worktrees(v) => model.worktrees = v,
                         ModelPart::Submodules(v) => model.submodules = v,
@@ -1842,8 +1860,11 @@ impl Gui {
                     self.initial_load_rx = None;
 
                     let was_refresh = self.refresh_in_progress;
-                    let was_periodic_refresh =
-                        was_refresh && self.initial_load_expected == PERIODIC_MODEL_PART_COUNT;
+                    let was_lightweight_refresh = was_refresh
+                        && matches!(
+                            self.initial_load_expected,
+                            PERIODIC_MODEL_PART_COUNT | PUSH_MODEL_PART_COUNT
+                        );
 
                     self.refresh_in_progress = false;
 
@@ -1854,9 +1875,10 @@ impl Gui {
                     self.needs_files_refresh = false;
                     self.last_refresh_at = Instant::now();
 
-                    // Periodic refresh only updates Files + Submodules. Those parts are
-                    // applied as they arrive, so don't reload selection-dependent views.
-                    if !was_periodic_refresh
+                    // Periodic and push refreshes only stream model parts whose
+                    // effects are fully applied above. Avoid selection-dependent
+                    // Git reloads that the old synchronous push path never needed.
+                    if !was_lightweight_refresh
                         && (was_refresh
                             || self.commit_path_filter.is_some()
                             || !self.commit_branch_filter.is_empty()
@@ -2464,6 +2486,9 @@ impl Gui {
 
     /// Apply one batch of terminal events before the next paint.
     fn handle_event_batch(&mut self, events: Vec<Event>) {
+        if !events.is_empty() {
+            self.last_user_activity_at = Instant::now();
+        }
         for event in events {
             match event {
                 Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
@@ -3412,6 +3437,12 @@ impl Gui {
         if self.auto_fetch_in_flight {
             return;
         }
+        // Speculative network work should only start while the user is idle.
+        // This sharply reduces the chance that a manual push/pull/checkout has
+        // to queue behind a fetch that lazygitrs started on its own.
+        if self.last_user_activity_at.elapsed() < AUTO_FETCH_IDLE_GRACE {
+            return;
+        }
         // Don't race a user-initiated push/pull/fetch (even with
         // --no-write-fetch-head, concurrent network ops are wasteful and can
         // still contend on packed-refs / remote-tracking updates).
@@ -3419,7 +3450,7 @@ impl Gui {
             return;
         }
         let due = match self.last_auto_fetch_at {
-            None => true, // first fetch happens immediately after startup
+            None => false,
             Some(t) => t.elapsed().as_secs() >= interval,
         };
         if !due {
@@ -3526,9 +3557,12 @@ impl Gui {
                     }
                     match kind {
                         RemoteOpKind::Push => {
-                            if self.refresh_after_push().is_err() {
-                                // Fall back to the existing full refresh if the
-                                // targeted post-push refresh fails.
+                            // Push cannot change local worktree contents or commit
+                            // topology. Refresh only branch/upstream, remote refs,
+                            // and pushed decorations, and do it off the UI thread.
+                            if !self.start_background_push_refresh() {
+                                // A pre-existing model refresh may have captured
+                                // state from before the push. Queue a follow-up.
                                 self.needs_refresh = true;
                             }
                         }
@@ -3655,36 +3689,6 @@ impl Gui {
                 }
             }
         }
-    }
-
-    fn refresh_after_push(&mut self) -> Result<()> {
-        let branches = self.git.load_branches()?;
-        let remotes = self.git.load_remotes()?;
-        let unpushed = self.git.unpushed_commit_hashes()?;
-
-        {
-            let mut model = self.model.lock().unwrap();
-
-            model.branches = branches;
-            model.remotes = remotes;
-            GitCommands::apply_unpushed_status(&mut model.commits, &unpushed);
-
-            if !self.remote_branches_name.is_empty() {
-                let refreshed = model
-                    .remotes
-                    .iter()
-                    .find(|remote| remote.name == self.remote_branches_name)
-                    .map(|remote| remote.branches.clone());
-
-                if let Some(branches) = refreshed {
-                    model.sub_remote_branches = branches;
-                }
-            }
-        }
-
-        self.last_refresh_at = Instant::now();
-
-        Ok(())
     }
 
     /// Kick off a status-only files refresh on a background thread.
@@ -10624,6 +10628,31 @@ impl Gui {
         true
     }
 
+    /// Kick off the minimal refresh required after a successful push.
+    ///
+    /// A push cannot modify the local worktree or local commit topology, so the
+    /// only model state that needs to catch up is branch tracking metadata,
+    /// remote-tracking refs, and pushed/unpushed commit decorations.
+    fn start_background_push_refresh(&mut self) -> bool {
+        if self.refresh_in_progress || self.initial_load_rx.is_some() {
+            return false;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        self.initial_load_rx = Some(rx);
+        self.initial_load_received = 0;
+        self.initial_load_expected = PUSH_MODEL_PART_COUNT;
+        self.refresh_in_progress = true;
+        self.needs_refresh = false;
+
+        let git = Arc::clone(&self.git);
+        std::thread::spawn(move || {
+            git.load_model_after_push_streaming(&tx);
+        });
+
+        true
+    }
+
     fn start_background_fetch_refresh(&mut self) -> bool {
         if self.refresh_in_progress || self.initial_load_rx.is_some() {
             return false;
@@ -13290,6 +13319,86 @@ mod terminal_mouse_tests {
         );
         assert_eq!(model.commits.len(), old_len);
         assert_eq!(model.commits[0].name, "rewritten head");
+    }
+
+    #[test]
+    fn push_uses_targeted_background_refresh() {
+        let repo = TempRepo::new("push-targeted-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.remote_op_label = Some("Pushing".into());
+        gui.remote_op_tx
+            .send((
+                RemoteOpKind::Push,
+                Ok(RemoteOpCompletion {
+                    head: None,
+                    refs_changed: None,
+                    head_changed: None,
+                }),
+            ))
+            .unwrap();
+        gui.receive_remote_op_results();
+
+        assert!(!gui.needs_refresh);
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, PUSH_MODEL_PART_COUNT);
+
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+        assert_eq!(parts.len(), PUSH_MODEL_PART_COUNT);
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Branches(_)))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Remotes(_)))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::UnpushedCommitHashes(_)))
+        );
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Files(_))));
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Commits(_))));
+    }
+
+    #[test]
+    fn auto_fetch_waits_for_interval_and_user_idle() {
+        let repo = TempRepo::new("auto-fetch-idle-priority");
+        let mut gui = checkout_test_gui(&repo);
+        let mut config = crate::config::AppConfig::default();
+        config.user_config.git.auto_fetch = true;
+        config.user_config.refresher.fetch_interval = 60;
+        gui.config = Arc::new(config);
+
+        // Startup initializes the interval clock, so even an idle UI must not
+        // immediately compete with the user's first checkout/push/pull.
+        gui.last_auto_fetch_at = Some(Instant::now());
+        gui.last_user_activity_at = Instant::now() - AUTO_FETCH_IDLE_GRACE;
+        gui.maybe_start_auto_fetch();
+        assert!(!gui.auto_fetch_in_flight);
+
+        // Once the interval is due, recent input still keeps speculative fetch
+        // out of the network lane.
+        gui.last_auto_fetch_at = Some(Instant::now() - Duration::from_secs(61));
+        gui.last_user_activity_at = Instant::now();
+        gui.maybe_start_auto_fetch();
+        assert!(!gui.auto_fetch_in_flight);
+
+        // After a short idle window the background fetch is allowed to start.
+        gui.last_user_activity_at = Instant::now() - AUTO_FETCH_IDLE_GRACE;
+        gui.maybe_start_auto_fetch();
+        assert!(gui.auto_fetch_in_flight);
+
+        // Ensure the worker is finished before the temporary repository drops.
+        let result = gui
+            .auto_fetch_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("background fetch should finish");
+        assert!(result.is_ok());
     }
 
     #[test]

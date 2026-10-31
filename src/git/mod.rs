@@ -707,6 +707,37 @@ impl GitCommands {
         }
     }
 
+    /// Refresh only state that can change as a result of a successful push.
+    ///
+    /// Keep the three independent reads off the UI thread and run them in
+    /// parallel. In particular, do not rebuild the global commit history: push
+    /// does not change local commit topology or worktree contents.
+    pub fn load_model_after_push_streaming(self: &Arc<Self>, tx: &mpsc::Sender<ModelPart>) {
+        let tx_branches = tx.clone();
+        let git = Arc::clone(self);
+        std::thread::spawn(move || {
+            if let Ok(branches) = git.load_branches() {
+                let _ = tx_branches.send(ModelPart::Branches(branches));
+            }
+        });
+
+        let tx_remotes = tx.clone();
+        let git = Arc::clone(self);
+        std::thread::spawn(move || {
+            if let Ok(remotes) = git.load_remotes() {
+                let _ = tx_remotes.send(ModelPart::Remotes(remotes));
+            }
+        });
+
+        let tx_unpushed = tx.clone();
+        let git = Arc::clone(self);
+        std::thread::spawn(move || {
+            if let Ok(unpushed) = git.unpushed_commit_hashes() {
+                let _ = tx_unpushed.send(ModelPart::UnpushedCommitHashes(unpushed));
+            }
+        });
+    }
+
     pub fn load_model_after_fetch_streaming(
         self: &Arc<Self>,
         tx: &mpsc::Sender<ModelPart>,
