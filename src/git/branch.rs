@@ -82,6 +82,51 @@ impl GitCommands {
         Ok(())
     }
 
+    /// Return whether a normal `git branch -d` would require force deletion.
+    ///
+    /// Git considers a branch safe to delete when its tip is reachable from its
+    /// configured upstream, or from HEAD when it has no resolvable upstream.
+    /// Mirror that rule so worktree-aware deletion can ask for force permission
+    /// before removing the linked worktree.
+    pub fn branch_delete_requires_force(&self, name: &str) -> Result<bool> {
+        let branch_ref = format!("refs/heads/{name}");
+        let upstream = self
+            .git()
+            .args(&[
+                "for-each-ref",
+                "--format=%(upstream)",
+                branch_ref.as_str(),
+            ])
+            .run_expecting_success()?
+            .stdout_trimmed()
+            .to_string();
+        let merge_target = if upstream.is_empty() {
+            "HEAD"
+        } else {
+            upstream.as_str()
+        };
+
+        let result = self
+            .git()
+            .args(&[
+                "merge-base",
+                "--is-ancestor",
+                branch_ref.as_str(),
+                merge_target,
+            ])
+            .run()?;
+
+        match result.exit_code {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => anyhow::bail!(
+                "Failed to determine whether branch '{}' is fully merged: {}",
+                name,
+                result.combined_output()
+            ),
+        }
+    }
+
     pub fn delete_branch(&self, name: &str, force: bool) -> Result<()> {
         let flag = if force { "-D" } else { "-d" };
         self.git()

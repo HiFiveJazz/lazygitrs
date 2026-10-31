@@ -1,6 +1,9 @@
-use anyhow::Result;
+use std::path::Path;
+
+use anyhow::{Result, bail};
 
 use super::GitCommands;
+use crate::os::cmd::CmdBuilder;
 use crate::model::Worktree;
 
 impl GitCommands {
@@ -65,6 +68,51 @@ impl GitCommands {
         }
 
         Ok(worktrees)
+    }
+
+    /// Return the linked worktree currently checking out `branch`, if any.
+    ///
+    /// The current worktree is intentionally excluded: callers already reject
+    /// deletion of the current branch separately.
+    pub fn linked_worktree_for_branch(&self, branch: &str) -> Result<Option<Worktree>> {
+        Ok(self
+            .load_worktrees()?
+            .into_iter()
+            .find(|worktree| !worktree.is_current && worktree.branch == branch))
+    }
+
+    /// Refuse destructive worktree removal when the linked worktree contains
+    /// tracked or untracked changes.  This deliberately does not use
+    /// `git worktree remove --force`; preserving Git's safety boundary is more
+    /// important than making branch deletion succeed automatically.
+    pub fn ensure_worktree_clean_for_removal(&self, path: &str) -> Result<()> {
+        let result = CmdBuilder::git_no_optional_locks()
+            .cwd_path(Path::new(path))
+            .args(&["status", "--porcelain", "--untracked-files=normal"])
+            .run_expecting_success()?;
+
+        if !result.stdout.trim().is_empty() {
+            bail!(
+                "Worktree '{}' has local changes. Open that worktree and commit, stash, or discard them before removing it. Lazygitrs will not force-remove a dirty worktree.",
+                path
+            );
+        }
+        Ok(())
+    }
+
+    /// Remove a disposable linked worktree before deleting its branch. If its
+    /// directory has already disappeared, prune the stale administrative entry
+    /// instead. Existing worktrees are never removed with `--force`.
+    pub fn remove_worktree_for_branch_deletion(&self, path: &str) -> Result<()> {
+        if !Path::new(path).exists() {
+            self.git()
+                .args(&["worktree", "prune"])
+                .run_expecting_success()?;
+            return Ok(());
+        }
+
+        self.ensure_worktree_clean_for_removal(path)?;
+        self.remove_worktree(path, false)
     }
 
     pub fn create_worktree(&self, path: &str, branch: &str) -> Result<()> {

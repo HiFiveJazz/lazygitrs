@@ -1,6 +1,6 @@
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::popup::{MenuItem, PopupState, make_textarea};
+use crate::gui::popup::{MenuItem, MessageKind, PopupState, make_textarea};
 use crate::gui::{Gui, RemoteOpKind};
 use crate::os::platform::Platform;
 use anyhow::Result;
@@ -260,32 +260,7 @@ fn delete_branch(gui: &mut Gui) -> Result<()> {
             description: String::new(),
             key: Some("c".to_string()),
             action: Some(Box::new(move |gui| {
-                match gui.git.delete_branch(&name_local, false) {
-                    Ok(()) => {
-                        gui.needs_refresh = true;
-                    }
-                    Err(e) => {
-                        let err_msg = format!("{}", e);
-                        if err_msg.contains("not fully merged") {
-                            let name_force = name_local.clone();
-                            gui.popup = PopupState::Confirm {
-                                title: "Force delete?".to_string(),
-                                message: format!(
-                                    "'{}' is not fully merged. Are you sure you want to delete it?",
-                                    name_local
-                                ),
-                                on_confirm: Box::new(move |gui| {
-                                    gui.git.delete_branch(&name_force, true)?;
-                                    gui.needs_refresh = true;
-                                    Ok(())
-                                }),
-                            };
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
-                Ok(())
+                delete_local_branch_worktree_aware(gui, name_local.clone(), false)
             })),
         }];
 
@@ -331,12 +306,11 @@ fn delete_branch(gui: &mut Gui) -> Result<()> {
                         .and_then(|u| u.split('/').next())
                         .unwrap_or("origin")
                         .to_string();
-                    let name = name_both.clone();
-                    gui.start_remote_op(RemoteOpKind::Push, "Deleting branch", "", move |git| {
-                        git.delete_branch(&name, true)?;
-                        git.delete_remote_branch(&remote, &name)
-                    });
-                    Ok(())
+                    delete_local_and_remote_branch_worktree_aware(
+                        gui,
+                        name_both.clone(),
+                        remote,
+                    )
                 })),
             });
         } else {
@@ -362,6 +336,156 @@ fn delete_branch(gui: &mut Gui) -> Result<()> {
             loading_index: None,
         };
     }
+    Ok(())
+}
+
+
+fn maybe_prompt_worktree_branch_delete(
+    gui: &mut Gui,
+    name: &str,
+    force: bool,
+    remote: Option<String>,
+) -> Result<bool> {
+    let Some(worktree) = gui.git.linked_worktree_for_branch(name)? else {
+        return Ok(false);
+    };
+
+    if worktree.is_main {
+        gui.popup = PopupState::Message {
+            title: "Branch is used by the main worktree".to_string(),
+            message: format!(
+                "Branch '{}' is checked out in the main worktree:\n\n  {}\n\nSwitch that worktree to another branch before deleting {}.",
+                name,
+                worktree.path,
+                if remote.is_some() {
+                    "it locally or remotely"
+                } else {
+                    "this branch"
+                }
+            ),
+            kind: MessageKind::Info,
+        };
+        return Ok(true);
+    }
+
+    // Once the worktree is removed, a normal `git branch -d` may still fail if
+    // the branch is not fully merged. Determine that before removing anything
+    // so the confirmation can explicitly authorize `-D` rather than surfacing a
+    // second error after the worktree has already gone.
+    let requires_force = !force && gui.git.branch_delete_requires_force(name)?;
+    let delete_force = force || requires_force;
+
+    let path = worktree.path;
+    let stale = !std::path::Path::new(&path).exists();
+    let delete_description = if let Some(remote_name) = remote.as_deref() {
+        format!(
+            "force-delete the local branch, and delete {}/{}",
+            remote_name, name
+        )
+    } else if delete_force {
+        "force-delete the branch".to_string()
+    } else {
+        "delete the branch".to_string()
+    };
+    let merge_warning = if requires_force {
+        "\n\nThis branch is not fully merged. Confirming will delete it with `git branch -D`."
+    } else {
+        ""
+    };
+
+    let message = if stale {
+        format!(
+            "Branch '{}' is still registered to a worktree whose directory no longer exists:\n\n  {}\n\nPrune the stale worktree metadata and {}?{}",
+            name, path, delete_description, merge_warning
+        )
+    } else {
+        format!(
+            "Branch '{}' is checked out in another worktree:\n\n  {}\n\nRemove that worktree and {}?{}\n\nDirty worktrees are never force-removed.",
+            name, path, delete_description, merge_warning
+        )
+    };
+
+    let branch = name.to_string();
+    gui.popup = PopupState::Confirm {
+        title: "Branch is used by a worktree".to_string(),
+        message,
+        on_confirm: Box::new(move |gui| {
+            let path = path.clone();
+            let branch = branch.clone();
+            if let Some(remote) = remote.clone() {
+                // Keep remote deletion on the serialized network lane. `Other`
+                // intentionally requests a full refresh afterward because this
+                // operation also removes a worktree.
+                gui.start_remote_op(
+                    RemoteOpKind::Other,
+                    "Deleting branch",
+                    "",
+                    move |git| {
+                        git.remove_worktree_for_branch_deletion(&path)?;
+                        git.delete_branch(&branch, delete_force)?;
+                        git.delete_remote_branch(&remote, &branch)
+                    },
+                );
+            } else {
+                gui.start_background_mutation(
+                    "Removing worktree and deleting branch",
+                    move |git| {
+                        git.remove_worktree_for_branch_deletion(&path)?;
+                        git.delete_branch(&branch, delete_force)
+                    },
+                );
+            }
+            Ok(())
+        }),
+    };
+    Ok(true)
+}
+
+fn delete_local_branch_worktree_aware(
+    gui: &mut Gui,
+    name: String,
+    force: bool,
+) -> Result<()> {
+    if maybe_prompt_worktree_branch_delete(gui, &name, force, None)? {
+        return Ok(());
+    }
+
+    match gui.git.delete_branch(&name, force) {
+        Ok(()) => {
+            gui.needs_refresh = true;
+            Ok(())
+        }
+        Err(e) if !force && e.to_string().contains("not fully merged") => {
+            let name_force = name.clone();
+            gui.popup = PopupState::Confirm {
+                title: "Force delete?".to_string(),
+                message: format!(
+                    "'{}' is not fully merged. Are you sure you want to delete it?",
+                    name
+                ),
+                on_confirm: Box::new(move |gui| {
+                    delete_local_branch_worktree_aware(gui, name_force.clone(), true)
+                }),
+            };
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn delete_local_and_remote_branch_worktree_aware(
+    gui: &mut Gui,
+    name: String,
+    remote: String,
+) -> Result<()> {
+    if maybe_prompt_worktree_branch_delete(gui, &name, true, Some(remote.clone()))? {
+        return Ok(());
+    }
+
+    gui.start_remote_op(RemoteOpKind::Push, "Deleting branch", "", move |git| {
+        git.delete_branch(&name, true)?;
+        git.delete_remote_branch(&remote, &name)
+    });
     Ok(())
 }
 

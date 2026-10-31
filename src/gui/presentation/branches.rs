@@ -31,6 +31,17 @@ pub fn render_branch_list<'a>(
                 Span::styled(branch.name.clone(), name_style),
             ];
 
+            if let Some(worktree) = model
+                .worktrees
+                .iter()
+                .find(|worktree| !worktree.is_current && worktree.branch == branch.name)
+            {
+                spans.push(Span::styled(
+                    format!(" ↪ {}", worktree.path),
+                    Style::default().fg(theme.text_dimmed),
+                ));
+            }
+
             // Recency
             if !branch.recency.is_empty() {
                 spans.insert(

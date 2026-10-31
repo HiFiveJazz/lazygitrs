@@ -1635,6 +1635,143 @@ mod tests {
     }
 
     #[test]
+    fn linked_worktree_for_branch_finds_other_worktree() {
+        let temp = TempDir::new("branch-linked-worktree");
+        let repo = temp.path().join("repo");
+        let linked = temp.path().join("linked");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let run = |args: &[&str]| run_test_git(&repo, args);
+
+        run(&["init", "-b", "main"]);
+        std::fs::write(repo.join("file"), "content").expect("write file");
+        run(&["add", "file"]);
+        run(&["commit", "-m", "init"]);
+        run(&[
+            "worktree",
+            "add",
+            "-b",
+            "linked",
+            linked.to_str().expect("utf8 linked path"),
+        ]);
+
+        let git = GitCommands::new(&repo).expect("create git commands");
+        let worktree = git
+            .linked_worktree_for_branch("linked")
+            .expect("load linked worktree")
+            .expect("linked branch worktree");
+        assert_eq!(
+            Path::new(&worktree.path).canonicalize().unwrap(),
+            linked.canonicalize().unwrap()
+        );
+        assert!(!worktree.is_current);
+        assert!(!worktree.is_main);
+    }
+
+    #[test]
+    fn branch_delete_requires_force_for_unmerged_branch() {
+        let temp = TempDir::new("branch-delete-force-check");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let run = |args: &[&str]| run_test_git(&repo, args);
+
+        run(&["init", "-b", "main"]);
+        run(&["commit", "--allow-empty", "-m", "base"]);
+        run(&["checkout", "-b", "feature"]);
+        run(&["commit", "--allow-empty", "-m", "feature"]);
+        run(&["checkout", "main"]);
+
+        let git = GitCommands::new(&repo).expect("create git commands");
+        assert!(git.branch_delete_requires_force("feature").unwrap());
+
+        run(&["merge", "--ff-only", "feature"]);
+        assert!(!git.branch_delete_requires_force("feature").unwrap());
+    }
+
+    #[test]
+    fn branch_delete_safety_uses_upstream_when_available() {
+        let temp = TempDir::new("branch-delete-upstream-check");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let run = |args: &[&str]| run_test_git(&repo, args);
+
+        run(&["init", "-b", "main"]);
+        run(&["remote", "add", "origin", "https://example.invalid/repo"]);
+        run(&["commit", "--allow-empty", "-m", "base"]);
+        run(&["checkout", "-b", "feature"]);
+        run(&["commit", "--allow-empty", "-m", "feature"]);
+        let feature = run(&["rev-parse", "HEAD"]);
+        run(&["update-ref", "refs/remotes/origin/feature", &feature]);
+        run(&["branch", "--set-upstream-to=origin/feature", "feature"]);
+        run(&["checkout", "main"]);
+
+        let git = GitCommands::new(&repo).expect("create git commands");
+        assert!(!git.branch_delete_requires_force("feature").unwrap());
+    }
+
+    #[test]
+    fn branch_worktree_removal_refuses_dirty_worktree() {
+        let temp = TempDir::new("dirty-branch-worktree");
+        let repo = temp.path().join("repo");
+        let linked = temp.path().join("linked");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let run = |args: &[&str]| run_test_git(&repo, args);
+
+        run(&["init", "-b", "main"]);
+        std::fs::write(repo.join("file"), "content").expect("write file");
+        run(&["add", "file"]);
+        run(&["commit", "-m", "init"]);
+        run(&[
+            "worktree",
+            "add",
+            "-b",
+            "linked",
+            linked.to_str().expect("utf8 linked path"),
+        ]);
+        std::fs::write(linked.join("file"), "dirty").expect("dirty linked worktree");
+
+        let git = GitCommands::new(&repo).expect("create git commands");
+        let err = git
+            .remove_worktree_for_branch_deletion(linked.to_str().unwrap())
+            .expect_err("dirty worktree must be preserved");
+        assert!(err.to_string().contains("local changes"));
+        assert!(linked.exists());
+        assert!(git
+            .linked_worktree_for_branch("linked")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn branch_worktree_removal_prunes_missing_worktree_metadata() {
+        let temp = TempDir::new("stale-branch-worktree");
+        let repo = temp.path().join("repo");
+        let linked = temp.path().join("linked");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let run = |args: &[&str]| run_test_git(&repo, args);
+
+        run(&["init", "-b", "main"]);
+        std::fs::write(repo.join("file"), "content").expect("write file");
+        run(&["add", "file"]);
+        run(&["commit", "-m", "init"]);
+        run(&[
+            "worktree",
+            "add",
+            "-b",
+            "linked",
+            linked.to_str().expect("utf8 linked path"),
+        ]);
+        std::fs::remove_dir_all(&linked).expect("remove linked worktree directory");
+
+        let git = GitCommands::new(&repo).expect("create git commands");
+        git.remove_worktree_for_branch_deletion(linked.to_str().unwrap())
+            .expect("prune stale worktree metadata");
+        assert!(git
+            .linked_worktree_for_branch("linked")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn load_files_is_fast_on_unborn_repo_with_many_untracked() {
         let temp = TempDir::new("many-untracked");
         let repo = temp.path().join("repo");
