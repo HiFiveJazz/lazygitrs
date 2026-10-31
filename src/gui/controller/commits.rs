@@ -1027,6 +1027,15 @@ fn open_commit_in_browser(gui: &mut Gui) -> Result<()> {
 }
 
 pub fn open_commit_in_browser_for(gui: &mut Gui, hash: String) -> Result<()> {
+    if !gui.git.origin_contains_commit(&hash)? {
+        gui.popup = PopupState::Message {
+            title: "Commit is local-only".to_string(),
+            message: "This commit is not reachable from an origin remote-tracking ref yet. Push it (and fetch if needed) before opening its remote URL.".to_string(),
+            kind: MessageKind::Info,
+        };
+        return Ok(());
+    }
+
     let url = gui
         .git
         .get_commit_url(&hash, &gui.config.user_config.services)?;

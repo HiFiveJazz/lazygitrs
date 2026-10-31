@@ -3,7 +3,7 @@ use crate::model::{
     Commit, CommitStatus,
     commit::{CommitStat, Divergence},
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Default)]
@@ -579,6 +579,24 @@ impl GitCommands {
         } else {
             commit.refs.insert(0, head_ref);
         }
+    }
+
+    /// Build the trailer that `git commit --signoff` would append, but return
+    /// it to the TUI so the user can see and edit it before committing.
+    pub fn signoff_trailer(&self) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["var", "GIT_COMMITTER_IDENT"])
+            .run_expecting_success()?;
+        let ident = result.stdout.trim();
+        let end = ident
+            .rfind('>')
+            .ok_or_else(|| anyhow!("Git returned an invalid committer identity: {ident}"))?;
+        let identity = ident[..=end].trim();
+        if identity.is_empty() {
+            return Err(anyhow!("Git did not return a committer identity"));
+        }
+        Ok(format!("Signed-off-by: {identity}"))
     }
 
     pub fn create_commit(&self, message: &str, sign_off: bool) -> Result<()> {

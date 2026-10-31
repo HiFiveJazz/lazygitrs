@@ -4,7 +4,7 @@ use std::time::Instant;
 use anyhow::Result;
 use crossterm::event::KeyEvent;
 use tui_textarea::{CursorMove, TextArea};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::Gui;
 
@@ -26,20 +26,128 @@ pub fn sync_list_picker_prefer_free_entry(core: &mut ListPickerCore, free_entry_
     }
 }
 
-/// Normalize an externally-sourced commit body for the soft-wrapped editor.
+/// Normalize an externally-sourced commit body for the wrapped editor.
 ///
-/// Soft-wrap is display-only (`BodySoftWrap` / `WrapLayout`), so logical
-/// newlines from AI output, clipboard pastes, and history must be preserved.
+/// During editing, wrapping is visual (`BodySoftWrap` / `WrapLayout`) so
+/// logical newlines from AI output, clipboard pastes, and history are preserved.
+/// On submit, prose is hard-wrapped into the stored commit message.
 /// Joining consecutive lines used to collapse bullet lists into one line
 /// (`- a\n- b` → `- a - b`); we only normalize `\r\n` / trailing `\r`.
 pub fn unwrap_commit_body(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// Source-of-truth for the commit body when soft-wrap is in effect. The body
-/// textarea becomes a *display* of this raw text — wrap-induced newlines never
-/// touch the actual commit message, but user-pressed newlines (Shift+Enter,
-/// or Ctrl+J on terminals that encode Shift+Enter that way) do.
+/// Preferred dimensions for the two-field commit editor.  The inner width is
+/// deliberately large enough to show a conventional 72-column commit body
+/// without visually wrapping it a second time.
+pub fn commit_popup_width(terminal_width: u16) -> u16 {
+    terminal_width
+        .saturating_sub(4)
+        .min(84)
+        .max(40)
+        .min(terminal_width)
+}
+
+pub fn commit_popup_height(terminal_height: u16) -> u16 {
+    terminal_height
+        .saturating_sub(4)
+        .min(28)
+        .max(16)
+        .min(terminal_height)
+}
+
+fn looks_like_commit_trailer(line: &str) -> bool {
+    let Some((token, _)) = line.split_once(':') else {
+        return false;
+    };
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+fn wrap_commit_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0
+        || line.is_empty()
+        || line.chars().next().is_some_and(char::is_whitespace)
+        || line.starts_with('>')
+        || line.starts_with('|')
+        || line == "---"
+        || looks_like_commit_trailer(line)
+        || UnicodeWidthStr::width(line) <= width
+    {
+        return vec![line.to_string()];
+    }
+
+    let (first_prefix, continuation_prefix, content) = if let Some(rest) = line.strip_prefix("- ") {
+        ("- ", "  ", rest)
+    } else if let Some(rest) = line.strip_prefix("* ") {
+        ("* ", "  ", rest)
+    } else if let Some(rest) = line.strip_prefix("+ ") {
+        ("+ ", "  ", rest)
+    } else {
+        let numbered = line
+            .find(". ")
+            .filter(|dot| *dot > 0 && line[..*dot].chars().all(|c| c.is_ascii_digit()));
+        if let Some(dot) = numbered {
+            let prefix = &line[..dot + 2];
+            let rest = &line[dot + 2..];
+            // The continuation indent only has to line up with the prose, so
+            // leaking this tiny string is unnecessary; build it below.
+            return wrap_commit_words(prefix, &" ".repeat(UnicodeWidthStr::width(prefix)), rest, width);
+        }
+        ("", "", line)
+    };
+
+    wrap_commit_words(first_prefix, continuation_prefix, content, width)
+}
+
+fn wrap_commit_words(prefix: &str, continuation_prefix: &str, content: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = prefix.to_string();
+    let mut has_word = false;
+
+    for word in content.split_whitespace() {
+        let separator = if has_word { " " } else { "" };
+        let candidate_width = UnicodeWidthStr::width(current.as_str())
+            + UnicodeWidthStr::width(separator)
+            + UnicodeWidthStr::width(word);
+
+        if has_word && candidate_width > width {
+            out.push(current);
+            current = continuation_prefix.to_string();
+            current.push_str(word);
+        } else {
+            current.push_str(separator);
+            current.push_str(word);
+        }
+        has_word = true;
+    }
+
+    if has_word || !prefix.is_empty() {
+        out.push(current);
+    } else {
+        out.push(String::new());
+    }
+    out
+}
+
+/// Turn the commit-body editor's visual wrapping into real commit-message
+/// line breaks.  Existing explicit newlines remain hard boundaries; prose on
+/// each logical line is wrapped independently.  Machine-readable trailers and
+/// indented/preformatted lines are deliberately left alone.
+pub fn hard_wrap_commit_body(text: &str, width: usize) -> String {
+    unwrap_commit_body(text)
+        .split('\n')
+        .flat_map(|line| wrap_commit_line(line, width))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Source-of-truth for the commit body while editing. The body textarea is a
+/// soft-wrapped *display* of this raw text; user-pressed newlines remain hard
+/// boundaries and the final submit step converts visual prose wrapping into
+/// real commit-message line breaks.
 ///
 /// Cursor is a char index into `raw` (not bytes) so multi-byte input is safe.
 #[derive(Debug, Default, Clone)]
@@ -231,6 +339,36 @@ impl BodySoftWrap {
         let raw = text.into();
         self.cursor = raw.chars().count();
         self.raw = raw;
+    }
+
+    pub fn move_to_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    /// Append a commit trailer at the bottom while keeping the conventional
+    /// blank line between prose and the trailer block. Returns false when the
+    /// exact trailer is already present.
+    pub fn append_trailer(&mut self, trailer: &str) -> bool {
+        let trailer = trailer.trim();
+        if trailer.is_empty() || self.raw.lines().any(|line| line.trim() == trailer) {
+            return false;
+        }
+
+        let trimmed = self.raw.trim_end().to_string();
+        let separator = if trimmed.is_empty() {
+            ""
+        } else if trimmed
+            .lines()
+            .next_back()
+            .is_some_and(|line| looks_like_commit_trailer(line.trim()))
+        {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        self.raw = format!("{trimmed}{separator}{trailer}");
+        self.cursor = self.raw.chars().count();
+        true
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -841,8 +979,8 @@ pub enum PopupState {
         summary_textarea: TextArea<'static>,
         body_textarea: TextArea<'static>,
         /// Source-of-truth for body content. `body_textarea` is a soft-wrapped
-        /// view of this string. All body edits flow through here so wrap-induced
-        /// line breaks never end up in the actual commit message.
+        /// view of this string. All body edits flow through here; on submit,
+        /// prose is hard-wrapped to the configured commit-message width.
         body_state: BodySoftWrap,
         focus: CommitInputFocus,
         on_confirm: InputAction,
@@ -1027,10 +1165,41 @@ pub fn set_commit_summary_text(textarea: &mut TextArea<'static>, text: &str) {
 }
 
 pub fn make_commit_body_textarea() -> TextArea<'static> {
-    let mut ta = make_textarea("Optional");
+    let mut ta = make_textarea("Optional — hard-wrapped on commit");
     // Body starts unfocused — hide cursor
     ta.set_cursor_style(ratatui::style::Style::default());
     ta
+}
+
+/// Reset a restored commit draft to a readable top-left viewport.  Draft
+/// contents are preserved; only focus, cursor position, and textarea scroll
+/// state are reset.
+pub fn reset_commit_input_view(popup: &mut PopupState, wrap_width: usize) {
+    let PopupState::CommitInput {
+        summary_textarea,
+        body_textarea,
+        body_state,
+        focus,
+        ..
+    } = popup
+    else {
+        return;
+    };
+
+    let summary = summary_textarea.lines().join("");
+    set_commit_summary_text(summary_textarea, &summary);
+    summary_textarea.move_cursor(CursorMove::Jump(0, 0));
+
+    body_state.move_to_start();
+    *body_textarea = make_commit_body_textarea();
+    body_state.render_into(body_textarea, wrap_width.max(1));
+
+    let visible = ratatui::style::Style::default()
+        .add_modifier(ratatui::style::Modifier::REVERSED);
+    let hidden = ratatui::style::Style::default();
+    summary_textarea.set_cursor_style(visible);
+    body_textarea.set_cursor_style(hidden);
+    *focus = CommitInputFocus::Summary;
 }
 
 pub fn make_command_palette_search_textarea() -> TextArea<'static> {
@@ -1112,7 +1281,7 @@ impl CommandEntry {
 
 #[cfg(test)]
 mod commit_body_wrap_tests {
-    use super::{BodySoftWrap, WrapLayout, unwrap_commit_body};
+    use super::{BodySoftWrap, WrapLayout, hard_wrap_commit_body, unwrap_commit_body};
 
     #[test]
     fn unwrap_preserves_newlines_and_bullets() {
@@ -1151,6 +1320,38 @@ mod commit_body_wrap_tests {
         state.render_into(&mut ta, 80);
         assert_eq!(state.raw(), "- something\n- something 2");
         assert_eq!(ta.lines().join("\n"), "- something\n- something 2");
+    }
+
+    #[test]
+    fn hard_wrap_commit_body_writes_real_prose_lines() {
+        let body = "This is a deliberately long commit-message sentence that should become real lines instead of remaining one long logical line in the commit object.";
+        let wrapped = hard_wrap_commit_body(body, 40);
+        assert!(wrapped.lines().all(|line| line.chars().count() <= 40));
+        assert!(wrapped.contains('\n'));
+    }
+
+    #[test]
+    fn hard_wrap_preserves_trailers_and_preformatted_lines() {
+        let trailer = "Signed-off-by: Example Person With A Very Long Name <example.person@example.com>";
+        let code = "    this intentionally remains a long preformatted line even when the configured width is narrow";
+        let wrapped = hard_wrap_commit_body(&format!("Short prose\n\n{trailer}\n{code}"), 32);
+        assert!(wrapped.contains(trailer));
+        assert!(wrapped.contains(code));
+    }
+
+    #[test]
+    fn append_trailer_creates_one_trailer_block_and_deduplicates() {
+        let mut state = BodySoftWrap::from_text("Explain why this changes behavior.");
+        assert!(state.append_trailer("Signed-off-by: Test <test@example.com>"));
+        assert_eq!(
+            state.raw(),
+            "Explain why this changes behavior.\n\nSigned-off-by: Test <test@example.com>"
+        );
+        assert!(!state.append_trailer("Signed-off-by: Test <test@example.com>"));
+        assert!(state.append_trailer("Reviewed-by: Reviewer <r@example.com>"));
+        assert!(state.raw().ends_with(
+            "Signed-off-by: Test <test@example.com>\nReviewed-by: Reviewer <r@example.com>"
+        ));
     }
 }
 

@@ -19,7 +19,10 @@ use crate::pager::side_by_side::{self, DiffPanel, DiffPanelLayout, DiffViewLayou
 use super::ScreenMode;
 use super::context::{ContextId, ContextManager, SideWindow};
 use super::layout::{self, LayoutState};
-use super::popup::{CommitInputFocus, EmailPatchFocus, PopupState, list_picker_matching_indices};
+use super::popup::{
+    CommitInputFocus, EmailPatchFocus, PopupState, commit_popup_height, commit_popup_width,
+    list_picker_matching_indices,
+};
 use super::presentation;
 
 pub fn render(
@@ -3486,16 +3489,15 @@ pub fn commit_ai_button_geometry(popup: &PopupState, area: Rect) -> Option<Rect>
     if area.width < 10 || area.height < 6 {
         return None;
     }
-    let popup_width = (area.width * 60 / 100).min(60).max(30).min(area.width);
+    let popup_width = commit_popup_width(area.width);
     if popup_width < 16 {
         return None;
     }
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let ta_height: u16 = match popup {
-        PopupState::CommitInput { .. } => 16,
+        PopupState::CommitInput { .. } => commit_popup_height(area.height),
         _ => return None,
     };
-    let ta_height = ta_height.min(area.height);
     if ta_height < 7 {
         return None;
     }
@@ -3519,8 +3521,8 @@ pub fn commit_description_textarea_geometry(popup: &PopupState, area: Rect) -> O
         return None;
     };
 
-    let popup_width = (area.width * 60 / 100).min(60).max(30).min(area.width);
-    let ta_height = 16u16.min(area.height);
+    let popup_width = commit_popup_width(area.width);
+    let ta_height = commit_popup_height(area.height);
     let ta_y = (area.height.saturating_sub(ta_height)) / 2;
     let ta_rect = Rect::new(
         (area.width.saturating_sub(popup_width)) / 2,
@@ -3533,19 +3535,19 @@ pub fn commit_description_textarea_geometry(popup: &PopupState, area: Rect) -> O
         vertical: 1,
     });
 
-    if inner.height <= 6 {
+    if inner.height <= 7 {
         return None;
     }
 
-    let body_height = inner.height.saturating_sub(6);
+    let body_height = inner.height.saturating_sub(7);
     (body_height > 0).then(|| Rect::new(inner.x, inner.y + 4, inner.width, body_height))
 }
 
 /// Tooltip rect placed one row above the popup, right-aligned with the button.
 fn commit_ai_tooltip_rect(area: Rect, btn_rect: Rect, tip_w: u16) -> Rect {
-    let popup_width = (area.width * 60 / 100).min(60).max(30).min(area.width);
+    let popup_width = commit_popup_width(area.width);
     let x = (area.width.saturating_sub(popup_width)) / 2;
-    let ta_height: u16 = 16u16.min(area.height);
+    let ta_height = commit_popup_height(area.height);
     let ta_y = (area.height.saturating_sub(ta_height)) / 2;
 
     let mut tip_x = (btn_rect.x + btn_rect.width).saturating_sub(tip_w);
@@ -4954,7 +4956,9 @@ pub fn render_popup(
         } => {
             // Two-field commit editor: summary (1 line) + body (multi-line)
             // Layout: border, summary label, summary input, body label, body textarea, hint, border
-            let ta_height = 16u16.min(area.height);
+            let popup_width = commit_popup_width(area.width);
+            let x = (area.width.saturating_sub(popup_width)) / 2;
+            let ta_height = commit_popup_height(area.height);
             if ta_height < 3 || popup_width < 3 {
                 return;
             }
@@ -4977,7 +4981,7 @@ pub fn render_popup(
                 vertical: 1,
             });
 
-            if inner.height > 6 {
+            if inner.height > 7 {
                 let focused_style = Style::default()
                     .fg(theme.accent_secondary)
                     .add_modifier(Modifier::BOLD);
@@ -5011,28 +5015,39 @@ pub fn render_popup(
                     body_label_area,
                 );
 
-                // Body textarea (remaining space minus hint line and padding)
-                let body_height = inner.height.saturating_sub(6); // 1 summary label + 1 summary + 1 gap + 1 body label + 1 hint + 1 padding
+                // Body textarea. Leave one blank row plus two compact hint rows
+                // so the larger editor can document sign-off without clipping.
+                let body_height = inner.height.saturating_sub(7);
                 let body_area = Rect::new(inner.x, inner.y + 4, inner.width, body_height);
                 frame.render_widget(body_textarea, body_area);
 
-                // Hint line at bottom (1 line padding above)
-                let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
                 let key_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
                 let desc_style = Style::default().fg(theme.text_dimmed);
-                let hint_line = Line::from(vec![
+                let hint_y = inner.y + inner.height.saturating_sub(2);
+                let hint_one = Line::from(vec![
                     Span::styled(" enter ", key_style),
                     Span::styled("commit  ", desc_style),
                     Span::styled("shift+enter ", key_style),
                     Span::styled("newline  ", desc_style),
                     Span::styled("tab ", key_style),
-                    Span::styled("switch  ", desc_style),
+                    Span::styled("switch", desc_style),
+                ]);
+                frame.render_widget(
+                    Paragraph::new(hint_one),
+                    Rect::new(inner.x, hint_y, inner.width, 1),
+                );
+                let hint_two = Line::from(vec![
+                    Span::styled(" alt+s ", key_style),
+                    Span::styled("sign-off  ", desc_style),
                     Span::styled("ctrl+o ", key_style),
                     Span::styled("menu  ", desc_style),
                     Span::styled("esc ", key_style),
-                    Span::styled("cancel", desc_style),
+                    Span::styled("save draft", desc_style),
                 ]);
-                frame.render_widget(Paragraph::new(hint_line), hint_area);
+                frame.render_widget(
+                    Paragraph::new(hint_two),
+                    Rect::new(inner.x, hint_y + 1, inner.width, 1),
+                );
             } else {
                 // Fallback: just render summary
                 frame.render_widget(summary_textarea, inner);

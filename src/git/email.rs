@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 
 use super::GitCommands;
+use crate::os::cmd::CmdBuilder;
 
 static EMAIL_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -66,11 +67,11 @@ impl GitCommands {
     /// Missing config is normal and produces an empty field.
     pub fn send_email_defaults(&self) -> (String, String) {
         let identity = self.send_email_config_values("sendemail.identity");
-        if !identity.is_empty() {
+        let (mut to, cc) = if !identity.is_empty() {
             let identity = identity.lines().next().unwrap_or_default().trim();
             let identity_to = self.send_email_config_values(&format!("sendemail.{identity}.to"));
             let identity_cc = self.send_email_config_values(&format!("sendemail.{identity}.cc"));
-            return (
+            (
                 if identity_to.is_empty() {
                     self.send_email_config_values("sendemail.to")
                 } else {
@@ -81,13 +82,22 @@ impl GitCommands {
                 } else {
                     identity_cc
                 },
-            );
+            )
+        } else {
+            (
+                self.send_email_config_values("sendemail.to"),
+                self.send_email_config_values("sendemail.cc"),
+            )
+        };
+
+        // Git's own source tree ships git-contacts and sends patches to this
+        // list. Respect explicit sendemail.to configuration, but make the
+        // common upstream workflow work without repository-local setup.
+        if to.trim().is_empty() && self.git_contacts_path().is_some() {
+            to = "git@vger.kernel.org".to_string();
         }
 
-        (
-            self.send_email_config_values("sendemail.to"),
-            self.send_email_config_values("sendemail.cc"),
-        )
+        (to, cc)
     }
 
     fn send_email_config_values(&self, key: &str) -> String {
@@ -104,6 +114,38 @@ impl GitCommands {
                     .filter(|value| !value.is_empty())
                     .collect::<Vec<_>>()
                     .join(", ")
+            })
+            .unwrap_or_default()
+    }
+
+    fn git_contacts_path(&self) -> Option<PathBuf> {
+        let path = self.repo_path().join("contrib/contacts/git-contacts");
+        path.is_file().then_some(path)
+    }
+
+    /// Ask the Git project's own contact-selection helper who should be Cc'd
+    /// for this formatted patch. Failure is non-fatal: configured send-email
+    /// recipients and Git's normal author/trailer/ccCmd logic still work.
+    fn git_project_contacts(&self, patch_path: &str) -> Vec<String> {
+        let Some(script) = self.git_contacts_path() else {
+            return Vec::new();
+        };
+        let script = script.to_string_lossy().to_string();
+        CmdBuilder::new("perl")
+            .arg(&script)
+            .arg(patch_path)
+            .cwd_path(self.repo_path())
+            .run()
+            .ok()
+            .filter(|result| result.success)
+            .map(|result| {
+                result
+                    .stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect()
             })
             .unwrap_or_default()
     }
@@ -184,8 +226,18 @@ impl GitCommands {
         let (_temp_dir, patch_path) = self.format_commit_email_patch(hash)?;
         let patch = fs::read_to_string(&patch_path)
             .with_context(|| format!("Failed to read generated patch {patch_path}"))?;
+
+        let project_contacts = self.git_project_contacts(&patch_path);
+        let mut resolved_cc = cc.trim().to_string();
+        for contact in project_contacts {
+            if !resolved_cc.is_empty() {
+                resolved_cc.push_str(", ");
+            }
+            resolved_cc.push_str(&contact);
+        }
+
         let result = self
-            .send_email_command(&patch_path, to, cc, true, false)
+            .send_email_command(&patch_path, to, &resolved_cc, true, false)
             .run_expecting_success()?;
 
         let mut resolved = parse_send_email_recipients(&result.stdout).with_context(

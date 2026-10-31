@@ -2,7 +2,7 @@ use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
 use crate::gui::popup::{
     CommitInputFocus, CommitInputKind, MenuItem, PopupState, make_commit_body_textarea,
-    make_commit_summary_textarea, make_textarea,
+    make_commit_summary_textarea, make_textarea, reset_commit_input_view,
 };
 use crate::gui::{Gui, RemoteOpKind};
 use crate::os::platform::Platform;
@@ -324,7 +324,8 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
             title: "No files".to_string(),
             message: "No files to stage. Create an empty commit?".to_string(),
             on_confirm: Box::new(|gui| {
-                if let Some(saved) = gui.saved_commit_popup.take() {
+                if let Some(mut saved) = gui.saved_commit_popup.take() {
+                    reset_commit_input_view(&mut saved, gui.commit_body_wrap_width());
                     gui.popup = saved;
                 } else {
                     gui.popup = PopupState::CommitInput {
@@ -363,7 +364,8 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
             message: "You have not staged any files. Commit all files?".to_string(),
             on_confirm: Box::new(|gui| {
                 gui.git.stage_all()?;
-                if let Some(saved) = gui.saved_commit_popup.take() {
+                if let Some(mut saved) = gui.saved_commit_popup.take() {
+                    reset_commit_input_view(&mut saved, gui.commit_body_wrap_width());
                     gui.popup = saved;
                 } else {
                     gui.popup = PopupState::CommitInput {
@@ -395,7 +397,8 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(saved) = gui.saved_commit_popup.take() {
+    if let Some(mut saved) = gui.saved_commit_popup.take() {
+        reset_commit_input_view(&mut saved, gui.commit_body_wrap_width());
         gui.popup = saved;
         return Ok(());
     }

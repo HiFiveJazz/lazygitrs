@@ -413,6 +413,8 @@ pub struct CommitMessageKeybinding {
     pub commit_menu: String,
     #[serde(rename = "aiGenerate")]
     pub ai_generate: String,
+    #[serde(rename = "signOff")]
+    pub sign_off: String,
 }
 
 impl Default for CommitMessageKeybinding {
@@ -420,6 +422,7 @@ impl Default for CommitMessageKeybinding {
         Self {
             commit_menu: "<c-o>".into(),
             ai_generate: "<c-g>".into(),
+            sign_off: "<a-s>".into(),
         }
     }
 }
@@ -566,6 +569,7 @@ mod tests {
             serde_yaml::from_str("universal:\n  toggleWorkingTreeAndHead: '<c-g>'\n").unwrap();
         assert_eq!(config.files.generate_ai_commit, "<c-g>");
         assert_eq!(config.commit_message.ai_generate, "<c-g>");
+        assert_eq!(config.commit_message.sign_off, "<a-s>");
         let serialized = serde_yaml::to_string(&config).unwrap();
         assert!(!serialized.contains("toggleWorkingTreeAndHead"));
     }

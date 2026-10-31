@@ -522,6 +522,22 @@ impl GitCommands {
             .ok_or_else(|| anyhow!("unsupported remote URL: {remote_url}"))
     }
 
+    /// Return whether the commit is reachable from an origin remote-tracking
+    /// ref.  Browser URLs derived from origin cannot resolve local-only commits.
+    pub fn origin_contains_commit(&self, hash: &str) -> Result<bool> {
+        let contains = format!("--contains={hash}");
+        let result = self
+            .git()
+            .args(&[
+                "for-each-ref",
+                &contains,
+                "--format=%(refname)",
+                "refs/remotes/origin/",
+            ])
+            .run_expecting_success()?;
+        Ok(!result.stdout.trim().is_empty())
+    }
+
     /// Get a browser-friendly URL for the origin remote repository.
     pub fn get_repo_url(&self) -> Result<String> {
         self.get_repo_url_with_services(&HashMap::new())
@@ -1092,6 +1108,36 @@ mod tests {
     fn configure_identity(repo: &Path) {
         git(repo, &["config", "user.email", "test@example.com"]);
         git(repo, &["config", "user.name", "Test"]);
+    }
+
+    #[test]
+    fn origin_contains_commit_distinguishes_pushed_and_local_only_commits() {
+        let temp = TempDir::new("origin-contains");
+        let remote = temp.path.join("remote.git");
+        let local = temp.path.join("local");
+        let remote_arg = remote.to_string_lossy().to_string();
+        let local_arg = local.to_string_lossy().to_string();
+
+        git(
+            &temp.path,
+            &["init", "-q", "--bare", "--initial-branch=main", &remote_arg],
+        );
+        git(&temp.path, &["clone", "-q", &remote_arg, &local_arg]);
+        configure_identity(&local);
+
+        std::fs::write(local.join("file"), "base\n").expect("write base");
+        git(&local, &["add", "file"]);
+        git(&local, &["commit", "-q", "-m", "base"]);
+        git(&local, &["push", "-q", "-u", "origin", "main"]);
+        let pushed = git(&local, &["rev-parse", "HEAD"]);
+
+        std::fs::write(local.join("file"), "local\n").expect("write local");
+        git(&local, &["commit", "-qam", "local"]);
+        let local_only = git(&local, &["rev-parse", "HEAD"]);
+
+        let commands = GitCommands::new(&local).expect("open local clone");
+        assert!(commands.origin_contains_commit(&pushed).unwrap());
+        assert!(!commands.origin_contains_commit(&local_only).unwrap());
     }
 
     #[test]

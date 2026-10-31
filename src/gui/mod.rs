@@ -2545,11 +2545,17 @@ impl Gui {
         // wrapping stays consistent with what the user sees.
         let popup_width = (w * 60 / 100).min(60).max(30).min(w);
         let popup_inner = popup_width.saturating_sub(4) as usize;
+        let commit_popup_inner = popup::commit_popup_width(w).saturating_sub(4) as usize;
         let config_width = self.config.user_config.git.commit.auto_wrap_width;
         let effective_width = if config_width > 0 {
             popup_inner.min(config_width)
         } else {
             popup_inner
+        };
+        let commit_effective_width = if config_width > 0 {
+            commit_popup_inner.min(config_width)
+        } else {
+            commit_popup_inner
         };
         match &mut self.popup {
             PopupState::Input {
@@ -2579,8 +2585,8 @@ impl Gui {
                 body_state,
                 ..
             } => {
-                if effective_width > 0 {
-                    body_state.render_into(body_textarea, effective_width);
+                if commit_effective_width > 0 {
+                    body_state.render_into(body_textarea, commit_effective_width);
                 }
             }
             _ => {}
@@ -3111,8 +3117,8 @@ impl Gui {
 
             match result.result {
                 Ok(Some(message)) => {
-                    let popup_width = (self.layout.width * 60 / 100).min(60).max(30);
-                    let popup_inner = popup_width.saturating_sub(4) as usize;
+                    let popup_inner = popup::commit_popup_width(self.layout.width)
+                        .saturating_sub(4) as usize;
                     let config_width = self.config.user_config.git.commit.auto_wrap_width;
                     let wrap = if config_width > 0 {
                         popup_inner.min(config_width)
@@ -6148,11 +6154,18 @@ impl Gui {
             .max(30)
             .min(self.layout.width);
         let popup_inner = popup_width.saturating_sub(4) as usize;
+        let commit_popup_inner = popup::commit_popup_width(self.layout.width)
+            .saturating_sub(4) as usize;
         let config_width = self.config.user_config.git.commit.auto_wrap_width;
         let effective_width = if config_width > 0 {
             popup_inner.min(config_width)
         } else {
             popup_inner
+        };
+        let commit_effective_width = if config_width > 0 {
+            commit_popup_inner.min(config_width)
+        } else {
+            commit_popup_inner
         };
         match &mut self.popup {
             PopupState::Input {
@@ -6195,8 +6208,8 @@ impl Gui {
                                 summary_textarea.insert_str(&s);
                                 if !b.is_empty() {
                                     body_state.insert_str(&b);
-                                    if effective_width > 0 {
-                                        body_state.render_into(body_textarea, effective_width);
+                                    if commit_effective_width > 0 {
+                                        body_state.render_into(body_textarea, commit_effective_width);
                                     }
                                 }
                             }
@@ -6207,8 +6220,8 @@ impl Gui {
                     }
                     popup::CommitInputFocus::Body => {
                         body_state.insert_str(&data);
-                        if effective_width > 0 {
-                            body_state.render_into(body_textarea, effective_width);
+                        if commit_effective_width > 0 {
+                            body_state.render_into(body_textarea, commit_effective_width);
                         }
                     }
                 }
@@ -7418,7 +7431,22 @@ impl Gui {
                     } = popup
                     {
                         let summary = summary_textarea.lines().join("");
-                        let body = body_state.raw().trim().to_string();
+                        let raw_body = body_state.raw().trim();
+                        let body = if raw_body.is_empty() {
+                            String::new()
+                        } else {
+                            let commit_config = &self.config.user_config.git.commit;
+                            if commit_config.auto_wrap_commit_message
+                                && commit_config.auto_wrap_width > 0
+                            {
+                                popup::hard_wrap_commit_body(
+                                    raw_body,
+                                    commit_config.auto_wrap_width,
+                                )
+                            } else {
+                                popup::unwrap_commit_body(raw_body)
+                            }
+                        };
                         let text = if body.is_empty() {
                             summary
                         } else {
@@ -7448,6 +7476,50 @@ impl Gui {
                     let stashed = std::mem::replace(&mut self.popup, PopupState::None);
                     self.saved_commit_popup = Some(stashed);
                     self.commit_history_idx = None;
+                }
+                // Append a visible Signed-off-by trailer using the same
+                // committer identity Git would use for `git commit -s`.
+                else if matches_key(
+                    key,
+                    &self.config.user_config.keybinding.commit_message.sign_off,
+                ) {
+                    match self.git.signoff_trailer() {
+                        Ok(trailer) => {
+                            let wrap_width = self.commit_body_wrap_width();
+                            let mut added = false;
+                            if let PopupState::CommitInput {
+                                focus,
+                                summary_textarea,
+                                body_textarea,
+                                body_state,
+                                ..
+                            } = &mut self.popup
+                            {
+                                added = body_state.append_trailer(&trailer);
+                                if added {
+                                    *focus = popup::CommitInputFocus::Body;
+                                    let visible = ratatui::style::Style::default()
+                                        .add_modifier(ratatui::style::Modifier::REVERSED);
+                                    let hidden = ratatui::style::Style::default();
+                                    summary_textarea.set_cursor_style(hidden);
+                                    body_textarea.set_cursor_style(visible);
+                                    body_state.render_into(body_textarea, wrap_width);
+                                }
+                            }
+                            if added {
+                                self.show_action_toast("Added Signed-off-by");
+                            } else {
+                                self.show_action_toast("Signed-off-by already present");
+                            }
+                        }
+                        Err(err) => {
+                            self.popup = PopupState::Message {
+                                title: "Could not add sign-off".to_string(),
+                                message: format!("{err}"),
+                                kind: MessageKind::Error,
+                            };
+                        }
+                    }
                 }
                 // Open commit menu key (configurable)
                 else if matches_key(
@@ -9031,7 +9103,11 @@ impl Gui {
                 action: Some(Box::new(|gui| {
                     // Restore the stashed editor — user can continue typing
                     // TODO: full $EDITOR integration would suspend the TUI
-                    if let Some(stashed) = gui.pending_commit_popup.take() {
+                    if let Some(mut stashed) = gui.pending_commit_popup.take() {
+                        popup::reset_commit_input_view(
+                            &mut stashed,
+                            gui.commit_body_wrap_width(),
+                        );
                         gui.popup = stashed;
                     }
                     Ok(())
@@ -11916,11 +11992,8 @@ impl Gui {
     /// Effective wrap width for the commit-body textarea, derived from popup
     /// geometry and the user's `git.commit.auto_wrap_width` config.
     fn commit_body_wrap_width(&self) -> usize {
-        let popup_width = (self.layout.width * 60 / 100)
-            .min(60)
-            .max(30)
-            .min(self.layout.width.max(1));
-        let popup_inner = popup_width.saturating_sub(4) as usize;
+        let popup_inner = popup::commit_popup_width(self.layout.width.max(1))
+            .saturating_sub(4) as usize;
         let config_width = self.config.user_config.git.commit.auto_wrap_width;
         if config_width > 0 {
             popup_inner.min(config_width)
@@ -14874,6 +14947,65 @@ mod terminal_mouse_tests {
             if title == "Pop stash"
                 && message.contains("very long stash subject")
                 && message.contains("remove it from the stash list")));
+    }
+
+    #[test]
+    fn alt_s_in_commit_editor_adds_visible_signoff_once() {
+        let repo = TempRepo::new("commit-signoff");
+        repo.git(&["config", "user.name", "Test User"]);
+        repo.git(&["config", "user.email", "test@example.com"]);
+        repo.commit("file", "base");
+        std::fs::write(repo.path().join("file"), "changed").unwrap();
+        repo.git(&["add", "file"]);
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT))
+            .unwrap();
+
+        assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, focus, .. }
+            if body_state.raw() == "Signed-off-by: Test User <test@example.com>"
+                && *focus == popup::CommitInputFocus::Body));
+    }
+
+    #[test]
+    fn reopening_saved_commit_draft_resets_view_to_top_left() {
+        let repo = TempRepo::new("commit-draft-view");
+        repo.commit("file", "base");
+        std::fs::write(repo.path().join("file"), "changed").unwrap();
+        repo.git(&["add", "file"]);
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+
+        for c in "subject".chars() {
+            gui.handle_popup_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))
+            .unwrap();
+        for c in "description".chars() {
+            gui.handle_popup_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(&gui.popup, PopupState::CommitInput {
+            summary_textarea, body_textarea, body_state, focus, ..
+        } if summary_textarea.cursor() == (0, 0)
+            && body_textarea.cursor() == (0, 0)
+            && body_state.cursor == 0
+            && *focus == popup::CommitInputFocus::Summary));
     }
 
     #[test]
