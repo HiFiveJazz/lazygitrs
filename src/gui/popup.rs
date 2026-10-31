@@ -371,6 +371,32 @@ impl BodySoftWrap {
         true
     }
 
+    /// Remove an exact commit trailer line and tidy the separator around the
+    /// remaining trailer block. Returns false when the trailer is not present.
+    pub fn remove_trailer(&mut self, trailer: &str) -> bool {
+        let trailer = trailer.trim();
+        if trailer.is_empty() {
+            return false;
+        }
+
+        let mut lines: Vec<&str> = self.raw.lines().collect();
+        let Some(index) = lines.iter().position(|line| line.trim() == trailer) else {
+            return false;
+        };
+        lines.remove(index);
+
+        // Removing the first trailer from a trailer block can leave the blank
+        // separator directly before another trailer, which is correct. Removing
+        // the last/only trailer can leave trailing blank lines, which are not.
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
+
+        self.raw = lines.join("\n");
+        self.cursor = self.cursor.min(self.raw.chars().count());
+        true
+    }
+
     pub fn insert_char(&mut self, c: char) {
         let b = self.cursor_byte();
         self.raw.insert(b, c);
@@ -1352,6 +1378,21 @@ mod commit_body_wrap_tests {
         assert!(state.raw().ends_with(
             "Signed-off-by: Test <test@example.com>\nReviewed-by: Reviewer <r@example.com>"
         ));
+    }
+
+    #[test]
+    fn remove_trailer_cleans_up_separator_and_preserves_other_trailers() {
+        let mut state = BodySoftWrap::from_text(
+            "Explain why this changes behavior.\n\nSigned-off-by: Test <test@example.com>\nReviewed-by: Reviewer <r@example.com>",
+        );
+        assert!(state.remove_trailer("Signed-off-by: Test <test@example.com>"));
+        assert_eq!(
+            state.raw(),
+            "Explain why this changes behavior.\n\nReviewed-by: Reviewer <r@example.com>"
+        );
+        assert!(state.remove_trailer("Reviewed-by: Reviewer <r@example.com>"));
+        assert_eq!(state.raw(), "Explain why this changes behavior.");
+        assert!(!state.remove_trailer("Signed-off-by: Test <test@example.com>"));
     }
 }
 

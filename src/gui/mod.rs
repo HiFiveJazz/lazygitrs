@@ -7477,7 +7477,7 @@ impl Gui {
                     self.saved_commit_popup = Some(stashed);
                     self.commit_history_idx = None;
                 }
-                // Append a visible Signed-off-by trailer using the same
+                // Toggle a visible Signed-off-by trailer using the same
                 // committer identity Git would use for `git commit -s`.
                 else if matches_key(
                     key,
@@ -7487,6 +7487,7 @@ impl Gui {
                         Ok(trailer) => {
                             let wrap_width = self.commit_body_wrap_width();
                             let mut added = false;
+                            let mut removed = false;
                             if let PopupState::CommitInput {
                                 focus,
                                 summary_textarea,
@@ -7495,7 +7496,10 @@ impl Gui {
                                 ..
                             } = &mut self.popup
                             {
-                                added = body_state.append_trailer(&trailer);
+                                removed = body_state.remove_trailer(&trailer);
+                                if !removed {
+                                    added = body_state.append_trailer(&trailer);
+                                }
                                 if added {
                                     *focus = popup::CommitInputFocus::Body;
                                     let visible = ratatui::style::Style::default()
@@ -7503,18 +7507,20 @@ impl Gui {
                                     let hidden = ratatui::style::Style::default();
                                     summary_textarea.set_cursor_style(hidden);
                                     body_textarea.set_cursor_style(visible);
+                                }
+                                if added || removed {
                                     body_state.render_into(body_textarea, wrap_width);
                                 }
                             }
-                            if added {
+                            if removed {
+                                self.show_action_toast("Removed Signed-off-by");
+                            } else if added {
                                 self.show_action_toast("Added Signed-off-by");
-                            } else {
-                                self.show_action_toast("Signed-off-by already present");
                             }
                         }
                         Err(err) => {
                             self.popup = PopupState::Message {
-                                title: "Could not add sign-off".to_string(),
+                                title: "Could not toggle sign-off".to_string(),
                                 message: format!("{err}"),
                                 kind: MessageKind::Error,
                             };
@@ -14950,7 +14956,7 @@ mod terminal_mouse_tests {
     }
 
     #[test]
-    fn alt_s_in_commit_editor_adds_visible_signoff_once() {
+    fn alt_s_in_commit_editor_toggles_visible_signoff() {
         let repo = TempRepo::new("commit-signoff");
         repo.git(&["config", "user.name", "Test User"]);
         repo.git(&["config", "user.email", "test@example.com"]);
@@ -14965,12 +14971,14 @@ mod terminal_mouse_tests {
 
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT))
             .unwrap();
-        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT))
-            .unwrap();
-
         assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, focus, .. }
             if body_state.raw() == "Signed-off-by: Test User <test@example.com>"
                 && *focus == popup::CommitInputFocus::Body));
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+            if body_state.raw().is_empty()));
     }
 
     #[test]

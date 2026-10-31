@@ -5038,7 +5038,7 @@ pub fn render_popup(
                 );
                 let hint_two = Line::from(vec![
                     Span::styled(" alt+s ", key_style),
-                    Span::styled("sign-off  ", desc_style),
+                    Span::styled("toggle sign-off  ", desc_style),
                     Span::styled("ctrl+o ", key_style),
                     Span::styled("menu  ", desc_style),
                     Span::styled("esc ", key_style),
