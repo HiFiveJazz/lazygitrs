@@ -201,7 +201,6 @@ impl Model {
         }
         use std::collections::HashMap;
 
-        const MAX_REMEMBERED_COMMIT_AUTHORS: usize = 2048;
         let mut by_name: HashMap<String, File> =
             new_files.into_iter().map(|f| (f.name.clone(), f)).collect();
 

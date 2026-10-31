@@ -721,6 +721,7 @@ pub fn join_email_recipients(recipients: &[String]) -> String {
 /// Build the human-readable outgoing message shown in Email Review mode.
 /// Recipients are taken from the current editable lists, while From/Subject/Date
 /// and the body come from the git-send-email preflight/format-patch result.
+#[cfg(test)]
 pub fn build_email_patch_preview(
     from: &str,
     to: &[String],
@@ -754,6 +755,7 @@ pub fn build_email_patch_preview(
     out
 }
 
+#[cfg(test)]
 fn push_email_preview_recipient_header(out: &mut String, name: &str, recipients: &[String]) {
     if recipients.is_empty() {
         out.push_str(name);

@@ -248,7 +248,7 @@ impl GitCommands {
         Ok(commit_filter_path_suggestions(result.stdout.split('\0')))
     }
 
-    /// Load recent commits reachable from any ref.
+    /// Load recent commits reachable from the currently checked-out HEAD.
     pub fn load_commits(&self, limit: usize) -> Result<Vec<Commit>> {
         let unpushed = self.unpushed_commit_hashes().unwrap_or_default();
         let mut commits = self.load_commits_page(limit, 0)?;
@@ -256,7 +256,7 @@ impl GitCommands {
         Ok(commits)
     }
 
-    /// Load a page of commits reachable from any ref.
+    /// Load a page of commits reachable from the currently checked-out HEAD.
     /// Status (unpushed) is applied by callers that need it.
     pub fn load_commits_page(&self, limit: usize, skip: usize) -> Result<Vec<Commit>> {
         self.load_filtered_commits_page(&CommitFilter::default(), limit, skip)
@@ -305,13 +305,13 @@ impl GitCommands {
         let format = "%H|%s|%an|%ae|%at|%P|%D";
         let mut cmd = self.git().arg("log");
 
-        // Unfiltered and path-filtered lists walk every non-tag ref. Tags still
-        // appear in %D decorations and remain directly navigable, but making every
-        // tag a revision root is extremely expensive in tag-heavy repositories
-        // (notably the Linux kernel). Preserve HEAD, branches, remotes, stash, and
-        // custom/checkpoint refs while excluding only refs/tags/* from traversal.
+        // The main commits panel follows the checked-out branch. Walking `--all`
+        // made branch switches appear to do nothing in large repositories because
+        // newer commits from unrelated refs kept occupying the first page. Tags and
+        // remote/local branch names still appear through %D decorations on commits
+        // reachable from HEAD. Explicit branch filters keep their requested roots.
         if filter.branches.is_empty() {
-            cmd = cmd.arg("--exclude=refs/tags/*").arg("--all");
+            cmd = cmd.arg("HEAD");
         } else {
             for branch in &filter.branches {
                 cmd = cmd.arg(branch);
@@ -344,8 +344,7 @@ impl GitCommands {
 
     /// Load only the current HEAD commit.
     ///
-    /// This intentionally avoids the expensive global `--all --topo-order`
-    /// traversal used by the main commit list.
+    /// This is the cheapest way to refresh just the current tip.
     pub fn load_head_commit(&self) -> Result<Option<Commit>> {
         let unpushed = self.unpushed_commit_hashes().unwrap_or_default();
         let mut commits = self.load_commits_for_branch("HEAD", 1)?;

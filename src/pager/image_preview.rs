@@ -1060,7 +1060,7 @@ mod tests {
                 std::process::id()
             ));
             std::fs::create_dir_all(&path).expect("create temp dir");
-            git_cmd(&path, &["init", "-q"]);
+            git_cmd(&path, &["init", "-q", "--initial-branch=main"]);
             Self { path }
         }
 

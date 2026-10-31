@@ -710,8 +710,8 @@ impl GitCommands {
     /// Refresh only state that can change as a result of a successful push.
     ///
     /// Keep the three independent reads off the UI thread and run them in
-    /// parallel. In particular, do not rebuild the global commit history: push
-    /// does not change local commit topology or worktree contents.
+    /// parallel. In particular, do not rebuild the current-branch commit list:
+    /// push does not change local commit topology or worktree contents.
     pub fn load_model_after_push_streaming(self: &Arc<Self>, tx: &mpsc::Sender<ModelPart>) {
         let tx_branches = tx.clone();
         let git = Arc::clone(self);
@@ -759,7 +759,8 @@ impl GitCommands {
         // Fetch can change upstream divergence / remote-facing branch state.
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
 
-        // The commits panel walks all refs, so newly fetched history must appear.
+        // Reload the current-branch page so fetched remote decorations and pushed/
+        // unpushed status are reflected without a global history traversal.
         self.stream_commits_then_unpushed(tx, commit_filter);
 
         // Remote-tracking branches can change.
@@ -892,6 +893,7 @@ impl GitCommands {
         mut worktrees: Vec<crate::model::Worktree>,
         mut reflog: Vec<crate::model::Commit>,
         confirmed_head: Option<HeadState>,
+        commit_filter: Option<crate::git::commit::CommitFilter>,
     ) {
         // Keep the worktree scan on its own worker: on very large repositories
         // (notably Linux) status dominates checkout refresh latency. If this
@@ -941,10 +943,23 @@ impl GitCommands {
             }
             send_or_abandon!(ModelPart::Branches(branches));
 
-            // HEAD changes commit decorations, but checkout does not change the
-            // commit graph itself. Reuse the already-loaded history rather than
-            // walking every ref again.
+            // The main commits panel is HEAD-relative, so checkout changes which
+            // history belongs in the panel even though the repository's global
+            // commit graph itself did not change. Reload only the current page;
+            // this is much cheaper than the old `git log --all --topo-order` walk.
+            let refreshed_commits = match commit_filter {
+                Some(filter) => {
+                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
+                }
+                None => git.load_commits_page(DEFAULT_COMMIT_LIMIT, 0),
+            };
+            if let Ok(fresh) = refreshed_commits {
+                commits = fresh;
+            }
+
             if let Some(head) = &head {
+                // Ensure the decoration is immediately correct even if a custom
+                // pretty format or older Git omitted the symbolic HEAD decoration.
                 GitCommands::apply_checkout_head_state(&mut commits, head);
                 send_or_abandon!(ModelPart::Head {
                     hash: head.hash.clone(),
@@ -1202,7 +1217,8 @@ impl GitCommands {
         Ok(result.stdout_trimmed().to_string())
     }
 
-    /// Get the subject line of a commit.
+    /// Get the subject line of a commit. Test-only helper for rebase assertions.
+    #[cfg(test)]
     pub fn commit_subject(&self, hash: &str) -> Result<String> {
         let result = self
             .git()
@@ -1211,14 +1227,6 @@ impl GitCommands {
         Ok(result.stdout_trimmed().to_string())
     }
 
-    /// Get the author name of a commit.
-    pub fn commit_author_name(&self, hash: &str) -> Result<String> {
-        let result = self
-            .git()
-            .args(&["log", "-1", "--format=%an", hash])
-            .run_expecting_success()?;
-        Ok(result.stdout_trimmed().to_string())
-    }
 }
 
 #[cfg(test)]
@@ -1281,6 +1289,60 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
+    fn try_init_test_repo(path: &Path, extra_args: &[&str]) -> bool {
+        let mut args = vec!["init", "--quiet", "--initial-branch=main"];
+        args.extend_from_slice(extra_args);
+        Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    #[test]
+    fn git3_repository_formats_are_supported_when_available() {
+        for (name, init_args, expected_hash_len) in [
+            ("sha256", vec!["--object-format=sha256"], 64usize),
+            ("reftable", vec!["--ref-format=reftable"], 40usize),
+            (
+                "sha256-reftable",
+                vec!["--object-format=sha256", "--ref-format=reftable"],
+                64usize,
+            ),
+        ] {
+            let temp = TempDir::new(&format!("git3-{name}"));
+            if !try_init_test_repo(temp.path(), &init_args) {
+                // Older Git versions may not know one or both format options.
+                // Keep the suite usable there while exercising these paths on
+                // current Git and, eventually, Git 3.x.
+                continue;
+            }
+
+            run_test_git(temp.path(), &["commit", "--allow-empty", "-m", "root"]);
+            let expected_head = run_test_git(temp.path(), &["rev-parse", "HEAD"]);
+            let expected_short_head = run_test_git(temp.path(), &["rev-parse", "--short", "HEAD"]);
+            assert_eq!(expected_head.len(), expected_hash_len, "{name}");
+
+            let git = GitCommands::new(temp.path()).expect("open Git-3-style repository");
+            let head = git.head_state().expect("read HEAD");
+            assert_eq!(head.hash, expected_head, "{name}");
+            assert_eq!(head.branch_name, "main", "{name}");
+
+            let commits = git.load_commits(10).expect("load commits");
+            assert_eq!(commits.first().map(|commit| commit.hash.as_str()), Some(head.hash.as_str()), "{name}");
+
+            let branches = git.load_branches().expect("load branches");
+            assert!(
+                branches.iter().any(|branch| {
+                    branch.name == "main"
+                        && branch.head
+                        && branch.hash == expected_short_head
+                }),
+                "{name}: main branch should be loaded from the repository format"
+            );
+        }
+    }
+
     #[test]
     fn head_state_reads_branch_names_and_detached_annotated_tags() {
         let temp = TempDir::new("head-state");
@@ -1307,6 +1369,33 @@ mod tests {
         let git = GitCommands::new(temp.path()).unwrap();
         assert!(git.head_state().is_err());
         assert_eq!(git.current_branch_name().unwrap(), "main");
+    }
+
+    #[test]
+    fn default_commit_history_follows_checked_out_head() {
+        let temp = TempDir::new("commit-history-head-relative");
+        let run = |args: &[&str]| run_test_git(temp.path(), args);
+        run(&["init", "-b", "main"]);
+        run(&["commit", "--allow-empty", "-m", "root"]);
+        run(&["checkout", "-b", "feature"]);
+        run(&["commit", "--allow-empty", "-m", "feature only"]);
+        let feature_tip = run(&["rev-parse", "HEAD"]);
+        run(&["checkout", "main"]);
+        run(&["commit", "--allow-empty", "-m", "main only"]);
+        let main_tip = run(&["rev-parse", "HEAD"]);
+
+        let git = GitCommands::new(temp.path()).unwrap();
+        let main_commits = git.load_commits_page(50, 0).unwrap();
+        assert_eq!(main_commits.first().map(|c| c.hash.as_str()), Some(main_tip.as_str()));
+        assert!(!main_commits.iter().any(|commit| commit.hash == feature_tip));
+
+        run(&["checkout", "feature"]);
+        let feature_commits = git.load_commits_page(50, 0).unwrap();
+        assert_eq!(
+            feature_commits.first().map(|c| c.hash.as_str()),
+            Some(feature_tip.as_str())
+        );
+        assert!(!feature_commits.iter().any(|commit| commit.hash == main_tip));
     }
 
     #[test]
@@ -1570,7 +1659,7 @@ mod tests {
         std::fs::create_dir_all(&subdir).expect("create nested repo dir");
 
         let status = Command::new("git")
-            .arg("init")
+            .args(["init", "--initial-branch=main"])
             .arg(&repo)
             .status()
             .expect("run git init");
@@ -1589,7 +1678,12 @@ mod tests {
         let linked = temp.path().join("linked-checkout");
         std::fs::create_dir_all(&repo).expect("create repo dir");
 
-        assert_success(Command::new("git").arg("init").arg(&repo).status());
+        assert_success(
+            Command::new("git")
+                .args(["init", "--initial-branch=main"])
+                .arg(&repo)
+                .status(),
+        );
         assert_success(
             Command::new("git")
                 .args(["config", "user.email", "test@example.com"])
@@ -1776,7 +1870,12 @@ mod tests {
         let temp = TempDir::new("many-untracked");
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("mkdir");
-        assert_success(Command::new("git").arg("init").arg(&repo).status());
+        assert_success(
+            Command::new("git")
+                .args(["init", "--initial-branch=main"])
+                .arg(&repo)
+                .status(),
+        );
 
         // node_modules-style tree: many untracked files, no commits yet.
         let nm = repo.join("node_modules").join("pkg");

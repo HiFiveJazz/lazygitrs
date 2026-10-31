@@ -68,6 +68,10 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return discard_file(gui);
     }
 
+    if matches_key(key, &keybindings.files.view_reset_options) {
+        return open_reset_options(gui);
+    }
+
     if matches_key(key, &keybindings.files.ignore_file) {
         return ignore_file(gui);
     }
@@ -847,6 +851,65 @@ fn stash_changes(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
+fn open_reset_options(gui: &mut Gui) -> Result<()> {
+    gui.popup = PopupState::Menu {
+        title: "Reset working tree".to_string(),
+        items: vec![
+            MenuItem {
+                label: "Nuke working tree".to_string(),
+                description: "git reset --hard HEAD && git clean -fd".to_string(),
+                key: Some("x".to_string()),
+                action: Some(Box::new(|gui| {
+                    gui.popup = PopupState::Confirm {
+                        title: "Nuke working tree".to_string(),
+                        message: "Discard ALL staged and unstaged changes and delete all untracked files/directories?\n\nIgnored files are kept. Dirty submodules are reset after their changes are stashed.".to_string(),
+                        on_confirm: Box::new(|gui| {
+                            gui.start_background_mutation("Nuke working tree", |git| {
+                                git.nuke_working_tree()
+                            });
+                            Ok(())
+                        }),
+                    };
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Discard all unstaged changes".to_string(),
+                description: "git checkout -- .".to_string(),
+                key: Some("u".to_string()),
+                action: Some(Box::new(|gui| {
+                    gui.start_background_mutation("Discard unstaged changes", |git| {
+                        git.discard_all_unstaged_changes()
+                    });
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Discard untracked files".to_string(),
+                description: "git clean -fd".to_string(),
+                key: Some("c".to_string()),
+                action: Some(Box::new(|gui| {
+                    gui.popup = PopupState::Confirm {
+                        title: "Discard untracked files".to_string(),
+                        message: "Delete all untracked, non-ignored files and directories?"
+                            .to_string(),
+                        on_confirm: Box::new(|gui| {
+                            gui.start_background_mutation("Discard untracked files", |git| {
+                                git.remove_untracked_files()
+                            });
+                            Ok(())
+                        }),
+                    };
+                    Ok(())
+                })),
+            },
+        ],
+        selected: 0,
+        loading_index: None,
+    };
+    Ok(())
+}
+
 fn discard_file(gui: &mut Gui) -> Result<()> {
     // If in tree view and a directory is selected, discard all child files
     if gui.show_file_tree {
@@ -905,13 +968,12 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
     };
     let model = gui.model.lock().unwrap();
     if let Some(file) = model.files.get(file_idx) {
-        let name = file.current_path().to_string();
+        let file = file.clone();
         let display = file.display_name.clone();
-        let added = file.added;
         drop(model);
 
         if !gui.config.user_config.gui.skip_discard_change_warning {
-            let name_clone = name.clone();
+            let file_clone = file.clone();
             gui.popup = PopupState::Menu {
                 title: format!("Discard changes to '{}'?", display),
                 items: vec![
@@ -920,7 +982,7 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
                         description: "discard all changes".to_string(),
                         key: Some("d".to_string()),
                         action: Some(Box::new(move |gui| {
-                            gui.git.discard_file(&name_clone, added)?;
+                            gui.git.discard_file(&file_clone)?;
                             gui.needs_refresh = true;
                             Ok(())
                         })),
@@ -936,7 +998,7 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
                 loading_index: None,
             };
         } else {
-            gui.git.discard_file(&name, added)?;
+            gui.git.discard_file(&file)?;
             gui.needs_refresh = true;
         }
     }

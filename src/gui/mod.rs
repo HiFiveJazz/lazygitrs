@@ -371,7 +371,7 @@ pub(crate) enum RemoteOpKind {
     /// A single newly-created commit appended to the current HEAD.
     ///
     /// Unlike amend/reword/rebase, this can update the loaded commit
-    /// model incrementally without rebuilding the global --all topo walk.
+    /// model incrementally without rebuilding the current HEAD history.
     LocalAppend,
     /// HEAD was rewritten in place (amend or reword).
     LocalRewriteHead,
@@ -7919,6 +7919,10 @@ impl Gui {
                         "Stash options".into(),
                     ),
                     CommandEntry::keybinding(
+                        kb.files.view_reset_options.clone(),
+                        "Reset / nuke working tree".into(),
+                    ),
+                    CommandEntry::keybinding(
                         kb.files.toggle_tree_view.clone(),
                         "Toggle tree view".into(),
                     ),
@@ -10912,8 +10916,8 @@ impl Gui {
                 return false;
             }
         } else {
-            // The global --all view can have an unrelated branch at the top.
-            // Only prepend when the old HEAD itself was already the first row.
+            // Active path/author/branch filters can hide HEAD from the first row.
+            // Only prepend when the old HEAD itself was already visible first.
             if old_first.as_deref() != Some(old_head.as_str()) {
                 return false;
             }
@@ -10930,7 +10934,7 @@ impl Gui {
         }
 
         // This is the only substantial command on the fast path (~100 ms on
-        // the Linux kernel tree); the global topo walk is deliberately absent.
+        // the Linux kernel tree); a full history reload is deliberately absent.
         let files = match self.git.refresh_files_status_only() {
             Ok(files) => files,
             Err(_) => return false,
@@ -11212,6 +11216,7 @@ impl Gui {
         self.reset_commit_pagination();
         self.diff_preview_cache.retain_immutable();
 
+        let commit_filter = self.commit_filter_for_load();
         let (commits, branches, worktrees, reflog) = {
             let model = self.model.lock().unwrap();
             (
@@ -11232,6 +11237,7 @@ impl Gui {
                 worktrees,
                 reflog,
                 confirmed_head,
+                commit_filter,
             );
         });
 
@@ -13186,10 +13192,23 @@ mod terminal_mouse_tests {
                 if entries.first().is_some_and(|entry| entry.hash == main_hash)
         )));
 
+        let checkout_commits = parts
+            .iter()
+            .find_map(|part| match part {
+                ModelPart::Commits(commits) => Some(commits),
+                _ => None,
+            })
+            .expect("checkout should refresh commits");
+        assert_eq!(
+            checkout_commits.first().map(|commit| commit.hash.as_str()),
+            Some(main_hash.as_str())
+        );
+        let feature_hash = repo.git(&["rev-parse", "feature"]);
         assert!(
-            parts
+            !checkout_commits
                 .iter()
-                .any(|part| matches!(part, ModelPart::Commits(_)))
+                .any(|commit| commit.hash == feature_hash),
+            "current-branch commits must not retain the unrelated feature tip"
         );
 
         assert!(!parts.iter().any(|part| matches!(part, ModelPart::Stash(_))));
@@ -14120,6 +14139,32 @@ mod terminal_mouse_tests {
     }
 
     #[test]
+    fn shift_d_in_files_opens_reset_menu_with_nuke_option() {
+        let repo = TempRepo::new("files-reset-menu");
+        let mut gui = checkout_test_gui(&repo);
+        gui.context_mgr.set_active(ContextId::Files);
+        let kb = gui.config.user_config.keybinding.clone();
+
+        controller::files::handle_key(&mut gui, parse_key("D").unwrap(), &kb).unwrap();
+
+        let PopupState::Menu { title, items, .. } = &gui.popup else {
+            panic!("expected reset options menu");
+        };
+        assert_eq!(title, "Reset working tree");
+        assert!(items.iter().any(|item| item.label == "Nuke working tree"));
+        assert!(
+            items
+                .iter()
+                .any(|item| item.label == "Discard all unstaged changes")
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.label == "Discard untracked files")
+        );
+    }
+
+    #[test]
     fn ctrl_g_in_files_opens_ai_commit_generation() {
         let repo = TempRepo::new("ctrl-g-generation");
         repo.commit("file", "base");
@@ -14238,7 +14283,12 @@ mod terminal_mouse_tests {
         let other = repo.commit("file", "other branch commit");
         repo.git(&["checkout", "main"]);
         let git = crate::git::GitCommands::new(repo.path()).unwrap();
-        let commits = git.load_commits(300).unwrap();
+        // The normal commits panel is intentionally HEAD-relative now. Build an
+        // explicit multi-branch list here so this regression still verifies that
+        // focusing HEAD selects the checked-out hash rather than another branch tip.
+        let commits = git
+            .load_commits_for_branches(&["main".to_string(), "ahead".to_string()], 300)
+            .unwrap();
         assert_eq!(commits[0].hash, other);
         let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
         gui.model.lock().unwrap().set_commits(commits);

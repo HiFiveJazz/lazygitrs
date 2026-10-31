@@ -728,7 +728,7 @@ mod tests {
     }
 
     fn init_repo(dir: &Path) {
-        git_in(dir, &["init"]);
+        git_in(dir, &["init", "--initial-branch=main"]);
         git_in(dir, &["config", "user.email", "t@t.com"]);
         git_in(dir, &["config", "user.name", "t"]);
     }
@@ -829,19 +829,7 @@ mod tests {
         let _f1 = commit(dir, "feature1", "x");
         let _f2 = commit(dir, "feature2", "y");
 
-        // Prefer master/main depending on init default.
-        let main = if Command::new("git")
-            .args(["rev-parse", "--verify", "main"])
-            .current_dir(dir)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            "main"
-        } else {
-            "master"
-        };
-        git_in(dir, &["checkout", main]);
+        git_in(dir, &["checkout", "main"]);
         let c4 = commit(dir, "c4", "4");
 
         let git = GitCommands::new(dir).expect("git");

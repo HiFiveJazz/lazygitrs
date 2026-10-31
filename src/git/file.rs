@@ -270,86 +270,141 @@ impl GitCommands {
         Ok(())
     }
 
-    pub fn discard_file(&self, path: &str, added: bool) -> Result<()> {
-        // Unstage first if needed (ignore errors — file may not be staged)
-        let _ = self
-            .git()
-            .args(&["--literal-pathspecs", "reset", "HEAD", "--", path])
-            .run();
-
-        if added {
-            self.remove_worktree_path(path)?;
-        } else {
-            // Tracked file: discard working tree changes
-            self.git()
-                .args(&["--literal-pathspecs", "checkout", "--", path])
-                .run_expecting_success()?;
-        }
+    /// Discard unstaged changes to tracked files, leaving the index intact.
+    /// This mirrors lazygit's reset-options action (`git checkout -- .`).
+    pub fn discard_all_unstaged_changes(&self) -> Result<()> {
+        self.git()
+            .args(&["checkout", "--", "."])
+            .run_expecting_success()?;
         Ok(())
     }
 
-    /// Discard many files in a few git calls instead of one process per path.
+    /// Delete all untracked, non-ignored files and directories.
+    pub fn remove_untracked_files(&self) -> Result<()> {
+        self.git().args(&["clean", "-fd"]).run_expecting_success()?;
+        Ok(())
+    }
+
+    /// Make the working tree/index match HEAD and remove untracked files.
     ///
-    /// Mirrors lazygit `DiscardAllDirChanges`: bucket into reset / checkout /
-    /// remove, then run each git command on path batches under ARG_MAX.
+    /// This intentionally does *not* remove ignored files, matching lazygit's
+    /// "Nuke working tree" (`git reset --hard HEAD && git clean -fd`). Before
+    /// resetting the superproject, dirty initialized submodules are stashed and
+    /// force-updated so they no longer leave the parent worktree dirty.
+    pub fn nuke_working_tree(&self) -> Result<()> {
+        if self.repo_path().join(".gitmodules").is_file() {
+            self.git()
+                .args(&[
+                    "submodule",
+                    "foreach",
+                    "--recursive",
+                    "git stash push --include-untracked -m '[lazygitrs] nuke working tree'",
+                ])
+                .run_expecting_success()?;
+            self.git()
+                .args(&["submodule", "update", "--force", "--recursive"])
+                .run_expecting_success()?;
+        }
+
+        if self.head_state().is_ok() {
+            self.git()
+                .args(&["reset", "--hard", "HEAD"])
+                .run_expecting_success()?;
+        } else {
+            // Unborn repository: there is no HEAD to reset to. Removing every
+            // staged path from the index turns it into an untracked path; the
+            // clean below then leaves both index and worktree empty.
+            self.git()
+                .args(&[
+                    "rm",
+                    "--cached",
+                    "-r",
+                    "-f",
+                    "--ignore-unmatch",
+                    "--",
+                    ".",
+                ])
+                .run_expecting_success()?;
+        }
+
+        self.remove_untracked_files()
+    }
+
+    /// Discard every index/worktree change represented by one Files-panel row.
+    ///
+    /// Keep the complete [`File`] instead of collapsing it to `(path, added)`:
+    /// renames need both the old and new path, and conflict/staged-delete states
+    /// cannot be reconstructed reliably from the current path alone.
+    pub fn discard_file(&self, file: &File) -> Result<()> {
+        self.discard_files(std::slice::from_ref(file))
+    }
+
+    /// Discard many files in a few Git calls instead of one process per path.
+    ///
+    /// When HEAD exists, `git restore --source=HEAD --staged --worktree` is the
+    /// exact operation the UI promises: make both the index and working tree
+    /// match HEAD for each tracked path. It also handles staged additions,
+    /// deletions, renames, and conflicts without status-specific command chains.
+    /// Genuinely untracked files have no HEAD/index state, so remove them from
+    /// the working tree directly.
+    ///
+    /// In an unborn repository there is no HEAD to restore from. In that case,
+    /// remove selected paths from the index first and then from the working tree.
     pub fn discard_files(&self, files: &[File]) -> Result<()> {
         if files.is_empty() {
             return Ok(());
         }
-        if files.len() == 1 {
-            let file = &files[0];
-            return self.discard_file(file.current_path(), file.added);
-        }
 
-        let mut special_files = Vec::new();
-        let mut files_to_reset = Vec::new();
-        let mut files_to_checkout = Vec::new();
-        let mut files_to_remove = Vec::new();
+        let head_exists = self.head_state().is_ok();
+        let mut seen_git_paths = HashSet::new();
+        let mut git_paths = Vec::new();
+        let mut seen_remove_paths = HashSet::new();
+        let mut remove_paths = Vec::new();
 
         for file in files {
-            let path = file.current_path().to_string();
-            // Renames and certain merge-conflict statuses need per-file logic.
-            if file.rename_paths().is_some()
-                || file.short_status == "AA"
-                || file.short_status == "DU"
-            {
-                special_files.push(file);
-                continue;
-            }
-
-            if file.has_staged_changes || file.has_merge_conflicts {
-                files_to_reset.push(path.clone());
-                if file.short_status == "DD" || file.short_status == "AU" {
-                    continue;
+            if head_exists && file.tracked {
+                // A porcelain rename/copy row represents two repository paths.
+                // Restoring only the destination leaves the source-side deletion
+                // behind in the index/worktree.
+                for path in file.diff_paths() {
+                    if seen_git_paths.insert(path.to_string()) {
+                        git_paths.push(path.to_string());
+                    }
                 }
-                if file.added {
-                    files_to_remove.push(path);
-                } else {
-                    files_to_checkout.push(path);
-                }
-                continue;
-            }
-
-            if file.short_status == "DD" || file.short_status == "AU" {
-                continue;
-            }
-
-            if file.added {
-                files_to_remove.push(path);
             } else {
-                files_to_checkout.push(path);
+                // No HEAD means every selected change ultimately has no committed
+                // content to restore. For an unborn staged file, remove its index
+                // entry before deleting the working-tree path below.
+                if !head_exists && file.tracked {
+                    for path in file.diff_paths() {
+                        if seen_git_paths.insert(path.to_string()) {
+                            git_paths.push(path.to_string());
+                        }
+                    }
+                }
+                let path = file.current_path().to_string();
+                if seen_remove_paths.insert(path.clone()) {
+                    remove_paths.push(path);
+                }
             }
         }
 
-        for file in special_files {
-            self.discard_file(file.current_path(), file.added)?;
+        if head_exists {
+            self.run_git_on_paths(
+                &["restore", "--source=HEAD", "--staged", "--worktree"],
+                &git_paths,
+            )?;
+        } else {
+            self.run_git_on_paths(
+                &["rm", "--cached", "-f", "--ignore-unmatch"],
+                &git_paths,
+            )?;
         }
 
-        self.run_git_on_paths(&["reset", "HEAD"], &files_to_reset)?;
-        for path in &files_to_remove {
+        for path in &remove_paths {
             self.remove_worktree_path(path)?;
         }
-        self.run_git_on_paths(&["checkout"], &files_to_checkout)
+        Ok(())
     }
 
     fn remove_worktree_path(&self, path: &str) -> Result<()> {
@@ -512,7 +567,7 @@ mod tests {
     }
 
     fn init_repo(path: &Path) {
-        git(path, &["init", "-q"]);
+        git(path, &["init", "-q", "--initial-branch=main"]);
         git(path, &["config", "user.email", "test@example.com"]);
         git(path, &["config", "user.name", "Test"]);
     }
@@ -685,6 +740,64 @@ mod tests {
     }
 
     #[test]
+    fn nuke_working_tree_discards_tracked_and_untracked_but_keeps_ignored() {
+        let temp = TempDir::new("nuke-working-tree");
+        let repo = &temp.path;
+        init_repo(repo);
+
+        std::fs::write(repo.join("tracked.txt"), "original\n").expect("write tracked");
+        std::fs::write(repo.join("staged.txt"), "original\n").expect("write staged");
+        std::fs::write(repo.join(".gitignore"), "ignored.txt\n").expect("write gitignore");
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "init"]);
+
+        std::fs::write(repo.join("tracked.txt"), "worktree\n").expect("modify tracked");
+        std::fs::write(repo.join("staged.txt"), "index\n").expect("modify staged");
+        git(repo, &["add", "staged.txt"]);
+        std::fs::write(repo.join("untracked.txt"), "new\n").expect("write untracked");
+        std::fs::create_dir_all(repo.join("untracked-dir")).expect("mkdir untracked");
+        std::fs::write(repo.join("untracked-dir/file"), "new\n").expect("write nested");
+        std::fs::write(repo.join("ignored.txt"), "keep\n").expect("write ignored");
+
+        let git_cmds = GitCommands::new(repo).expect("git");
+        git_cmds.nuke_working_tree().expect("nuke");
+
+        assert!(porcelain_paths(repo).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+            "original\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("staged.txt")).unwrap(),
+            "original\n"
+        );
+        assert!(!repo.join("untracked.txt").exists());
+        assert!(!repo.join("untracked-dir").exists());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("ignored.txt")).unwrap(),
+            "keep\n"
+        );
+    }
+
+    #[test]
+    fn nuke_working_tree_handles_unborn_repository() {
+        let temp = TempDir::new("nuke-unborn");
+        let repo = &temp.path;
+        init_repo(repo);
+
+        std::fs::write(repo.join("staged.txt"), "staged\n").expect("write staged");
+        git(repo, &["add", "staged.txt"]);
+        std::fs::write(repo.join("untracked.txt"), "untracked\n").expect("write untracked");
+
+        let git_cmds = GitCommands::new(repo).expect("git");
+        git_cmds.nuke_working_tree().expect("nuke unborn");
+
+        assert!(porcelain_paths(repo).is_empty());
+        assert!(!repo.join("staged.txt").exists());
+        assert!(!repo.join("untracked.txt").exists());
+    }
+
+    #[test]
     fn discard_files_handles_mixed_added_staged_and_modified() {
         let temp = TempDir::new("discard-mixed");
         let repo = &temp.path;
@@ -729,6 +842,128 @@ mod tests {
     }
 
     #[test]
+    fn discard_file_restores_staged_rename() {
+        let temp = TempDir::new("discard-single-rename");
+        let repo = &temp.path;
+        init_repo(repo);
+
+        std::fs::write(repo.join("old.txt"), "original\n").expect("write old");
+        git(repo, &["add", "old.txt"]);
+        git(repo, &["commit", "-qm", "init"]);
+        git(repo, &["mv", "old.txt", "new.txt"]);
+
+        let git_cmds = GitCommands::new(repo).expect("git");
+        let files = git_cmds.load_files_status_only().expect("status");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Renamed);
+
+        git_cmds.discard_file(&files[0]).expect("discard rename");
+
+        assert!(porcelain_paths(repo).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("old.txt")).unwrap(),
+            "original\n"
+        );
+        assert!(!repo.join("new.txt").exists());
+    }
+
+    #[test]
+    fn discard_file_restores_tracked_deletions_and_removes_staged_addition() {
+        let temp = TempDir::new("discard-single-delete-add");
+        let repo = &temp.path;
+        init_repo(repo);
+
+        std::fs::write(repo.join("unstaged-delete.txt"), "one\n").expect("write");
+        std::fs::write(repo.join("staged-delete.txt"), "two\n").expect("write");
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "init"]);
+
+        std::fs::remove_file(repo.join("unstaged-delete.txt")).expect("remove unstaged");
+        git(repo, &["rm", "-q", "staged-delete.txt"]);
+        std::fs::write(repo.join("added.txt"), "new\n").expect("write added");
+        git(repo, &["add", "added.txt"]);
+
+        let git_cmds = GitCommands::new(repo).expect("git");
+        let files = git_cmds.load_files_status_only().expect("status");
+        assert_eq!(files.len(), 3);
+        for file in &files {
+            git_cmds.discard_file(file).expect("discard file");
+        }
+
+        assert!(porcelain_paths(repo).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("unstaged-delete.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("staged-delete.txt")).unwrap(),
+            "two\n"
+        );
+        assert!(!repo.join("added.txt").exists());
+    }
+
+    #[test]
+    fn discard_file_resolves_conflict_to_head() {
+        let temp = TempDir::new("discard-single-conflict");
+        let repo = &temp.path;
+        init_repo(repo);
+
+        std::fs::write(repo.join("conflict.txt"), "base\n").expect("base");
+        git(repo, &["add", "conflict.txt"]);
+        git(repo, &["commit", "-qm", "base"]);
+        git(repo, &["checkout", "-qb", "other"]);
+        std::fs::write(repo.join("conflict.txt"), "other\n").expect("other");
+        git(repo, &["commit", "-qam", "other"]);
+        git(repo, &["checkout", "-q", "-"]);
+        std::fs::write(repo.join("conflict.txt"), "master\n").expect("master");
+        git(repo, &["commit", "-qam", "master"]);
+
+        let merge = Command::new("git")
+            .args(["merge", "other"])
+            .current_dir(repo)
+            .status()
+            .expect("merge");
+        assert!(!merge.success(), "merge should conflict");
+
+        let git_cmds = GitCommands::new(repo).expect("git");
+        let files = git_cmds.load_files_status_only().expect("status");
+        let file = files
+            .iter()
+            .find(|file| file.name == "conflict.txt")
+            .expect("conflict row");
+        assert!(file.has_merge_conflicts);
+
+        git_cmds.discard_file(file).expect("discard conflict");
+
+        assert!(porcelain_paths(repo).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("conflict.txt")).unwrap(),
+            "master\n"
+        );
+    }
+
+    #[test]
+    fn discard_files_handles_unborn_head() {
+        let temp = TempDir::new("discard-unborn-head");
+        let repo = &temp.path;
+        init_repo(repo);
+
+        std::fs::write(repo.join("staged.txt"), "staged\n").expect("write staged");
+        git(repo, &["add", "staged.txt"]);
+        std::fs::write(repo.join("untracked.txt"), "untracked\n").expect("write untracked");
+
+        let git_cmds = GitCommands::new(repo).expect("git");
+        let files = git_cmds.load_files_status_only().expect("status");
+        assert_eq!(files.len(), 2);
+
+        git_cmds.discard_files(&files).expect("discard unborn files");
+
+        assert!(porcelain_paths(repo).is_empty());
+        assert!(!repo.join("staged.txt").exists());
+        assert!(!repo.join("untracked.txt").exists());
+    }
+
+    #[test]
     fn discard_files_is_faster_than_per_file_on_large_changeset() {
         const N: usize = 120;
         let sequential_temp = TempDir::new("discard-seq");
@@ -743,9 +978,7 @@ mod tests {
         assert_eq!(sequential_files.len(), N);
         let sequential_start = std::time::Instant::now();
         for file in &sequential_files {
-            sequential_git
-                .discard_file(file.current_path(), file.added)
-                .expect("discard_file");
+            sequential_git.discard_file(file).expect("discard_file");
         }
         let sequential = sequential_start.elapsed();
 

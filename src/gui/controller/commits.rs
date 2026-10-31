@@ -536,9 +536,8 @@ const LARGE_REBASE_PLANNER_THRESHOLD: usize = 5_000;
 /// (`v`) when active; otherwise it's just the focused commit.
 ///
 /// The rebase base is the *real first-parent* of the oldest selected commit
-/// (not `commits[idx+1]`). The commits panel is loaded with `git log --all`,
-/// so adjacent rows are not necessarily related — using list index as parent
-/// previously marked/stopped on the wrong commit.
+/// (not `commits[idx+1]`). Topological order, merges, and explicit branch filters
+/// mean adjacent rows are not guaranteed to be a first-parent chain.
 fn apply_action_to_selection(gui: &mut Gui, action: RebaseAction) -> Result<()> {
     let selected = gui.context_mgr.selected_active();
     let (lo, hi) = if let Some(anchor) = gui.range_select_anchor {
@@ -761,9 +760,8 @@ fn open_rebase_planner(
         }
     }
 
-    // Selecting a commit from `git log --all` does not guarantee that commit is
-    // on the current HEAD ancestry. Avoid opening a planner for the wrong line
-    // of history.
+    // An explicit branch filter can show commits outside the current HEAD
+    // ancestry. Avoid opening a planner for the wrong line of history.
     if !selected_hashes.is_empty()
         && !commits_to_rebase
             .iter()

@@ -210,7 +210,7 @@ mod tests {
     fn stash_diff_is_plain_unified_output_when_git_color_is_forced() {
         let temp = TempDir::new("stash-diff");
         let repo = &temp.path;
-        git(repo, &["init", "-q"]);
+        git(repo, &["init", "-q", "--initial-branch=main"]);
         git(repo, &["config", "user.email", "test@example.com"]);
         git(repo, &["config", "user.name", "Test"]);
         git(repo, &["config", "color.ui", "always"]);

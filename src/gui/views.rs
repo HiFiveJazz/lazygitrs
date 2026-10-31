@@ -3108,6 +3108,7 @@ fn render_status_bar(
                 hints.extend([
                     ("\\", view_layout_hint),
                     ("d", "discard"),
+                    ("D", "reset/nuke"),
                     ("e", "edit"),
                     ("o", "open"),
                 ]);

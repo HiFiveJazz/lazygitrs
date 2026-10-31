@@ -243,6 +243,8 @@ pub struct FilesKeybinding {
     pub stash_all_changes: String,
     #[serde(rename = "viewStashOptions")]
     pub view_stash_options: String,
+    #[serde(rename = "viewResetOptions")]
+    pub view_reset_options: String,
     #[serde(rename = "toggleTreeView")]
     pub toggle_tree_view: String,
     pub fetch: String,
@@ -261,6 +263,7 @@ impl Default for FilesKeybinding {
             toggle_staged_all: "a".into(),
             stash_all_changes: "s".into(),
             view_stash_options: "S".into(),
+            view_reset_options: "D".into(),
             toggle_tree_view: "`".into(),
             fetch: "f".into(),
             ignore_file: "i".into(),
@@ -483,6 +486,7 @@ mod tests {
         assert_eq!(config.commits.move_down_commit, "}");
         assert_eq!(config.universal.scroll_up_main_alt1, "K");
         assert_eq!(config.universal.scroll_down_main_alt1, "J");
+        assert_eq!(config.files.view_reset_options, "D");
 
         assert_eq!(
             parse_key(&config.commits.patch_options),
