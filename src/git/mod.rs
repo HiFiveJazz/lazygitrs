@@ -32,8 +32,9 @@ use read_backend::{ReadRepository, RefSnapshot};
 /// independently so the UI can display whichever data is ready first.
 pub enum ModelPart {
     Files(Vec<model::File>),
-    /// Per-file line/hunk counts streamed after the status-only file list so
-    /// the Files panel can become interactive before diff enrichment finishes.
+    /// Second-phase Files data. On startup this completes the early tracked-only
+    /// list with untracked rows; on full loads it also carries per-file line/hunk
+    /// counts after the status-only list is already interactive.
     FileStats(Vec<model::File>),
     Branches(Vec<model::Branch>),
     Commits(Vec<model::Commit>),
@@ -398,14 +399,16 @@ impl GitCommands {
     /// of the worktree/index. Running them concurrently caused measurable I/O
     /// contention on large repositories (notably the Linux kernel tree).
     ///
-    /// Status-only Files are always sent first. `include_file_stats` controls
-    /// whether a second FileStats part enriches those visible rows with per-file
-    /// numstat/hunk counts; targeted refreshes send an empty enrichment marker.
+    /// Status-only Files are always sent first. On initial startup,
+    /// `publish_tracked_early` lets tracked changes reach the UI before the slower
+    /// untracked scan completes. `include_file_stats` controls whether the second
+    /// FileStats phase also enriches rows with per-file numstat/hunk counts.
     fn stream_files_then_diff_stats(
         self: &Arc<Self>,
         tx: &mpsc::Sender<ModelPart>,
         include_file_stats: bool,
         trim_on_disconnect: bool,
+        publish_tracked_early: bool,
     ) {
         let tx = tx.clone();
         let git = Arc::clone(self);
@@ -416,43 +419,106 @@ impl GitCommands {
                 }
             };
 
-            if let Ok(mut files) = git.load_files_status_only() {
-                let has_tracked_changes = files.iter().any(|file| file.tracked);
+            let (mut files, published_tracked_early) = if publish_tracked_early {
+                // Start the expensive untracked walk first, then obtain tracked
+                // status on this worker. As soon as tracked status is ready we can
+                // paint useful Files rows without waiting for repo-wide `??`
+                // discovery to finish. The second phase is carried in FileStats so
+                // the stream still emits the same number of model parts.
+                let untracked_git = Arc::clone(&git);
+                let untracked = std::thread::spawn(move || {
+                    untracked_git.load_untracked_files_status_only_git()
+                });
 
-                // Status is the latency-critical result. Publish it immediately
-                // instead of holding the whole Files panel behind numstat/hunk
-                // enrichment. Keep our local copy for the follow-up stats pass.
-                if tx.send(ModelPart::Files(files.clone())).is_err() {
-                    trim_if_abandoned();
-                    return;
+                match git.load_tracked_files_status_only_git() {
+                    Ok(tracked) => {
+                        if tx.send(ModelPart::Files(tracked.clone())).is_err() {
+                            trim_if_abandoned();
+                            return;
+                        }
+
+                        let files = match untracked.join() {
+                            Ok(Ok(untracked)) => {
+                                GitCommands::merge_file_status_parts(tracked, untracked)
+                            }
+                            _ => match git.load_files_status_only_git_uall() {
+                                Ok(files) => files,
+                                Err(_) => {
+                                    trim_if_abandoned();
+                                    return;
+                                }
+                            },
+                        };
+                        (files, true)
+                    }
+                    Err(_) => {
+                        let _ = untracked.join();
+                        let files = match git.load_files_status_only_git_uall() {
+                            Ok(files) => files,
+                            Err(_) => {
+                                trim_if_abandoned();
+                                return;
+                            }
+                        };
+                        (files, false)
+                    }
                 }
-
-                if include_file_stats && has_tracked_changes {
-                    git.populate_file_diff_stats(&mut files);
-                    if tx.send(ModelPart::FileStats(files)).is_err() {
+            } else {
+                match git.load_files_status_only() {
+                    Ok(files) => (files, false),
+                    Err(_) => {
                         trim_if_abandoned();
                         return;
                     }
-                } else if tx.send(ModelPart::FileStats(Vec::new())).is_err() {
+                }
+            };
+
+            let has_tracked_changes = files.iter().any(|file| file.tracked);
+
+            // Normal refreshes publish the complete status in one Files part.
+            // Startup may already have published tracked rows above; in that case
+            // FileStats carries the complete set so apply_file_stats can append
+            // newly discovered untracked rows without disturbing the visible
+            // tracked selection.
+            if !published_tracked_early
+                && tx.send(ModelPart::Files(files.clone())).is_err()
+            {
+                trim_if_abandoned();
+                return;
+            }
+
+            if include_file_stats && has_tracked_changes {
+                git.populate_file_diff_stats(&mut files);
+                if tx.send(ModelPart::FileStats(files)).is_err() {
                     trim_if_abandoned();
                     return;
                 }
-
-                // shortstat intentionally omits untracked files. A clean tree
-                // (or one containing only untracked files) therefore has an
-                // exact 0/0 answer without another full-tree Git process.
-                if !has_tracked_changes {
-                    if tx
-                        .send(ModelPart::DiffStats {
-                            added: 0,
-                            deleted: 0,
-                        })
-                        .is_err()
-                    {
-                        trim_if_abandoned();
-                    }
+            } else {
+                let completion = if published_tracked_early {
+                    files
+                } else {
+                    Vec::new()
+                };
+                if tx.send(ModelPart::FileStats(completion)).is_err() {
+                    trim_if_abandoned();
                     return;
                 }
+            }
+
+            // shortstat intentionally omits untracked files. A clean tree
+            // (or one containing only untracked files) therefore has an
+            // exact 0/0 answer without another full-tree Git process.
+            if !has_tracked_changes {
+                if tx
+                    .send(ModelPart::DiffStats {
+                        added: 0,
+                        deleted: 0,
+                    })
+                    .is_err()
+                {
+                    trim_if_abandoned();
+                }
+                return;
             }
 
             if let Ok((added, deleted)) = git.diff_shortstat()
@@ -477,6 +543,7 @@ impl GitCommands {
         self: &Arc<Self>,
         tx: &mpsc::Sender<ModelPart>,
         commit_filter: Option<crate::git::commit::CommitFilter>,
+        publish_tracked_early: bool,
     ) {
         macro_rules! spawn_part {
             ($tx:expr, $self:expr, $variant:ident, $expr:expr) => {{
@@ -492,7 +559,7 @@ impl GitCommands {
 
         // Preserve full-refresh per-file stats, but avoid racing the aggregate
         // shortstat against the same status/diff work.
-        self.stream_files_then_diff_stats(tx, true, false);
+        self.stream_files_then_diff_stats(tx, true, false, publish_tracked_early);
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
         self.stream_commits_then_unpushed(tx, commit_filter);
         spawn_part!(tx, self, Stash, |g: &GitCommands| g.load_stash());
@@ -642,7 +709,7 @@ impl GitCommands {
         // expensive per-file numstat/hunk scans immediately. The selected diff
         // is refreshed separately by the GUI. Serialize shortstat behind status
         // so the two full-tree scans do not compete with each other.
-        self.stream_files_then_diff_stats(tx, false, false);
+        self.stream_files_then_diff_stats(tx, false, false, false);
 
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
 
@@ -729,7 +796,7 @@ impl GitCommands {
         // (notably Linux) status dominates checkout refresh latency. If this
         // refresh is superseded by another checkout, the dropped receiver makes
         // the worker stop before shortstat and trim any allocator residue.
-        self.stream_files_then_diff_stats(tx, false, true);
+        self.stream_files_then_diff_stats(tx, false, true, false);
 
         // Everything else is intentionally serialized on one worker. These
         // reads are individually cheap compared with status, and avoiding a
@@ -819,7 +886,7 @@ impl GitCommands {
         // Local history changes can affect working-tree status, but the selected
         // diff is refreshed separately by the GUI, so avoid per-file diff stats.
         // Serialize shortstat behind status to avoid two competing worktree scans.
-        self.stream_files_then_diff_stats(tx, false, false);
+        self.stream_files_then_diff_stats(tx, false, false, false);
 
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
 
@@ -1089,6 +1156,45 @@ mod tests {
         let git = GitCommands::new(temp.path()).unwrap();
         assert!(git.head_state().is_err());
         assert_eq!(git.current_branch_name().unwrap(), "main");
+    }
+
+    #[test]
+    fn default_commit_history_excludes_tag_roots_but_keeps_tag_navigation() {
+        let temp = TempDir::new("commit-history-tag-roots");
+        let run = |args: &[&str]| run_test_git(temp.path(), args);
+        run(&["init", "-b", "main"]);
+        run(&["commit", "--allow-empty", "-m", "root"]);
+        let root = run(&["rev-parse", "HEAD"]);
+        run(&["tag", "reachable-tag"]);
+
+        run(&["checkout", "-b", "archive"]);
+        run(&["commit", "--allow-empty", "-m", "tag only"]);
+        let tag_only = run(&["rev-parse", "HEAD"]);
+        run(&["tag", "tag-only"]);
+        run(&["checkout", "main"]);
+        run(&["branch", "-D", "archive"]);
+
+        let git = GitCommands::new(temp.path()).unwrap();
+        let commits = git.load_commits_page(50, 0).unwrap();
+        assert!(commits.iter().any(|commit| commit.hash == root));
+        assert!(!commits.iter().any(|commit| commit.hash == tag_only));
+        assert!(
+            commits
+                .iter()
+                .find(|commit| commit.hash == root)
+                .unwrap()
+                .tags
+                .iter()
+                .any(|tag| tag == "reachable-tag")
+        );
+
+        let tagged = git.load_commits_for_branch("tag-only", 10).unwrap();
+        assert_eq!(tagged[0].hash, tag_only);
+
+        run(&["checkout", "--detach", &tag_only]);
+        let git = GitCommands::new(temp.path()).unwrap();
+        let detached = git.load_commits_page(50, 0).unwrap();
+        assert!(detached.iter().any(|commit| commit.hash == tag_only));
     }
 
     #[test]
@@ -1425,10 +1531,11 @@ mod tests {
         run(&["add", "tracked.txt"]);
         run(&["commit", "-m", "initial"]);
         std::fs::write(temp.path().join("tracked.txt"), "one\ntwo\n").expect("modify tracked");
+        std::fs::write(temp.path().join("untracked.txt"), "new\n").expect("write untracked");
 
         let git = Arc::new(GitCommands::new(temp.path()).expect("git"));
         let (tx, rx) = mpsc::channel();
-        git.stream_files_then_diff_stats(&tx, true, false);
+        git.stream_files_then_diff_stats(&tx, true, false, true);
         drop(tx);
 
         let parts: Vec<_> = rx.into_iter().collect();
@@ -1441,16 +1548,25 @@ mod tests {
             unreachable!();
         };
         assert_eq!(status_files.len(), 1);
+        assert_eq!(status_files[0].name, "tracked.txt");
+        assert!(status_files[0].tracked);
         assert_eq!(status_files[0].additions, 0);
         assert_eq!(status_files[0].hunk_count, 0);
 
         let ModelPart::FileStats(enriched_files) = &parts[1] else {
             unreachable!();
         };
-        assert_eq!(enriched_files.len(), 1);
-        assert_eq!(enriched_files[0].additions, 1);
-        assert_eq!(enriched_files[0].deletions, 0);
-        assert_eq!(enriched_files[0].hunk_count, 1);
+        assert_eq!(enriched_files.len(), 2);
+        let tracked = enriched_files
+            .iter()
+            .find(|file| file.name == "tracked.txt")
+            .unwrap();
+        assert_eq!(tracked.additions, 1);
+        assert_eq!(tracked.deletions, 0);
+        assert_eq!(tracked.hunk_count, 1);
+        assert!(enriched_files.iter().any(|file| {
+            file.name == "untracked.txt" && !file.tracked && file.status == model::FileStatus::Untracked
+        }));
     }
 
     fn assert_success(status: std::io::Result<std::process::ExitStatus>) {

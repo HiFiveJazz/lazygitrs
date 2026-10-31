@@ -37,26 +37,13 @@ impl GitCommands {
         // avoiding status' untracked-directory bookkeeping, `-z` gives us paths
         // verbatim so filenames containing whitespace/newlines need no unquoting.
         let (tracked, untracked) = std::thread::scope(|scope| {
-            let tracked = scope.spawn(|| {
-                self.git()
-                    .args(&["status", "--porcelain", "-z", "-uno"])
-                    .run_expecting_success()
-            });
-            let untracked = scope.spawn(|| {
-                self.git()
-                    .args(&["ls-files", "-z", "--others", "--exclude-standard"])
-                    .run_expecting_success()
-            });
+            let tracked = scope.spawn(|| self.load_tracked_files_status_only_git());
+            let untracked = scope.spawn(|| self.load_untracked_files_status_only_git());
             (tracked.join(), untracked.join())
         });
 
         if let (Ok(Ok(tracked)), Ok(Ok(untracked))) = (tracked, untracked) {
-            let mut files = parse_porcelain_status_z(&tracked.stdout);
-            files.extend(parse_untracked_paths_z(&untracked.stdout));
-            // `status -uall` returned one path-sorted stream. Preserve that UI
-            // ordering after merging the two independently sorted commands.
-            files.sort_by(|a, b| a.current_path().cmp(b.current_path()));
-            return Ok(files);
+            return Ok(Self::merge_file_status_parts(tracked, untracked));
         }
 
         // Compatibility fallback for unusual repositories/configurations where
@@ -65,7 +52,32 @@ impl GitCommands {
         self.load_files_status_only_git_uall()
     }
 
-    fn load_files_status_only_git_uall(&self) -> Result<Vec<File>> {
+    pub(super) fn load_tracked_files_status_only_git(&self) -> Result<Vec<File>> {
+        let result = self
+            .git()
+            .args(&["status", "--porcelain", "-z", "-uno"])
+            .run_expecting_success()?;
+        Ok(parse_porcelain_status_z(&result.stdout))
+    }
+
+    pub(super) fn load_untracked_files_status_only_git(&self) -> Result<Vec<File>> {
+        let result = self
+            .git()
+            .args(&["ls-files", "-z", "--others", "--exclude-standard"])
+            .run_expecting_success()?;
+        Ok(parse_untracked_paths_z(&result.stdout))
+    }
+
+    pub(super) fn merge_file_status_parts(
+        mut tracked: Vec<File>,
+        untracked: Vec<File>,
+    ) -> Vec<File> {
+        tracked.extend(untracked);
+        tracked.sort_by(|a, b| a.current_path().cmp(b.current_path()));
+        tracked
+    }
+
+    pub(super) fn load_files_status_only_git_uall(&self) -> Result<Vec<File>> {
         let result = self
             .git()
             .args(&["status", "--porcelain", "-uall"])

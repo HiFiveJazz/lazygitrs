@@ -85,6 +85,24 @@ fn context_claims_global_repo_key(
         || matches!(active, ContextId::Tags) && key.code == KeyCode::Char('P')
 }
 
+/// Return whether a streamed model update can change the preview for the
+/// currently active context. Metadata-only updates must not invalidate an
+/// otherwise identical diff: doing so restarts the mutable Files preview even
+/// though its source did not change.
+fn streamed_model_part_affects_diff(active: ContextId, part: &ModelPart) -> bool {
+    match active {
+        ContextId::Files => matches!(part, ModelPart::Files(_)),
+        ContextId::Commits => matches!(part, ModelPart::Commits(_)),
+        ContextId::Reflog => matches!(part, ModelPart::Reflog(_)),
+        ContextId::Stash => matches!(part, ModelPart::Stash(_)),
+        // Branch-commit and commit-file subviews are refreshed after the model
+        // stream completes. Those async refreshes set needs_diff_refresh when
+        // their actual backing data arrives, so generic model parts do not need
+        // to invalidate them here. Other sidebar contexts do not render a diff.
+        _ => false,
+    }
+}
+
 fn list_picker_visible_height(terminal_height: usize) -> usize {
     let popup_h = (terminal_height * 60 / 100)
         .max(10)
@@ -1379,7 +1397,7 @@ impl Gui {
                 });
 
         let (initial_load_tx, initial_load_rx) = mpsc::channel();
-        git.load_model_streaming(&initial_load_tx, startup_commit_filter);
+        git.load_model_streaming(&initial_load_tx, startup_commit_filter, true);
 
         let commit_history = Self::load_commit_history(&config);
 
@@ -1666,8 +1684,10 @@ impl Gui {
                 let mut got_files = false;
                 let mut got_commits = false;
                 let mut got_rebase_in_progress = false;
-                let received_before = self.initial_load_received;
+                let mut diff_source_changed = false;
                 while let Ok(part) = rx.try_recv() {
+                    diff_source_changed |=
+                        streamed_model_part_affects_diff(self.context_mgr.active(), &part);
                     let mut model = self.model.lock().unwrap();
                     match part {
                         ModelPart::Files(v) => {
@@ -1675,8 +1695,23 @@ impl Gui {
                             got_files = true;
                         }
                         ModelPart::FileStats(v) => {
-                            model.apply_file_stats(v);
-                            got_files = true;
+                            let was_empty = model.files.is_empty();
+                            let file_set_grew = model.apply_file_stats(v);
+                            if file_set_grew {
+                                got_files = true;
+                            }
+                            // On startup with only untracked changes, the first
+                            // Files phase is empty. When untracked discovery then
+                            // supplies the first visible row, the preview source
+                            // really did change from Files:none to that file. If
+                            // tracked rows were already visible, appended ?? rows
+                            // do not invalidate the selected tracked diff.
+                            if was_empty
+                                && !model.files.is_empty()
+                                && self.context_mgr.active() == ContextId::Files
+                            {
+                                diff_source_changed = true;
+                            }
                         }
                         ModelPart::Branches(v) => model.branches = v,
                         ModelPart::Commits(v) => {
@@ -1746,12 +1781,11 @@ impl Gui {
                     self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
                     self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
                 }
-                // Trigger a diff reload when new data arrived THIS frame.
-                // (A cumulative `> 0` check here re-requested the same diff
-                // every frame for the whole stream, and each request's
-                // generation bump invalidated the in-flight result — diffs
-                // only settled once streaming finished.)
-                if self.initial_load_received > received_before {
+                // Only invalidate the preview when the model data that backs the
+                // active diff actually changed. FileStats, DiffStats, branch/tag
+                // metadata, contributor data, etc. cannot change the selected diff
+                // and used to restart the exact same Git diff as they streamed in.
+                if diff_source_changed {
                     self.needs_diff_refresh = true;
                 }
                 // All parts received — done loading.
@@ -1765,9 +1799,10 @@ impl Gui {
                     self.refresh_in_progress = false;
 
                     // Leave needs_refresh alone: if another mutation arrived
-                    // mid-refresh it will re-queue on the next frame.
+                    // mid-refresh it will re-queue on the next frame. The preview
+                    // was already invalidated when its actual backing model part
+                    // arrived; stream completion alone does not change the diff.
                     self.needs_files_refresh = false;
-                    self.needs_diff_refresh = true;
                     self.last_refresh_at = Instant::now();
 
                     // Periodic refresh only updates Files + Submodules. Those parts are
@@ -10448,7 +10483,7 @@ impl Gui {
         let git = Arc::clone(&self.git);
         let commit_filter = self.commit_filter_for_load();
         std::thread::spawn(move || {
-            git.load_model_streaming(&tx, commit_filter);
+            git.load_model_streaming(&tx, commit_filter, false);
         });
     }
 
@@ -11471,6 +11506,66 @@ mod terminal_mouse_tests {
         let key = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
         assert!(context_claims_global_repo_key(ContextId::Tags, key, &kb));
         assert!(!context_claims_global_repo_key(ContextId::Files, key, &kb));
+    }
+
+    #[test]
+    fn streamed_metadata_does_not_invalidate_files_diff() {
+        assert!(streamed_model_part_affects_diff(
+            ContextId::Files,
+            &ModelPart::Files(Vec::new())
+        ));
+
+        assert!(!streamed_model_part_affects_diff(
+            ContextId::Files,
+            &ModelPart::FileStats(Vec::new())
+        ));
+        assert!(!streamed_model_part_affects_diff(
+            ContextId::Files,
+            &ModelPart::DiffStats {
+                added: 1,
+                deleted: 2,
+            }
+        ));
+        assert!(!streamed_model_part_affects_diff(
+            ContextId::Files,
+            &ModelPart::Head {
+                hash: "deadbeef".to_string(),
+                branch_name: "main".to_string(),
+            }
+        ));
+        assert!(!streamed_model_part_affects_diff(
+            ContextId::Files,
+            &ModelPart::Tags(Vec::new())
+        ));
+    }
+
+    #[test]
+    fn streamed_diff_sources_only_invalidate_their_own_context() {
+        assert!(streamed_model_part_affects_diff(
+            ContextId::Commits,
+            &ModelPart::Commits(Vec::new())
+        ));
+        assert!(streamed_model_part_affects_diff(
+            ContextId::Reflog,
+            &ModelPart::Reflog(Vec::new())
+        ));
+        assert!(streamed_model_part_affects_diff(
+            ContextId::Stash,
+            &ModelPart::Stash(Vec::new())
+        ));
+
+        assert!(!streamed_model_part_affects_diff(
+            ContextId::Commits,
+            &ModelPart::UnpushedCommitHashes(Vec::new())
+        ));
+        assert!(!streamed_model_part_affects_diff(
+            ContextId::Files,
+            &ModelPart::Commits(Vec::new())
+        ));
+        assert!(!streamed_model_part_affects_diff(
+            ContextId::BranchCommits,
+            &ModelPart::Branches(Vec::new())
+        ));
     }
 
     #[test]

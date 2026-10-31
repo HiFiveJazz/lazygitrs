@@ -228,20 +228,33 @@ impl Model {
         self.files = out;
     }
 
-    /// Apply diff-derived stats without replacing status/order. The status-only
-    /// Files result is intentionally rendered first during startup; this later
-    /// enrichment should only fill the columns that depend on `git diff`.
-    pub fn apply_file_stats(&mut self, stats: Vec<File>) {
-        let by_name: HashMap<String, File> =
+    /// Apply the second phase of Files loading. Existing rows only receive
+    /// diff-derived stats, while rows missing from the first phase (normally
+    /// untracked files discovered by the slower worktree scan) are appended.
+    ///
+    /// Returning true means the visible file set grew and tree view should be
+    /// rebuilt. Appending rather than re-sorting keeps an already-visible tracked
+    /// selection stable while untracked discovery catches up.
+    pub fn apply_file_stats(&mut self, stats: Vec<File>) -> bool {
+        let mut by_name: HashMap<String, File> =
             stats.into_iter().map(|file| (file.name.clone(), file)).collect();
         for file in &mut self.files {
-            let Some(stat) = by_name.get(&file.name) else {
+            let Some(stat) = by_name.remove(&file.name) else {
                 continue;
             };
             file.additions = stat.additions;
             file.deletions = stat.deletions;
             file.hunk_count = stat.hunk_count;
         }
+
+        if by_name.is_empty() {
+            return false;
+        }
+
+        let mut missing: Vec<File> = by_name.into_values().collect();
+        missing.sort_by(|a, b| a.current_path().cmp(b.current_path()));
+        self.files.extend(missing);
+        true
     }
 }
 

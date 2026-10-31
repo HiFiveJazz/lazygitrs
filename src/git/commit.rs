@@ -266,11 +266,13 @@ impl GitCommands {
         let format = "%H|%s|%an|%ae|%at|%P|%D";
         let mut cmd = self.git().arg("log");
 
-        // Unfiltered and path-filtered lists both walk all refs (`--all`), matching
-        // our unfiltered commits panel and what lazygit shows for `-f` when the
-        // history for a path lives outside HEAD (e.g. checkpoint refs).
+        // Unfiltered and path-filtered lists walk every non-tag ref. Tags still
+        // appear in %D decorations and remain directly navigable, but making every
+        // tag a revision root is extremely expensive in tag-heavy repositories
+        // (notably the Linux kernel). Preserve HEAD, branches, remotes, stash, and
+        // custom/checkpoint refs while excluding only refs/tags/* from traversal.
         if filter.branches.is_empty() {
-            cmd = cmd.arg("--all");
+            cmd = cmd.arg("--exclude=refs/tags/*").arg("--all");
         } else {
             for branch in &filter.branches {
                 cmd = cmd.arg(branch);
