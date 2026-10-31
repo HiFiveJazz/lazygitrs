@@ -37,10 +37,12 @@ impl GitCommands {
 
     pub fn stash_save(&self, message: &str) -> Result<()> {
         if message.is_empty() {
-            self.git().args(&["stash"]).run_expecting_success()?;
+            self.git()
+                .args(&["stash", "push", "--quiet"])
+                .run_expecting_success()?;
         } else {
             self.git()
-                .args(&["stash", "push", "-m", message])
+                .args(&["stash", "push", "--quiet", "-m", message])
                 .run_expecting_success()?;
         }
         Ok(())
@@ -50,11 +52,11 @@ impl GitCommands {
     pub fn stash_staged(&self, message: &str) -> Result<()> {
         if message.is_empty() {
             self.git()
-                .args(&["stash", "push", "--staged"])
+                .args(&["stash", "push", "--quiet", "--staged"])
                 .run_expecting_success()?;
         } else {
             self.git()
-                .args(&["stash", "push", "--staged", "-m", message])
+                .args(&["stash", "push", "--quiet", "--staged", "-m", message])
                 .run_expecting_success()?;
         }
         Ok(())
@@ -99,21 +101,21 @@ impl GitCommands {
 
     pub fn stash_pop(&self, index: usize) -> Result<()> {
         self.git()
-            .args(&["stash", "pop", &format!("stash@{{{}}}", index)])
+            .args(&["stash", "pop", "--quiet", &format!("stash@{{{}}}", index)])
             .run_expecting_success()?;
         Ok(())
     }
 
     pub fn stash_apply(&self, index: usize) -> Result<()> {
         self.git()
-            .args(&["stash", "apply", &format!("stash@{{{}}}", index)])
+            .args(&["stash", "apply", "--quiet", &format!("stash@{{{}}}", index)])
             .run_expecting_success()?;
         Ok(())
     }
 
     pub fn stash_drop(&self, index: usize) -> Result<()> {
         self.git()
-            .args(&["stash", "drop", &format!("stash@{{{}}}", index)])
+            .args(&["stash", "drop", "--quiet", &format!("stash@{{{}}}", index)])
             .run_expecting_success()?;
         Ok(())
     }
@@ -122,11 +124,11 @@ impl GitCommands {
     pub fn stash_include_untracked(&self, message: &str) -> Result<()> {
         if message.is_empty() {
             self.git()
-                .args(&["stash", "push", "--include-untracked"])
+                .args(&["stash", "push", "--quiet", "--include-untracked"])
                 .run_expecting_success()?;
         } else {
             self.git()
-                .args(&["stash", "push", "--include-untracked", "-m", message])
+                .args(&["stash", "push", "--quiet", "--include-untracked", "-m", message])
                 .run_expecting_success()?;
         }
         Ok(())
@@ -136,11 +138,11 @@ impl GitCommands {
     pub fn stash_keep_index(&self, message: &str) -> Result<()> {
         if message.is_empty() {
             self.git()
-                .args(&["stash", "push", "--keep-index"])
+                .args(&["stash", "push", "--quiet", "--keep-index"])
                 .run_expecting_success()?;
         } else {
             self.git()
-                .args(&["stash", "push", "--keep-index", "-m", message])
+                .args(&["stash", "push", "--quiet", "--keep-index", "-m", message])
                 .run_expecting_success()?;
         }
         Ok(())
@@ -150,11 +152,11 @@ impl GitCommands {
     pub fn stash_unstaged(&self, message: &str) -> Result<()> {
         if message.is_empty() {
             self.git()
-                .args(&["stash", "push", "--keep-index"])
+                .args(&["stash", "push", "--quiet", "--keep-index"])
                 .run_expecting_success()?;
         } else {
             self.git()
-                .args(&["stash", "push", "--keep-index", "-m", message])
+                .args(&["stash", "push", "--quiet", "--keep-index", "-m", message])
                 .run_expecting_success()?;
         }
         Ok(())

@@ -390,6 +390,8 @@ impl Default for CommitsKeybinding {
 pub struct StashKeybinding {
     #[serde(rename = "popStash")]
     pub pop_stash: String,
+    #[serde(rename = "applyStash")]
+    pub apply_stash: String,
     #[serde(rename = "renameStash")]
     pub rename_stash: String,
 }
@@ -397,7 +399,8 @@ pub struct StashKeybinding {
 impl Default for StashKeybinding {
     fn default() -> Self {
         Self {
-            pop_stash: "g".into(),
+            pop_stash: "<space>".into(),
+            apply_stash: "a".into(),
             rename_stash: "r".into(),
         }
     }
@@ -496,6 +499,28 @@ mod tests {
             parse_key(&config.universal.scroll_down_main_alt1),
             Some(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT))
         );
+    }
+
+    #[test]
+    fn stash_defaults_pop_with_space_and_apply_with_a() {
+        let config = KeybindingConfig::default();
+        assert_eq!(config.stash.pop_stash, "<space>");
+        assert_eq!(config.stash.apply_stash, "a");
+        assert_eq!(
+            parse_key(&config.stash.pop_stash),
+            Some(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_key(&config.stash.apply_stash),
+            Some(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        );
+
+        // Existing configs that do not know about applyStash inherit the new
+        // default without breaking deserialization.
+        let parsed: KeybindingConfig =
+            serde_yaml::from_str("stash:\n  popStash: g\n").expect("valid yaml");
+        assert_eq!(parsed.stash.pop_stash, "g");
+        assert_eq!(parsed.stash.apply_stash, "a");
     }
 
     #[test]

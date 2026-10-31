@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
 use crate::gui::Gui;
-use crate::gui::popup::{MenuItem, PopupState, make_textarea};
+use crate::gui::popup::{PopupState, make_textarea};
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
     // Enter: view stash files
@@ -12,13 +12,13 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return enter_stash_files(gui);
     }
 
-    // Pop stash
+    // Pop stash. Default: Space.
     if matches_key(key, &keybindings.stash.pop_stash) {
         return pop_stash(gui);
     }
 
-    // Apply stash with space
-    if key.code == KeyCode::Char(' ') {
+    // Apply stash while keeping it in the stash list. Default: a.
+    if matches_key(key, &keybindings.stash.apply_stash) {
         return apply_stash(gui);
     }
 
@@ -83,29 +83,18 @@ fn pop_stash(gui: &mut Gui) -> Result<()> {
         let name = entry.name.clone();
         drop(model);
 
-        gui.popup = PopupState::Menu {
-            title: format!("Pop stash '{}'?", name),
-            items: vec![
-                MenuItem {
-                    label: "Pop".to_string(),
-                    description: "apply and drop this stash".to_string(),
-                    key: Some("g".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.start_background_mutation("Popping stash", move |git| {
-                            git.stash_pop(index)
-                        });
-                        Ok(())
-                    })),
-                },
-                MenuItem {
-                    label: "Cancel".to_string(),
-                    description: String::new(),
-                    key: Some("c".to_string()),
-                    action: Some(Box::new(|_| Ok(()))),
-                },
-            ],
-            selected: 0,
-            loading_index: None,
+        gui.popup = PopupState::Confirm {
+            title: "Pop stash".to_string(),
+            message: format!(
+                "Apply this stash and remove it from the stash list?\n\n{}",
+                name
+            ),
+            on_confirm: Box::new(move |gui| {
+                gui.start_background_stash_mutation("Popping stash", true, move |git| {
+                    git.stash_pop(index)
+                });
+                Ok(())
+            }),
         };
     }
     Ok(())
@@ -119,29 +108,18 @@ fn apply_stash(gui: &mut Gui) -> Result<()> {
         let name = entry.name.clone();
         drop(model);
 
-        gui.popup = PopupState::Menu {
-            title: format!("Apply stash '{}'?", name),
-            items: vec![
-                MenuItem {
-                    label: "Apply".to_string(),
-                    description: "apply stash (keep in stash list)".to_string(),
-                    key: Some("a".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.start_background_mutation("Applying stash", move |git| {
-                            git.stash_apply(index)
-                        });
-                        Ok(())
-                    })),
-                },
-                MenuItem {
-                    label: "Cancel".to_string(),
-                    description: String::new(),
-                    key: Some("c".to_string()),
-                    action: Some(Box::new(|_| Ok(()))),
-                },
-            ],
-            selected: 0,
-            loading_index: None,
+        gui.popup = PopupState::Confirm {
+            title: "Apply stash".to_string(),
+            message: format!(
+                "Apply this stash and keep it in the stash list?\n\n{}",
+                name
+            ),
+            on_confirm: Box::new(move |gui| {
+                gui.start_background_stash_mutation("Applying stash", true, move |git| {
+                    git.stash_apply(index)
+                });
+                Ok(())
+            }),
         };
     }
     Ok(())
@@ -155,29 +133,18 @@ fn drop_stash(gui: &mut Gui) -> Result<()> {
         let name = entry.name.clone();
         drop(model);
 
-        gui.popup = PopupState::Menu {
-            title: format!("Drop stash '{}'?", name),
-            items: vec![
-                MenuItem {
-                    label: "Drop".to_string(),
-                    description: "permanently remove this stash".to_string(),
-                    key: Some("d".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.start_background_mutation("Dropping stash", move |git| {
-                            git.stash_drop(index)
-                        });
-                        Ok(())
-                    })),
-                },
-                MenuItem {
-                    label: "Cancel".to_string(),
-                    description: String::new(),
-                    key: Some("c".to_string()),
-                    action: Some(Box::new(|_| Ok(()))),
-                },
-            ],
-            selected: 0,
-            loading_index: None,
+        gui.popup = PopupState::Confirm {
+            title: "Drop stash".to_string(),
+            message: format!(
+                "Permanently remove this stash?\n\n{}",
+                name
+            ),
+            on_confirm: Box::new(move |gui| {
+                gui.start_background_stash_mutation("Dropping stash", false, move |git| {
+                    git.stash_drop(index)
+                });
+                Ok(())
+            }),
         };
     }
     Ok(())
@@ -199,7 +166,7 @@ fn rename_stash(gui: &mut Gui) -> Result<()> {
             on_confirm: Box::new(move |gui, new_name| {
                 if !new_name.is_empty() {
                     let new_name = new_name.to_string();
-                    gui.start_background_mutation("Renaming stash", move |git| {
+                    gui.start_background_stash_mutation("Renaming stash", false, move |git| {
                         git.stash_rename(index, &new_name)
                     });
                 }

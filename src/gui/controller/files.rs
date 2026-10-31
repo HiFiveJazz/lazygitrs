@@ -821,14 +821,14 @@ fn open_stash_message_prompt(gui: &mut Gui, kind: StashKind) {
         title: "Stash message (leave empty for default)".to_string(),
         textarea: make_textarea(""),
         on_confirm: Box::new(move |gui, message| {
-            match kind {
-                StashKind::All => gui.git.stash_save(message)?,
-                StashKind::KeepIndex => gui.git.stash_keep_index(message)?,
-                StashKind::IncludeUntracked => gui.git.stash_include_untracked(message)?,
-                StashKind::Staged => gui.git.stash_staged(message)?,
-                StashKind::Unstaged => gui.git.stash_unstaged(message)?,
-            }
-            gui.needs_refresh = true;
+            let message = message.to_string();
+            gui.start_background_stash_mutation("Creating stash", true, move |git| match kind {
+                StashKind::All => git.stash_save(&message),
+                StashKind::KeepIndex => git.stash_keep_index(&message),
+                StashKind::IncludeUntracked => git.stash_include_untracked(&message),
+                StashKind::Staged => git.stash_staged(&message),
+                StashKind::Unstaged => git.stash_unstaged(&message),
+            });
             Ok(())
         }),
         is_commit: false,
@@ -841,8 +841,10 @@ fn stash_changes(gui: &mut Gui) -> Result<()> {
         title: "Stash message (leave empty for default)".to_string(),
         textarea: make_textarea(""),
         on_confirm: Box::new(|gui, message| {
-            gui.git.stash_save(message)?;
-            gui.needs_refresh = true;
+            let message = message.to_string();
+            gui.start_background_stash_mutation("Creating stash", true, move |git| {
+                git.stash_save(&message)
+            });
             Ok(())
         }),
         is_commit: false,

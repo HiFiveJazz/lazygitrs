@@ -4416,6 +4416,103 @@ impl Gui {
         });
     }
 
+    /// Run a stash mutation without falling back to the expensive full-model refresh.
+    ///
+    /// Stash creation/apply/pop can only change the worktree/index and stash reflog;
+    /// drop/rename only change the stash reflog. Refresh those pieces directly and
+    /// in parallel so stash actions do not reload branches, commits, remotes, tags,
+    /// worktrees, reflog history, contributors, and other unrelated model state.
+    pub(crate) fn start_background_stash_mutation<F>(
+        &mut self,
+        title: &str,
+        refresh_worktree: bool,
+        op: F,
+    ) where
+        F: FnOnce(&GitCommands) -> Result<()> + Send + 'static,
+    {
+        if self.background_mutation_label.is_some() {
+            return;
+        }
+
+        self.background_mutation_label = Some(title.to_string());
+        let git = Arc::clone(&self.git);
+        let tx = self.ui_job_tx.clone();
+        let title = title.to_string();
+
+        std::thread::spawn(move || {
+            let operation_result = op(&git);
+
+            // Keep worktree-wide reads serialized. On large repositories, running
+            // status and shortstat concurrently makes both slower by competing for
+            // filesystem/cache bandwidth. The stash list itself is tiny.
+            let stash_result = git.load_stash();
+            let files_result = refresh_worktree.then(|| git.load_files_status_only());
+            let diff_stats_result = refresh_worktree.then(|| git.diff_shortstat());
+
+            let _ = tx.send(Box::new(move |gui: &mut Gui| {
+                gui.background_mutation_label = None;
+
+                let mut stash_changed = false;
+                let mut files_changed = false;
+                let mut refresh_error: Option<anyhow::Error> = None;
+
+                {
+                    let mut model = gui.model.lock().unwrap();
+
+                    match stash_result {
+                        Ok(stashes) => {
+                            model.stash_entries = stashes;
+                            stash_changed = true;
+                        }
+                        Err(err) => refresh_error = Some(err),
+                    }
+
+                    if let Some(files_result) = files_result {
+                        match files_result {
+                            Ok(files) => {
+                                model.set_files(files);
+                                files_changed = true;
+                            }
+                            Err(err) if refresh_error.is_none() => refresh_error = Some(err),
+                            Err(_) => {}
+                        }
+                    }
+
+                    if let Some(diff_stats_result) = diff_stats_result {
+                        match diff_stats_result {
+                            Ok((added, deleted)) => {
+                                model.total_additions = added;
+                                model.total_deletions = deleted;
+                            }
+                            Err(err) if refresh_error.is_none() => refresh_error = Some(err),
+                            Err(_) => {}
+                        }
+                    }
+
+                    if stash_changed {
+                        gui.context_mgr.clamp_selections(&model);
+                    }
+                }
+
+                if files_changed {
+                    gui.rebuild_file_tree_from_model();
+                }
+                if files_changed || stash_changed {
+                    gui.needs_diff_refresh = true;
+                }
+
+                if let Err(err) = operation_result {
+                    // A failed stash apply/pop can still leave conflict markers or
+                    // partial worktree changes. The targeted refresh above already
+                    // reflects that state before the error is shown.
+                    gui.show_error(&title, err);
+                } else if let Some(err) = refresh_error {
+                    gui.show_error("Stash refresh failed", err);
+                }
+            }) as UiJob);
+        });
+    }
+
     /// Run a potentially slow local Git mutation without blocking the TUI.
     /// A single lane is intentional: these commands often touch the index,
     /// worktree, or repository metadata and gain nothing from racing each other.
@@ -6224,6 +6321,14 @@ impl Gui {
     }
 
     pub(crate) fn handle_popup_key(&mut self, key: KeyEvent) -> Result<()> {
+        // With enhanced keyboard reporting Ctrl+M can arrive as a distinct key
+        // even though legacy terminals encode it as the same carriage return as
+        // Enter. Lazygitrs intentionally assigns no popup/editor action to Ctrl+M.
+        // Swallow it before any textarea or menu can reinterpret it.
+        if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Ok(());
+        }
+
         let was_help = matches!(self.popup, PopupState::CommandPalette { .. });
         let was_ref_picker = matches!(self.popup, PopupState::RefPicker { .. });
         let was_list_picker = matches!(self.popup, PopupState::ListPicker { .. });
@@ -7275,15 +7380,10 @@ impl Gui {
                 // Insert a newline in the body only with Shift+Enter. Plain Enter submits
                 // the commit from either field. Ctrl+J is kept as a terminal-compatible
                 // fallback for Shift+Enter; without this branch tui_textarea would interpret
-                // it as its default `delete_line_by_head` binding. Ctrl+M is CR/Enter in
-                // terminal conventions; enhanced keyboard reporting can expose it as a
-                // distinct control character, so route it through the visible newline path
-                // instead of letting tui-textarea create a hidden second summary line.
+                // it as its default `delete_line_by_head` binding.
                 else if (key.code == KeyCode::Enter
                     && key.modifiers.contains(KeyModifiers::SHIFT))
                     || (key.code == KeyCode::Char('j')
-                        && key.modifiers.contains(KeyModifiers::CONTROL))
-                    || (key.code == KeyCode::Char('m')
                         && key.modifiers.contains(KeyModifiers::CONTROL))
                 {
                     let wrap_width = self.commit_body_wrap_width();
@@ -8625,12 +8725,12 @@ impl Gui {
                 title: "Stash".into(),
                 entries: vec![
                     CommandEntry::keybinding("<enter>".into(), "View stash files".into()),
-                    CommandEntry::keybinding("<space>".into(), "Apply stash".into()),
+                    CommandEntry::keybinding(kb.stash.pop_stash.clone(), "Pop stash".into()),
+                    CommandEntry::keybinding(kb.stash.apply_stash.clone(), "Apply stash".into()),
                     CommandEntry::keybinding(
                         kb.universal.toggle_diff_view_layout.clone(),
                         "Toggle unified / side-by-side view".into(),
                     ),
-                    CommandEntry::keybinding(kb.stash.pop_stash.clone(), "Pop stash".into()),
                     CommandEntry::keybinding(kb.stash.rename_stash.clone(), "Rename stash".into()),
                     CommandEntry::keybinding("d".into(), "Drop stash".into()),
                 ],
@@ -14728,7 +14828,56 @@ mod terminal_mouse_tests {
     }
 
     #[test]
-    fn ctrl_m_in_commit_editor_never_creates_hidden_summary_text() {
+    fn stash_defaults_open_wrapped_confirmations_without_full_refresh() {
+        let repo = TempRepo::new("stash-targeted-refresh");
+        repo.commit("file", "base");
+        std::fs::write(repo.path().join("file"), "stashed").unwrap();
+        repo.git(&["stash", "push", "-m", "a very long stash subject that should live in the popup body instead of being clipped by the border title"]);
+
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        for _ in gui.initial_load_rx.take().unwrap() {}
+        *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
+        gui.context_mgr.set_active(ContextId::Stash);
+        gui.context_mgr.set_selection(0);
+
+        // `a` applies and keeps the stash. The long subject belongs in the
+        // wrapped message body; the title stays compact and cannot be clipped.
+        gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::Confirm { title, message, .. }
+            if title == "Apply stash"
+                && message.contains("very long stash subject")
+                && message.contains("keep it in the stash list")));
+
+        // Confirm apply, then wait for the stash-specific refresh. It must not
+        // queue the expensive generic full-model refresh.
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while gui.background_mutation_label.is_some() {
+            gui.receive_ui_jobs();
+            assert!(Instant::now() < deadline, "stash apply did not finish");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        gui.receive_ui_jobs();
+        assert!(!gui.needs_refresh);
+        assert_eq!(gui.model.lock().unwrap().stash_entries.len(), 1);
+        assert!(!gui.model.lock().unwrap().files.is_empty());
+
+        // Space is Pop by default and gets the same non-truncated confirmation.
+        gui.context_mgr.set_active(ContextId::Stash);
+        gui.context_mgr.set_selection(0);
+        gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::Confirm { title, message, .. }
+            if title == "Pop stash"
+                && message.contains("very long stash subject")
+                && message.contains("remove it from the stash list")));
+    }
+
+    #[test]
+    fn ctrl_m_in_commit_editor_is_ignored() {
         let repo = TempRepo::new("ctrl-m-editor");
         repo.commit("file", "base");
         std::fs::write(repo.path().join("file"), "changed").unwrap();
@@ -14753,9 +14902,9 @@ mod terminal_mouse_tests {
         assert!(matches!(&gui.popup, PopupState::CommitInput {
             summary_textarea, body_state, focus, ..
         } if summary_textarea.lines().len() == 1
-            && summary_textarea.lines()[0] == "subject"
-            && *focus == popup::CommitInputFocus::Body
-            && body_state.raw().trim() == "body"));
+            && summary_textarea.lines()[0] == "subjectbody"
+            && *focus == popup::CommitInputFocus::Summary
+            && body_state.raw().is_empty()));
     }
 
     #[test]
