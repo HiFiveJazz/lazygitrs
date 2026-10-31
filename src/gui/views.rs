@@ -4991,7 +4991,9 @@ pub fn render_popup(
                 let desc_style = Style::default().fg(theme.text_dimmed);
                 let hint_line = Line::from(vec![
                     Span::styled(" enter ", key_style),
-                    Span::styled("confirm  ", desc_style),
+                    Span::styled("commit  ", desc_style),
+                    Span::styled("shift+enter ", key_style),
+                    Span::styled("newline  ", desc_style),
                     Span::styled("tab ", key_style),
                     Span::styled("switch  ", desc_style),
                     Span::styled("ctrl+o ", key_style),

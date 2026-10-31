@@ -6662,14 +6662,12 @@ impl Gui {
                         }
                     }
                 }
-                // Insert a newline in the body:
-                //   - Enter while focused on Body (the natural keystroke for a multi-line field).
-                //   - Shift+Enter from Summary jumps focus to Body and inserts a newline.
-                //   - Ctrl+J (some terminals emit this for Shift+Enter) — without this branch it
-                //     would hit tui_textarea's default `delete_line_by_head` binding.
+                // Insert a newline in the body only with Shift+Enter. Plain Enter submits
+                // the commit from either field. Ctrl+J is kept as a terminal-compatible
+                // fallback for Shift+Enter; without this branch tui_textarea would interpret
+                // it as its default `delete_line_by_head` binding.
                 else if (key.code == KeyCode::Enter
-                    && (focus == popup::CommitInputFocus::Body
-                        || key.modifiers.contains(KeyModifiers::SHIFT)))
+                    && key.modifiers.contains(KeyModifiers::SHIFT))
                     || (key.code == KeyCode::Char('j')
                         && key.modifiers.contains(KeyModifiers::CONTROL))
                 {
@@ -6694,8 +6692,8 @@ impl Gui {
                         body_state.render_into(body_textarea, wrap_width);
                     }
                 }
-                // Enter on summary: submit the commit
-                else if focus == popup::CommitInputFocus::Summary && key.code == KeyCode::Enter {
+                // Plain Enter submits the commit from either summary or body.
+                else if key.code == KeyCode::Enter {
                     let popup = std::mem::replace(&mut self.popup, PopupState::None);
                     if let PopupState::CommitInput {
                         summary_textarea,
