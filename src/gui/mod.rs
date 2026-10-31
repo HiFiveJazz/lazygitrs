@@ -979,6 +979,10 @@ pub struct Gui {
     /// Async light files refresh (status-only) for non-index refreshes.
     files_refresh_rx: Option<mpsc::Receiver<Result<Vec<crate::model::File>>>>,
     files_refresh_in_progress: bool,
+    /// True when starting a checkout invalidated an in-flight model/files
+    /// refresh. If checkout fails, queue a fresh refresh because the old
+    /// HEAD-relative stream may have intentionally stopped mid-flight.
+    checkout_invalidated_refresh: bool,
     /// One long-lived worker owns all index mutations so rapid staging cannot
     /// race on `.git/index.lock`. The worker drains bursts in order and emits
     /// one status snapshot after each burst.
@@ -1303,6 +1307,7 @@ impl Gui {
             && refresh_interval > 0
             && !self.refresh_in_progress
             && self.initial_load_rx.is_none()
+            && !(self.pending_checkout_by_name.is_some() && self.remote_op_label.is_some())
             && self.last_refresh_at.elapsed().as_secs() >= refresh_interval
     }
 
@@ -1527,6 +1532,7 @@ impl Gui {
             pending_remote_op: None,
             files_refresh_rx: None,
             files_refresh_in_progress: false,
+            checkout_invalidated_refresh: false,
             index_mutation_tx,
             index_mutation_rx,
             index_mutation_busy,
@@ -2185,9 +2191,14 @@ impl Gui {
 
             // Kick off a non-blocking full refresh (same streaming path as
             // initial load). Avoids freezing the UI for ~1s on commit/reword.
-            if self.needs_refresh && !self.refresh_in_progress && self.initial_load_rx.is_none() {
+            if self.needs_refresh
+                && !(self.pending_checkout_by_name.is_some() && self.remote_op_label.is_some())
+                && !self.refresh_in_progress
+                && self.initial_load_rx.is_none()
+            {
                 self.start_background_refresh();
             } else if self.needs_files_refresh
+                && !(self.pending_checkout_by_name.is_some() && self.remote_op_label.is_some())
                 && !self.refresh_in_progress
                 && !self.files_refresh_in_progress
             {
@@ -3462,7 +3473,12 @@ impl Gui {
             match result {
                 Ok(completion) => {
                     let was_checkout = self.pending_checkout_by_name.take().is_some();
-                    if let Some(head) = completion.head {
+                    let confirmed_checkout_head = if was_checkout {
+                        completion.head.clone()
+                    } else {
+                        None
+                    };
+                    if let Some(head) = completion.head.as_ref() {
                         let mut checked_out_branch_moved = false;
                         {
                             let mut model = self.model.lock().unwrap();
@@ -3484,8 +3500,23 @@ impl Gui {
                                 checked_out_branch_moved = true;
                             }
 
-                            model.head_hash = head.hash;
-                            model.head_branch_name = head.branch_name;
+                            // Checkout cannot add/remove worktrees. Make the current
+                            // worktree row reflect the confirmed HEAD immediately; the
+                            // targeted refresh reuses this cached list instead of spawning
+                            // `git worktree list --porcelain` again.
+                            if let Some(worktree) =
+                                model.worktrees.iter_mut().find(|worktree| worktree.is_current)
+                            {
+                                worktree.hash.clone_from(&head.hash);
+                                worktree.branch = if head.branch_name.is_empty() {
+                                    "(detached)".to_string()
+                                } else {
+                                    head.branch_name.clone()
+                                };
+                            }
+
+                            model.head_hash.clone_from(&head.hash);
+                            model.head_branch_name.clone_from(&head.branch_name);
                         }
 
                         if checked_out_branch_moved {
@@ -3559,6 +3590,12 @@ impl Gui {
                         self.remote_op_success_at = Some(Instant::now());
                     }
                     if was_checkout {
+                        // Close the generation around the mutation. This also
+                        // invalidates any worktree read that happened to start
+                        // while checkout itself was running; the targeted refresh
+                        // below captures the new generation and new HEAD.
+                        self.git.cancel_worktree_reads();
+
                         // A pre-checkout stream must not overwrite confirmed HEAD
                         // or files. Its workers can finish, but drop their results.
                         self.initial_load_rx = None;
@@ -3566,14 +3603,16 @@ impl Gui {
                         self.files_refresh_rx = None;
                         self.files_refresh_in_progress = false;
                         self.needs_files_refresh = false;
+                        self.checkout_invalidated_refresh = false;
                         // Dispatch before the next paint/input wait, not after an
                         // idle 50/200ms poll. HEAD is already visible above.
-                        if !self.start_background_checkout_refresh() {
+                        if !self.start_background_checkout_refresh(confirmed_checkout_head) {
                             self.needs_refresh = true;
                         }
                     }
                 }
                 Err(e) => {
+                    let failed_checkout = self.pending_checkout_by_name.is_some();
                     // AI generation may have restored the editor just before
                     // a queued remote error arrives. Keep that draft when the
                     // error needs to take over the popup.
@@ -3606,6 +3645,9 @@ impl Gui {
                             message: err,
                             kind: MessageKind::Error,
                         };
+                    }
+                    if failed_checkout {
+                        self.recover_refresh_after_failed_checkout();
                     }
                     if matches!(kind, RemoteOpKind::Email(_)) {
                         trim_process_heap();
@@ -3917,6 +3959,14 @@ impl Gui {
     }
 
     fn launch_remote_op(&mut self, kind: RemoteOpKind, title: &str, op: RemoteOpFn) {
+        let is_checkout = self.pending_checkout_by_name.is_some();
+        if is_checkout {
+            // Do this at actual launch time, not when a checkout is merely queued
+            // behind auto-fetch. Otherwise an unrelated refresh could be left
+            // intentionally incomplete while the network lane is still busy.
+            self.prepare_for_checkout();
+        }
+
         // Show operation label on the head branch in the sidebar (e.g. "Pushing", "Pulling").
         let label = match title {
             "Push" => "Pushing",
@@ -3930,7 +3980,6 @@ impl Gui {
 
         let git = Arc::clone(&self.git);
         let tx = self.remote_op_tx.clone();
-        let is_checkout = self.pending_checkout_by_name.is_some();
 
         std::thread::spawn(move || {
             // Capture refs before network operations so an up-to-date pull/fetch
@@ -11058,6 +11107,48 @@ impl Gui {
         }
     }
 
+    /// Prepare for a checkout by invalidating HEAD-relative work that belongs
+    /// to the old worktree state.
+    ///
+    /// We deliberately keep non-file parts of a generic model refresh alive
+    /// until checkout succeeds; the GitCommands generation stops only the stale
+    /// status/diff chain. A separate status-only files refresh is disconnected
+    /// immediately because its result would be obsolete as soon as checkout
+    /// starts.
+    pub(crate) fn prepare_for_checkout(&mut self) {
+        let had_refresh = (self.refresh_in_progress && self.initial_load_rx.is_some())
+            || self.files_refresh_in_progress
+            || self.files_refresh_rx.is_some();
+        self.checkout_invalidated_refresh |= had_refresh;
+
+        self.cancel_checkout_refresh_if_running();
+        self.git.cancel_worktree_reads();
+
+        if self.files_refresh_rx.is_some() || self.files_refresh_in_progress {
+            self.files_refresh_rx = None;
+            self.files_refresh_in_progress = false;
+            self.needs_files_refresh = false;
+        }
+    }
+
+    /// A failed checkout leaves the old HEAD in place. If we invalidated a
+    /// refresh while attempting it, discard the now-incomplete stream and queue
+    /// a clean refresh against the still-current HEAD.
+    fn recover_refresh_after_failed_checkout(&mut self) {
+        if !self.checkout_invalidated_refresh {
+            return;
+        }
+
+        self.initial_load_rx = None;
+        self.initial_load_received = 0;
+        self.refresh_in_progress = false;
+        self.files_refresh_rx = None;
+        self.files_refresh_in_progress = false;
+        self.needs_files_refresh = false;
+        self.checkout_invalidated_refresh = false;
+        self.needs_refresh = true;
+    }
+
     /// Drop a still-running checkout refresh before starting another checkout.
     ///
     /// The worker threads observe the disconnected receiver at their next
@@ -11076,7 +11167,7 @@ impl Gui {
     }
 
     /// Kick off the model refresh required after a successful checkout.
-    fn start_background_checkout_refresh(&mut self) -> bool {
+    fn start_background_checkout_refresh(&mut self, confirmed_head: Option<HeadState>) -> bool {
         if self.refresh_in_progress || self.initial_load_rx.is_some() {
             return false;
         }
@@ -11092,15 +11183,27 @@ impl Gui {
         self.reset_commit_pagination();
         self.diff_preview_cache.retain_immutable();
 
-        let commits = {
+        let (commits, branches, worktrees, reflog) = {
             let model = self.model.lock().unwrap();
-            model.commits.clone()
+            (
+                model.commits.clone(),
+                model.branches.clone(),
+                model.worktrees.clone(),
+                model.reflog_commits.clone(),
+            )
         };
 
         let git = Arc::clone(&self.git);
 
         std::thread::spawn(move || {
-            git.load_model_after_checkout_streaming(&tx, commits);
+            git.load_model_after_checkout_streaming(
+                &tx,
+                commits,
+                branches,
+                worktrees,
+                reflog,
+                confirmed_head,
+            );
         });
 
         true
@@ -12938,6 +13041,32 @@ mod terminal_mouse_tests {
     }
 
     #[test]
+    fn failed_checkout_requeues_refresh_invalidated_at_checkout_start() {
+        let repo = TempRepo::new("failed-checkout-refresh-recovery");
+        let mut gui = checkout_test_gui(&repo);
+        let (model_tx, model_rx) = mpsc::channel();
+        gui.initial_load_rx = Some(model_rx);
+        gui.initial_load_received = 3;
+        gui.initial_load_expected = MODEL_PART_COUNT;
+        gui.refresh_in_progress = true;
+
+        std::fs::write(repo.path().join("file"), "local changes").unwrap();
+        request_test_checkout(&mut gui, ' ', "main");
+        assert!(gui.checkout_invalidated_refresh);
+        wait_for_test_checkout(&mut gui);
+
+        assert!(!gui.checkout_invalidated_refresh);
+        assert!(!gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_none());
+        assert!(gui.needs_refresh);
+        assert!(
+            model_tx
+                .send(ModelPart::DiffStats { added: 1, deleted: 1 })
+                .is_err()
+        );
+    }
+
+    #[test]
     fn pending_refresh_keeps_input_polling_fast() {
         let repo = TempRepo::new("refresh-polling");
         let mut gui = checkout_test_gui(&repo);
@@ -13006,6 +13135,27 @@ mod terminal_mouse_tests {
         let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
 
         assert_eq!(parts.len(), CHECKOUT_MODEL_PART_COUNT);
+
+        let main_hash = repo.git(&["rev-parse", "main"]);
+        assert!(parts.iter().any(|part| matches!(
+            part,
+            ModelPart::Branches(branches)
+                if branches.first().is_some_and(|branch| branch.head && branch.name == "main")
+        )));
+        assert!(parts.iter().any(|part| matches!(
+            part,
+            ModelPart::Worktrees(worktrees)
+                if worktrees.iter().any(|worktree| {
+                    worktree.is_current
+                        && worktree.branch == "main"
+                        && worktree.hash == main_hash
+                })
+        )));
+        assert!(parts.iter().any(|part| matches!(
+            part,
+            ModelPart::Reflog(entries)
+                if entries.first().is_some_and(|entry| entry.hash == main_hash)
+        )));
 
         assert!(
             parts

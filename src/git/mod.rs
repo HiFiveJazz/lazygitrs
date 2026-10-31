@@ -19,6 +19,7 @@ pub mod worktree;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::Result;
@@ -106,6 +107,10 @@ pub struct GitCommands {
     repo_name: String,
     read_repo: Option<ReadRepository>,
     contributor_cache: Mutex<HashMap<(String, usize, usize), Vec<(String, usize)>>>,
+    /// Generation for HEAD-relative worktree reads. Checkout bumps this before
+    /// mutating the worktree so an older refresh can stop before launching
+    /// follow-up diff scans against state that is already obsolete.
+    worktree_read_generation: AtomicU64,
 }
 
 impl GitCommands {
@@ -138,7 +143,27 @@ impl GitCommands {
             repo_name,
             read_repo,
             contributor_cache: Mutex::new(HashMap::new()),
+            worktree_read_generation: AtomicU64::new(0),
         })
+    }
+
+    /// Invalidate in-flight HEAD-relative worktree reads before a checkout.
+    ///
+    /// We cannot cheaply interrupt a Git subprocess that is already running, but
+    /// generation checks between phases prevent a stale status result from
+    /// cascading into numstat/hunk/shortstat scans after checkout has started.
+    pub fn cancel_worktree_reads(&self) {
+        self.worktree_read_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn worktree_read_generation(&self) -> u64 {
+        self.worktree_read_generation.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub(super) fn worktree_read_is_current(&self, generation: u64) -> bool {
+        self.worktree_read_generation.load(Ordering::Relaxed) == generation
     }
 
     fn resolve_repo_paths(path: &Path) -> Result<RepoPaths> {
@@ -410,9 +435,13 @@ impl GitCommands {
         trim_on_disconnect: bool,
         publish_tracked_early: bool,
     ) {
+        // Capture before spawning: if checkout starts before this worker gets
+        // scheduled, it must still recognize itself as belonging to the old HEAD.
+        let read_generation = self.worktree_read_generation();
         let tx = tx.clone();
         let git = Arc::clone(self);
         std::thread::spawn(move || {
+            let is_current = || git.worktree_read_is_current(read_generation);
             let trim_if_abandoned = || {
                 if trim_on_disconnect {
                     trim_process_heap();
@@ -432,6 +461,10 @@ impl GitCommands {
 
                 match git.load_tracked_files_status_only_git() {
                     Ok(tracked) => {
+                        if !is_current() {
+                            let _ = untracked.join();
+                            return;
+                        }
                         if tx.send(ModelPart::Files(tracked.clone())).is_err() {
                             trim_if_abandoned();
                             return;
@@ -441,18 +474,29 @@ impl GitCommands {
                             Ok(Ok(untracked)) => {
                                 GitCommands::merge_file_status_parts(tracked, untracked)
                             }
-                            _ => match git.load_files_status_only_git_uall() {
-                                Ok(files) => files,
-                                Err(_) => {
-                                    trim_if_abandoned();
+                            _ => {
+                                if !is_current() {
                                     return;
                                 }
-                            },
+                                match git.load_files_status_only_git_uall() {
+                                    Ok(files) => files,
+                                    Err(_) => {
+                                        trim_if_abandoned();
+                                        return;
+                                    }
+                                }
+                            }
                         };
+                        if !is_current() {
+                            return;
+                        }
                         (files, true)
                     }
                     Err(_) => {
                         let _ = untracked.join();
+                        if !is_current() {
+                            return;
+                        }
                         let files = match git.load_files_status_only_git_uall() {
                             Ok(files) => files,
                             Err(_) => {
@@ -465,7 +509,8 @@ impl GitCommands {
                 }
             } else {
                 match git.load_files_status_only() {
-                    Ok(files) => (files, false),
+                    Ok(files) if is_current() => (files, false),
+                    Ok(_) => return,
                     Err(_) => {
                         trim_if_abandoned();
                         return;
@@ -473,6 +518,9 @@ impl GitCommands {
                 }
             };
 
+            if !is_current() {
+                return;
+            }
             let has_tracked_changes = files.iter().any(|file| file.tracked);
 
             // Normal refreshes publish the complete status in one Files part.
@@ -489,7 +537,12 @@ impl GitCommands {
 
             let mut diff_totals = None;
             if include_file_stats && has_tracked_changes {
-                diff_totals = git.populate_file_diff_stats(&mut files);
+                let Some(totals) =
+                    git.populate_file_diff_stats_if_current(&mut files, read_generation)
+                else {
+                    return;
+                };
+                diff_totals = totals;
                 if tx.send(ModelPart::FileStats(files)).is_err() {
                     trim_if_abandoned();
                     return;
@@ -519,6 +572,10 @@ impl GitCommands {
                 {
                     trim_if_abandoned();
                 }
+                return;
+            }
+
+            if !is_current() {
                 return;
             }
 
@@ -800,6 +857,10 @@ impl GitCommands {
         self: &Arc<Self>,
         tx: &mpsc::Sender<ModelPart>,
         mut commits: Vec<crate::model::Commit>,
+        mut branches: Vec<crate::model::Branch>,
+        mut worktrees: Vec<crate::model::Worktree>,
+        mut reflog: Vec<crate::model::Commit>,
+        confirmed_head: Option<HeadState>,
     ) {
         // Keep the worktree scan on its own worker: on very large repositories
         // (notably Linux) status dominates checkout refresh latency. If this
@@ -823,18 +884,40 @@ impl GitCommands {
                 };
             }
 
-            if let Ok(branches) = git.load_branches() {
-                send_or_abandon!(ModelPart::Branches(branches));
+            // The checkout worker already read HEAD before reporting success to
+            // the UI. Reuse that exact state instead of resolving HEAD again;
+            // retain the gix read as a compatibility fallback for older/failed
+            // metadata paths.
+            let head = confirmed_head.or_else(|| git.head_state().ok());
+
+            if let Some(head) = &head {
+                // Checkout of an existing local branch changes only which cached
+                // branch carries the HEAD marker. Branch tips/upstreams do not
+                // move. Only fall back to `for-each-ref` when checkout created a
+                // local branch we did not previously know about.
+                let cached_branch_is_complete = head.branch_name.is_empty()
+                    || branches.iter().any(|branch| branch.name == head.branch_name);
+                if cached_branch_is_complete {
+                    for branch in &mut branches {
+                        branch.head = branch.name == head.branch_name;
+                    }
+                    crate::model::sort_branches_for_display(&mut branches);
+                } else if let Ok(fresh) = git.load_branches() {
+                    branches = fresh;
+                }
+            } else if let Ok(fresh) = git.load_branches() {
+                branches = fresh;
             }
+            send_or_abandon!(ModelPart::Branches(branches));
 
             // HEAD changes commit decorations, but checkout does not change the
             // commit graph itself. Reuse the already-loaded history rather than
             // walking every ref again.
-            if let Ok(head) = git.head_state() {
-                GitCommands::apply_checkout_head_state(&mut commits, &head);
+            if let Some(head) = &head {
+                GitCommands::apply_checkout_head_state(&mut commits, head);
                 send_or_abandon!(ModelPart::Head {
-                    hash: head.hash,
-                    branch_name: head.branch_name,
+                    hash: head.hash.clone(),
+                    branch_name: head.branch_name.clone(),
                 });
             }
 
@@ -842,12 +925,25 @@ impl GitCommands {
             let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
             send_or_abandon!(ModelPart::UnpushedCommitHashes(unpushed));
 
-            if let Ok(worktrees) = git
-                .load_worktrees()
-                .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
-            {
-                send_or_abandon!(ModelPart::Worktrees(worktrees));
+            // `git checkout` cannot add/remove worktrees. Update only the current
+            // cached entry in memory; if the cache is unexpectedly missing that
+            // entry, retain the old Git-backed fallback for correctness.
+            let mut updated_current_worktree = false;
+            if let Some(head) = &head {
+                if let Some(worktree) = worktrees.iter_mut().find(|worktree| worktree.is_current) {
+                    worktree.hash.clone_from(&head.hash);
+                    worktree.branch = if head.branch_name.is_empty() {
+                        "(detached)".to_string()
+                    } else {
+                        head.branch_name.clone()
+                    };
+                    updated_current_worktree = true;
+                }
             }
+            if !updated_current_worktree {
+                worktrees = git.load_worktrees().unwrap_or_default();
+            }
+            send_or_abandon!(ModelPart::Worktrees(worktrees));
 
             if let Ok(submodules) = git
                 .load_submodules()
@@ -856,12 +952,27 @@ impl GitCommands {
                 send_or_abandon!(ModelPart::Submodules(submodules));
             }
 
-            if let Ok(reflog) = git
-                .load_reflog(100)
-                .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
-            {
-                send_or_abandon!(ModelPart::Reflog(reflog));
+            // Checkout appends one HEAD reflog record. Reuse the cached tail and
+            // read only the newest entry rather than rebuilding the full 100-row
+            // model. `load_reflog(1)` is gix-backed when available. If checkout
+            // happened unusually early and the startup reflog has not arrived
+            // yet, retain the full-load fallback so older entries are not lost.
+            if reflog.is_empty() {
+                reflog = git.load_reflog(100).unwrap_or_default();
+            } else if let Ok(mut latest) = git.load_reflog(1) {
+                if let Some(latest) = latest.pop() {
+                    let already_first = reflog.first().is_some_and(|first| {
+                        first.hash == latest.hash
+                            && first.name == latest.name
+                            && first.unix_timestamp == latest.unix_timestamp
+                    });
+                    if !already_first {
+                        reflog.insert(0, latest);
+                    }
+                    reflog.truncate(100);
+                }
             }
+            send_or_abandon!(ModelPart::Reflog(reflog));
 
             if let Ok(status) = git.repo_status() {
                 send_or_abandon!(ModelPart::RepoStatus {

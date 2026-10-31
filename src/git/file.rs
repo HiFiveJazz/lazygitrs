@@ -95,6 +95,34 @@ impl GitCommands {
     /// `git diff --shortstat` would compute, so callers doing a full file load
     /// can reuse the work instead of walking the worktree twice.
     pub(super) fn populate_file_diff_stats(&self, files: &mut [File]) -> Option<(usize, usize)> {
+        self.populate_file_diff_stats_inner(files, None).flatten()
+    }
+
+    /// Cancellable variant used by streaming refreshes. The outer `None` means
+    /// checkout invalidated the HEAD-relative read while it was in flight; the
+    /// inner value is the same optional aggregate returned by the normal path.
+    pub(super) fn populate_file_diff_stats_if_current(
+        &self,
+        files: &mut [File],
+        generation: u64,
+    ) -> Option<Option<(usize, usize)>> {
+        self.populate_file_diff_stats_inner(files, Some(generation))
+    }
+
+    fn populate_file_diff_stats_inner(
+        &self,
+        files: &mut [File],
+        generation: Option<u64>,
+    ) -> Option<Option<(usize, usize)>> {
+        let is_current = || {
+            generation
+                .map(|generation| self.worktree_read_is_current(generation))
+                .unwrap_or(true)
+        };
+        if !is_current() {
+            return None;
+        }
+
         let diff_base = if self.head_state().is_ok() {
             vec!["--literal-pathspecs".to_string(), "diff".to_string(), "HEAD".to_string()]
         } else {
@@ -152,9 +180,19 @@ impl GitCommands {
                 })
         });
         let line_stats = line_stats.unwrap_or_default();
+        if !is_current() {
+            return None;
+        }
+
+        // The numstat can be relatively expensive on a huge tree. Re-check the
+        // generation before launching the second diff so a checkout that started
+        // meanwhile does not immediately pay for an obsolete hunk scan too.
         let hunk_counts = run(&["--unified=0", "--find-renames", "--no-color", "--no-prefix"])
             .map(|output| parse_hunk_counts(&output))
             .unwrap_or_default();
+        if !is_current() {
+            return None;
+        }
 
         // Match lazygit: only attach numstat/hunk counts for tracked paths.
         // Reading every untracked file (e.g. a full node_modules tree) makes
@@ -171,7 +209,7 @@ impl GitCommands {
             file.hunk_count = hunk_counts.get(&path).copied().unwrap_or(0);
         }
 
-        totals
+        Some(totals)
     }
 
     pub fn stage_file(&self, path: &str) -> Result<()> {
@@ -523,6 +561,26 @@ mod tests {
             .collect::<Vec<_>>();
         signature.sort_by(|a, b| a.0.cmp(&b.0));
         signature
+    }
+
+    #[test]
+    fn stale_generation_skips_file_diff_enrichment() {
+        let temp = TempDir::new("stale-file-stat-generation");
+        let repo = &temp.path;
+        init_repo(repo);
+        seed_tracked_files(repo, 1);
+
+        let git_cmds = GitCommands::new(repo).expect("git");
+        let mut files = git_cmds.load_files_status_only().expect("status");
+        let generation = git_cmds.worktree_read_generation();
+
+        // Simulate checkout beginning after status but before the expensive
+        // numstat/hunk enrichment phase.
+        git_cmds.cancel_worktree_reads();
+        let completed = git_cmds.populate_file_diff_stats_if_current(&mut files, generation);
+
+        assert!(completed.is_none());
+        assert!(files.iter().all(|file| file.additions == 0 && file.hunk_count == 0));
     }
 
     #[test]

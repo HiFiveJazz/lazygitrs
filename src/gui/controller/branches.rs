@@ -204,11 +204,6 @@ fn start_async_checkout(gui: &mut Gui, name: String) {
         return;
     }
 
-    // A previous checkout refresh is obsolete as soon as another checkout
-    // starts. Drop its receiver now instead of letting its workers run for the
-    // entire duration of this checkout and potentially feed stale state back.
-    gui.cancel_checkout_refresh_if_running();
-
     // Keep HEAD sourced from Git: a rejected checkout must not change the
     // displayed branch. Successful completion triggers the normal model refresh.
     gui.pending_checkout_by_name = Some(name.clone());
