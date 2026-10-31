@@ -6,8 +6,9 @@ use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
 use crate::git::rebase::RebaseAction;
 use crate::gui::popup::{
-    BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, EmailPatchFocus, MenuItem,
-    MessageKind, PopupState, dedupe_email_recipients, make_textarea, split_email_recipients,
+    BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, CommitInputMode, EmailPatchFocus,
+    MenuItem, MessageKind, PopupState, dedupe_email_recipients, make_textarea,
+    split_email_recipients,
 };
 use crate::gui::{Gui, RemoteOpKind};
 use crate::model::Branch;
@@ -209,6 +210,8 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
             body_textarea,
             body_state,
             focus: CommitInputFocus::Summary,
+            mode: CommitInputMode::Normal,
+            body_scroll_remaining: 0,
             on_confirm: Box::new(move |gui, message| {
                 if !message.is_empty() {
                     let message = message.to_string();

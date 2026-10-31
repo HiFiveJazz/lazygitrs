@@ -1,8 +1,8 @@
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
 use crate::gui::popup::{
-    CommitInputFocus, CommitInputKind, MenuItem, PopupState, make_commit_body_textarea,
-    make_commit_summary_textarea, make_textarea, reset_commit_input_view,
+    CommitInputFocus, CommitInputKind, CommitInputMode, MenuItem, PopupState,
+    make_commit_body_textarea, make_commit_summary_textarea, make_textarea, reset_commit_input_view,
 };
 use crate::gui::{Gui, RemoteOpKind};
 use crate::os::platform::Platform;
@@ -334,6 +334,8 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                         body_textarea: make_commit_body_textarea(),
                         body_state: crate::gui::popup::BodySoftWrap::new(),
                         focus: CommitInputFocus::Summary,
+                        mode: CommitInputMode::Normal,
+                        body_scroll_remaining: 0,
                         on_confirm: Box::new(|gui, message| {
                             if !message.is_empty() {
                                 let message = message.to_string();
@@ -374,6 +376,8 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                         body_textarea: make_commit_body_textarea(),
                         body_state: crate::gui::popup::BodySoftWrap::new(),
                         focus: CommitInputFocus::Summary,
+                        mode: CommitInputMode::Normal,
+                        body_scroll_remaining: 0,
                         on_confirm: Box::new(|gui, message| {
                             if !message.is_empty() {
                                 let message = message.to_string();
@@ -409,6 +413,8 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
         body_textarea: make_commit_body_textarea(),
         body_state: crate::gui::popup::BodySoftWrap::new(),
         focus: CommitInputFocus::Summary,
+        mode: CommitInputMode::Normal,
+        body_scroll_remaining: 0,
         on_confirm: Box::new(|gui, message| {
             if !message.is_empty() {
                 let message = message.to_string();
@@ -460,6 +466,8 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
                     body_textarea: make_commit_body_textarea(),
                     body_state: crate::gui::popup::BodySoftWrap::new(),
                     focus: CommitInputFocus::Summary,
+                    mode: CommitInputMode::Normal,
+                    body_scroll_remaining: 0,
                     on_confirm: Box::new(|gui, message| {
                         if !message.is_empty() {
                             let message = message.to_string();
@@ -489,6 +497,8 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
         body_textarea: make_commit_body_textarea(),
         body_state: crate::gui::popup::BodySoftWrap::new(),
         focus: CommitInputFocus::Summary,
+        mode: CommitInputMode::Normal,
+        body_scroll_remaining: 0,
         on_confirm: Box::new(|gui, message| {
             if !message.is_empty() {
                 let message = message.to_string();

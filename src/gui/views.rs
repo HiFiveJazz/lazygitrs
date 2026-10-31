@@ -20,8 +20,8 @@ use super::ScreenMode;
 use super::context::{ContextId, ContextManager, SideWindow};
 use super::layout::{self, LayoutState};
 use super::popup::{
-    CommitInputFocus, EmailPatchFocus, PopupState, commit_popup_height, commit_popup_width,
-    list_picker_matching_indices,
+    COMMIT_BODY_GUTTER_WIDTH, CommitInputFocus, CommitInputMode, EmailPatchFocus, PopupState,
+    commit_popup_height, commit_popup_width, list_picker_matching_indices,
 };
 use super::presentation;
 
@@ -3540,7 +3540,15 @@ pub fn commit_description_textarea_geometry(popup: &PopupState, area: Rect) -> O
     }
 
     let body_height = inner.height.saturating_sub(7);
-    (body_height > 0).then(|| Rect::new(inner.x, inner.y + 4, inner.width, body_height))
+    let gutter_width = COMMIT_BODY_GUTTER_WIDTH.min(inner.width.saturating_sub(1));
+    (body_height > 0).then(|| {
+        Rect::new(
+            inner.x + gutter_width,
+            inner.y + 4,
+            inner.width.saturating_sub(gutter_width),
+            body_height,
+        )
+    })
 }
 
 /// Tooltip rect placed one row above the popup, right-aligned with the button.
@@ -4952,6 +4960,7 @@ pub fn render_popup(
             summary_textarea,
             body_textarea,
             focus,
+            mode,
             ..
         } => {
             // Two-field commit editor: summary (1 line) + body (multi-line)
@@ -4971,7 +4980,7 @@ pub fn render_popup(
                 CommitInputFocus::Body => theme.popup_border,
             };
             let outer = Block::default()
-                .title(format!(" {} ", kind.title()))
+                .title(format!(" {} — {} ", kind.title(), mode.label()))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color));
             frame.render_widget(outer, ta_rect);
@@ -5015,35 +5024,122 @@ pub fn render_popup(
                     body_label_area,
                 );
 
-                // Body textarea. Leave one blank row plus two compact hint rows
-                // so the larger editor can document sign-off without clipping.
+                // Body textarea with a Vim-style relative-number gutter. The body
+                // itself remains a TextArea so its cursor/selection rendering and
+                // viewport behavior stay intact.
                 let body_height = inner.height.saturating_sub(7);
-                let body_area = Rect::new(inner.x, inner.y + 4, inner.width, body_height);
+                let gutter_width = COMMIT_BODY_GUTTER_WIDTH.min(inner.width.saturating_sub(1));
+                let gutter_area = Rect::new(inner.x, inner.y + 4, gutter_width, body_height);
+                let body_area = Rect::new(
+                    inner.x + gutter_width,
+                    inner.y + 4,
+                    inner.width.saturating_sub(gutter_width),
+                    body_height,
+                );
                 frame.render_widget(body_textarea, body_area);
+
+                if body_height > 0 && gutter_width > 0 {
+                    let cursor_row = body_textarea.cursor().0;
+                    let viewport_top = body_textarea
+                        .rendered_cursor_position()
+                        .map(|position| {
+                            cursor_row.saturating_sub(
+                                position.y.saturating_sub(body_area.y) as usize,
+                            )
+                        })
+                        .unwrap_or(0);
+                    let line_count = body_textarea.lines().len();
+                    let number_width = gutter_width.saturating_sub(1) as usize;
+                    let mut numbers = Vec::with_capacity(body_height as usize);
+                    for visible_row in 0..body_height as usize {
+                        let row = viewport_top + visible_row;
+                        if row >= line_count {
+                            numbers.push(Line::from(""));
+                            continue;
+                        }
+                        let relative = row.abs_diff(cursor_row);
+                        let style = if relative == 0 {
+                            Style::default().fg(theme.accent_secondary).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme.text_dimmed)
+                        };
+                        numbers.push(Line::from(Span::styled(
+                            format!("{:>width$} ", relative, width = number_width),
+                            style,
+                        )));
+                    }
+                    frame.render_widget(Paragraph::new(numbers), gutter_area);
+                }
 
                 let key_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
                 let desc_style = Style::default().fg(theme.text_dimmed);
                 let hint_y = inner.y + inner.height.saturating_sub(2);
-                let hint_one = Line::from(vec![
-                    Span::styled(" enter ", key_style),
-                    Span::styled("commit  ", desc_style),
-                    Span::styled("shift+enter ", key_style),
-                    Span::styled("newline  ", desc_style),
-                    Span::styled("tab ", key_style),
-                    Span::styled("switch", desc_style),
-                ]);
+                let (hint_one, hint_two) = match mode {
+                    CommitInputMode::Normal => (
+                        Line::from(vec![
+                            Span::styled(" i/a ", key_style),
+                            Span::styled("insert  ", desc_style),
+                            Span::styled("v ", key_style),
+                            Span::styled("visual  ", desc_style),
+                            Span::styled("j/k ", key_style),
+                            Span::styled("move  ", desc_style),
+                            Span::styled("H/L ", key_style),
+                            Span::styled("line start/end  ", desc_style),
+                            Span::styled("enter ", key_style),
+                            Span::styled("commit", desc_style),
+                        ]),
+                        Line::from(vec![
+                            Span::styled(" ctrl+u/d/b/f ", key_style),
+                            Span::styled("smooth scroll  ", desc_style),
+                            Span::styled("alt+s ", key_style),
+                            Span::styled("sign-off  ", desc_style),
+                            Span::styled("ctrl+o ", key_style),
+                            Span::styled("menu  ", desc_style),
+                            Span::styled("esc ", key_style),
+                            Span::styled("save draft", desc_style),
+                        ]),
+                    ),
+                    CommitInputMode::Insert => (
+                        Line::from(vec![
+                            Span::styled(" esc ", key_style),
+                            Span::styled("normal  ", desc_style),
+                            Span::styled("enter ", key_style),
+                            Span::styled("newline/body  ", desc_style),
+                            Span::styled("tab ", key_style),
+                            Span::styled("switch field", desc_style),
+                        ]),
+                        Line::from(vec![
+                            Span::styled(" ctrl+enter ", key_style),
+                            Span::styled("commit  ", desc_style),
+                            Span::styled("alt+s ", key_style),
+                            Span::styled("sign-off  ", desc_style),
+                            Span::styled("ctrl+o ", key_style),
+                            Span::styled("menu", desc_style),
+                        ]),
+                    ),
+                    CommitInputMode::Visual => (
+                        Line::from(vec![
+                            Span::styled(" h/l j/k H/L ", key_style),
+                            Span::styled("select  ", desc_style),
+                            Span::styled("d/x ", key_style),
+                            Span::styled("delete  ", desc_style),
+                            Span::styled("c ", key_style),
+                            Span::styled("change  ", desc_style),
+                            Span::styled("y ", key_style),
+                            Span::styled("copy", desc_style),
+                        ]),
+                        Line::from(vec![
+                            Span::styled(" esc/v ", key_style),
+                            Span::styled("normal  ", desc_style),
+                            Span::styled("tab ", key_style),
+                            Span::styled("switch field", desc_style),
+                        ]),
+                    ),
+                };
                 frame.render_widget(
                     Paragraph::new(hint_one),
                     Rect::new(inner.x, hint_y, inner.width, 1),
                 );
-                let hint_two = Line::from(vec![
-                    Span::styled(" alt+s ", key_style),
-                    Span::styled("toggle sign-off  ", desc_style),
-                    Span::styled("ctrl+o ", key_style),
-                    Span::styled("menu  ", desc_style),
-                    Span::styled("esc ", key_style),
-                    Span::styled("save draft", desc_style),
-                ]);
                 frame.render_widget(
                     Paragraph::new(hint_two),
                     Rect::new(inner.x, hint_y + 1, inner.width, 1),

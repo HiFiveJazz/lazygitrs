@@ -1988,6 +1988,7 @@ impl Gui {
             self.diff_view.tick_smooth_scroll();
             self.tick_patch_preview_animation();
             self.tick_email_preview_animation();
+            self.tick_commit_input_scroll_animation();
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
@@ -2485,6 +2486,7 @@ impl Gui {
             || self.diff_view.has_active_smooth_scroll()
             || self.patch_preview_animation_active()
             || self.email_preview_animation_active()
+            || self.commit_input_scroll_animation_active()
         {
             Duration::from_millis(8)
         } else if self.shell_command_job.is_some()
@@ -2545,18 +2547,13 @@ impl Gui {
         // wrapping stays consistent with what the user sees.
         let popup_width = (w * 60 / 100).min(60).max(30).min(w);
         let popup_inner = popup_width.saturating_sub(4) as usize;
-        let commit_popup_inner = popup::commit_popup_width(w).saturating_sub(4) as usize;
         let config_width = self.config.user_config.git.commit.auto_wrap_width;
         let effective_width = if config_width > 0 {
             popup_inner.min(config_width)
         } else {
             popup_inner
         };
-        let commit_effective_width = if config_width > 0 {
-            commit_popup_inner.min(config_width)
-        } else {
-            commit_popup_inner
-        };
+        let commit_effective_width = popup::commit_body_text_width(w, config_width);
         match &mut self.popup {
             PopupState::Input {
                 textarea,
@@ -2581,10 +2578,19 @@ impl Gui {
                 }
             }
             PopupState::CommitInput {
+                summary_textarea,
                 body_textarea,
                 body_state,
+                mode,
+                body_scroll_remaining,
                 ..
             } => {
+                if *mode == popup::CommitInputMode::Visual {
+                    summary_textarea.cancel_selection();
+                    body_textarea.cancel_selection();
+                    *mode = popup::CommitInputMode::Normal;
+                }
+                *body_scroll_remaining = 0;
                 if commit_effective_width > 0 {
                     body_state.render_into(body_textarea, commit_effective_width);
                 }
@@ -3117,14 +3123,10 @@ impl Gui {
 
             match result.result {
                 Ok(Some(message)) => {
-                    let popup_inner = popup::commit_popup_width(self.layout.width)
-                        .saturating_sub(4) as usize;
-                    let config_width = self.config.user_config.git.commit.auto_wrap_width;
-                    let wrap = if config_width > 0 {
-                        popup_inner.min(config_width)
-                    } else {
-                        popup_inner
-                    };
+                    let wrap = popup::commit_body_text_width(
+                        self.layout.width,
+                        self.config.user_config.git.commit.auto_wrap_width,
+                    );
 
                     // Split AI message into summary (first line) and body (rest).
                     // Preserve AI newlines as logical lines; BodySoftWrap soft-wraps
@@ -3144,9 +3146,15 @@ impl Gui {
                             summary_textarea,
                             body_textarea,
                             body_state,
+                            mode,
+                            body_scroll_remaining,
                             ..
                         } = stashed
                         {
+                            summary_textarea.cancel_selection();
+                            body_textarea.cancel_selection();
+                            *mode = popup::CommitInputMode::Normal;
+                            *body_scroll_remaining = 0;
                             popup::set_commit_summary_text(summary_textarea, &summary);
                             body_state.set_text(body.clone());
                             body_state.render_into(body_textarea, wrap);
@@ -3172,6 +3180,8 @@ impl Gui {
                             body_textarea: body_ta,
                             body_state,
                             focus: popup::CommitInputFocus::Summary,
+                            mode: popup::CommitInputMode::Normal,
+                            body_scroll_remaining: 0,
                             on_confirm: Box::new(|gui, msg| {
                                 if !msg.is_empty() {
                                     let message = msg.to_string();
@@ -6154,19 +6164,14 @@ impl Gui {
             .max(30)
             .min(self.layout.width);
         let popup_inner = popup_width.saturating_sub(4) as usize;
-        let commit_popup_inner = popup::commit_popup_width(self.layout.width)
-            .saturating_sub(4) as usize;
         let config_width = self.config.user_config.git.commit.auto_wrap_width;
         let effective_width = if config_width > 0 {
             popup_inner.min(config_width)
         } else {
             popup_inner
         };
-        let commit_effective_width = if config_width > 0 {
-            commit_popup_inner.min(config_width)
-        } else {
-            commit_popup_inner
-        };
+        let commit_effective_width =
+            popup::commit_body_text_width(self.layout.width, config_width);
         match &mut self.popup {
             PopupState::Input {
                 textarea,
@@ -6196,8 +6201,12 @@ impl Gui {
                 summary_textarea,
                 body_textarea,
                 body_state,
+                mode,
                 ..
             } => {
+                if *mode != popup::CommitInputMode::Insert {
+                    return;
+                }
                 match *focus {
                     popup::CommitInputFocus::Summary => {
                         // Split on first newline: first line into summary, rest into body.
@@ -7357,129 +7366,28 @@ impl Gui {
                     }
                 }
             }
-            PopupState::CommitInput { focus, .. } => {
+            PopupState::CommitInput { focus, mode, .. } => {
                 use crossterm::event::KeyModifiers;
-                let focus = *focus;
+                use tui_textarea::CursorMove;
 
-                // Tab toggles focus between summary and body
-                if key.code == KeyCode::Tab {
-                    if let PopupState::CommitInput {
-                        focus,
-                        summary_textarea,
-                        body_textarea,
-                        ..
-                    } = &mut self.popup
-                    {
-                        *focus = match *focus {
-                            popup::CommitInputFocus::Summary => popup::CommitInputFocus::Body,
-                            popup::CommitInputFocus::Body => popup::CommitInputFocus::Summary,
-                        };
-                        // Update cursor visibility based on focus
-                        let visible = ratatui::style::Style::default()
-                            .add_modifier(ratatui::style::Modifier::REVERSED);
-                        let hidden = ratatui::style::Style::default();
-                        match *focus {
-                            popup::CommitInputFocus::Summary => {
-                                summary_textarea.set_cursor_style(visible);
-                                body_textarea.set_cursor_style(hidden);
-                            }
-                            popup::CommitInputFocus::Body => {
-                                summary_textarea.set_cursor_style(hidden);
-                                body_textarea.set_cursor_style(visible);
-                            }
-                        }
-                    }
-                }
-                // Insert a newline in the body only with Shift+Enter. Plain Enter submits
-                // the commit from either field. Ctrl+J is kept as a terminal-compatible
-                // fallback for Shift+Enter; without this branch tui_textarea would interpret
-                // it as its default `delete_line_by_head` binding.
-                else if (key.code == KeyCode::Enter
-                    && key.modifiers.contains(KeyModifiers::SHIFT))
-                    || (key.code == KeyCode::Char('j')
-                        && key.modifiers.contains(KeyModifiers::CONTROL))
+                let focus = *focus;
+                let mode = *mode;
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let alt = key.modifiers.contains(KeyModifiers::ALT);
+                let cmd = has_command_modifier(key.modifiers);
+
+                // Any direct key input interrupts an in-flight smooth scroll;
+                // a new scroll command below can immediately replace it.
+                if let PopupState::CommitInput {
+                    body_scroll_remaining,
+                    ..
+                } = &mut self.popup
                 {
-                    let wrap_width = self.commit_body_wrap_width();
-                    if let PopupState::CommitInput {
-                        focus,
-                        summary_textarea,
-                        body_textarea,
-                        body_state,
-                        ..
-                    } = &mut self.popup
-                    {
-                        if *focus == popup::CommitInputFocus::Summary {
-                            *focus = popup::CommitInputFocus::Body;
-                            let visible = ratatui::style::Style::default()
-                                .add_modifier(ratatui::style::Modifier::REVERSED);
-                            let hidden = ratatui::style::Style::default();
-                            summary_textarea.set_cursor_style(hidden);
-                            body_textarea.set_cursor_style(visible);
-                        }
-                        body_state.insert_char('\n');
-                        body_state.render_into(body_textarea, wrap_width);
-                    }
+                    *body_scroll_remaining = 0;
                 }
-                // Plain Enter submits the commit from either summary or body.
-                else if key.code == KeyCode::Enter {
-                    let popup = std::mem::replace(&mut self.popup, PopupState::None);
-                    if let PopupState::CommitInput {
-                        summary_textarea,
-                        body_state,
-                        on_confirm,
-                        ..
-                    } = popup
-                    {
-                        let summary = summary_textarea.lines().join("");
-                        let raw_body = body_state.raw().trim();
-                        let body = if raw_body.is_empty() {
-                            String::new()
-                        } else {
-                            let commit_config = &self.config.user_config.git.commit;
-                            if commit_config.auto_wrap_commit_message
-                                && commit_config.auto_wrap_width > 0
-                            {
-                                popup::hard_wrap_commit_body(
-                                    raw_body,
-                                    commit_config.auto_wrap_width,
-                                )
-                            } else {
-                                popup::unwrap_commit_body(raw_body)
-                            }
-                        };
-                        let text = if body.is_empty() {
-                            summary
-                        } else {
-                            format!("{}\n\n{}", summary, body)
-                        };
-                        // Save to commit history
-                        if !text.trim().is_empty() {
-                            self.commit_message_history.retain(|m| m != &text);
-                            self.commit_message_history.insert(0, text.clone());
-                            self.commit_message_history.truncate(50);
-                            self.save_commit_history();
-                        }
-                        self.commit_history_idx = None;
-                        // Successful submit: drop any stashed in-progress editor.
-                        self.saved_commit_popup = None;
-                        if let Err(e) = on_confirm(self, &text) {
-                            self.popup = PopupState::Message {
-                                title: "Error".to_string(),
-                                message: format!("{}", e),
-                                kind: MessageKind::Error,
-                            };
-                        }
-                    }
-                }
-                // Esc: stash editor so re-opening commit prompt restores in-progress text.
-                else if key.code == KeyCode::Esc {
-                    let stashed = std::mem::replace(&mut self.popup, PopupState::None);
-                    self.saved_commit_popup = Some(stashed);
-                    self.commit_history_idx = None;
-                }
-                // Toggle a visible Signed-off-by trailer using the same
-                // committer identity Git would use for `git commit -s`.
-                else if matches_key(
+
+                // Commit-editor actions remain available from every Vim mode.
+                if matches_key(
                     key,
                     &self.config.user_config.keybinding.commit_message.sign_off,
                 ) {
@@ -7493,20 +7401,26 @@ impl Gui {
                                 summary_textarea,
                                 body_textarea,
                                 body_state,
+                                mode,
                                 ..
                             } = &mut self.popup
                             {
+                                if *mode == popup::CommitInputMode::Visual {
+                                    summary_textarea.cancel_selection();
+                                    body_textarea.cancel_selection();
+                                    *mode = popup::CommitInputMode::Normal;
+                                }
                                 removed = body_state.remove_trailer(&trailer);
                                 if !removed {
                                     added = body_state.append_trailer(&trailer);
                                 }
                                 if added {
-                                    *focus = popup::CommitInputFocus::Body;
-                                    let visible = ratatui::style::Style::default()
-                                        .add_modifier(ratatui::style::Modifier::REVERSED);
-                                    let hidden = ratatui::style::Style::default();
-                                    summary_textarea.set_cursor_style(hidden);
-                                    body_textarea.set_cursor_style(visible);
+                                    popup::set_commit_input_focus(
+                                        focus,
+                                        summary_textarea,
+                                        body_textarea,
+                                        popup::CommitInputFocus::Body,
+                                    );
                                 }
                                 if added || removed {
                                     body_state.render_into(body_textarea, wrap_width);
@@ -7526,9 +7440,7 @@ impl Gui {
                             };
                         }
                     }
-                }
-                // Open commit menu key (configurable)
-                else if matches_key(
+                } else if matches_key(
                     key,
                     &self
                         .config
@@ -7538,9 +7450,7 @@ impl Gui {
                         .commit_menu,
                 ) {
                     self.show_commit_editor_menu()?;
-                }
-                // AI generate key (configurable)
-                else if matches_key(
+                } else if matches_key(
                     key,
                     &self
                         .config
@@ -7550,196 +7460,625 @@ impl Gui {
                         .ai_generate,
                 ) {
                     self.trigger_ai_commit_generation_from_editor();
-                }
-                // Up/Down on summary: cycle commit history
-                else if focus == popup::CommitInputFocus::Summary
-                    && (key.code == KeyCode::Up || key.code == KeyCode::Down)
-                    && !self.commit_message_history.is_empty()
-                {
-                    let wrap_width = self.commit_body_wrap_width();
+                } else if key.code == KeyCode::Tab {
+                    // Tab is the explicit cross-field motion in every mode. In
+                    // Visual mode the selection is local to each field, so a
+                    // field switch starts a fresh selection at the new cursor.
                     if let PopupState::CommitInput {
+                        focus,
                         summary_textarea,
                         body_textarea,
-                        body_state,
+                        mode,
                         ..
                     } = &mut self.popup
                     {
-                        let history_len = self.commit_message_history.len();
-                        let load_msg = |summary_textarea: &mut tui_textarea::TextArea<'static>,
-                                        body_textarea: &mut tui_textarea::TextArea<'static>,
-                                        body_state: &mut popup::BodySoftWrap,
-                                        msg: &str| {
-                            let (summary, body) = split_commit_message(msg);
-                            popup::set_commit_summary_text(summary_textarea, &summary);
-                            *body_textarea = popup::make_commit_body_textarea();
-                            // Preserve history newlines; soft-wrap is display-only.
-                            body_state.set_text(popup::unwrap_commit_body(&body));
-                            body_state.render_into(body_textarea, wrap_width);
+                        let new_focus = match *focus {
+                            popup::CommitInputFocus::Summary => popup::CommitInputFocus::Body,
+                            popup::CommitInputFocus::Body => popup::CommitInputFocus::Summary,
                         };
-                        match key.code {
-                            KeyCode::Up => {
-                                let new_idx = match self.commit_history_idx {
-                                    None => {
-                                        // Save current draft
-                                        let s = summary_textarea.lines().join("");
-                                        let b = body_state.raw().to_string();
-                                        self.commit_history_draft = if b.trim().is_empty() {
-                                            s
-                                        } else {
-                                            format!("{}\n\n{}", s, b)
-                                        };
-                                        0
-                                    }
-                                    Some(idx) => (idx + 1).min(history_len - 1),
-                                };
-                                self.commit_history_idx = Some(new_idx);
-                                let msg = self.commit_message_history[new_idx].clone();
-                                load_msg(summary_textarea, body_textarea, body_state, &msg);
+                        if *mode == popup::CommitInputMode::Visual {
+                            summary_textarea.cancel_selection();
+                            body_textarea.cancel_selection();
+                        }
+                        popup::set_commit_input_focus(
+                            focus,
+                            summary_textarea,
+                            body_textarea,
+                            new_focus,
+                        );
+                        if *mode == popup::CommitInputMode::Visual {
+                            match new_focus {
+                                popup::CommitInputFocus::Summary => summary_textarea.start_selection(),
+                                popup::CommitInputFocus::Body => body_textarea.start_selection(),
                             }
-                            KeyCode::Down => match self.commit_history_idx {
-                                Some(0) => {
-                                    self.commit_history_idx = None;
-                                    let draft = self.commit_history_draft.clone();
-                                    load_msg(summary_textarea, body_textarea, body_state, &draft);
-                                }
-                                Some(idx) => {
-                                    let new_idx = idx - 1;
-                                    self.commit_history_idx = Some(new_idx);
-                                    let msg = self.commit_message_history[new_idx].clone();
-                                    load_msg(summary_textarea, body_textarea, body_state, &msg);
-                                }
-                                None => {}
-                            },
-                            _ => {}
                         }
                     }
-                }
-                // All other keys: forward to the focused textarea
-                else {
-                    let wrap_width = self.commit_body_wrap_width();
-                    if let PopupState::CommitInput {
-                        summary_textarea,
-                        body_textarea,
-                        body_state,
-                        focus,
-                        ..
-                    } = &mut self.popup
-                    {
-                        match focus {
-                            popup::CommitInputFocus::Summary => {
-                                textarea_input(summary_textarea, key);
-                            }
-                            popup::CommitInputFocus::Body => {
-                                // Body is driven by body_state; body_textarea is a soft-wrapped
-                                // projection. Content edits rebuild the projection; pure cursor
-                                // moves only Jump so the viewport is preserved (Up only scrolls
-                                // when the cursor is already on the first visible row).
-                                let mut content_changed = false;
-                                let mut cursor_moved = false;
-                                let alt = key.modifiers.contains(KeyModifiers::ALT);
-                                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                                let cmd = has_command_modifier(key.modifiers);
-                                match key.code {
-                                    KeyCode::Char(c) if !ctrl && !alt && !cmd => {
-                                        body_state.insert_char(c);
-                                        content_changed = true;
-                                    }
-                                    // Cmd+Backspace / Ctrl+U: delete to start of visual line.
-                                    // Most macOS terminals (Zed, WezTerm, …) intercept Cmd and
-                                    // never forward it to the app, so the readline shortcut is
-                                    // the only one that works everywhere.
-                                    KeyCode::Backspace if cmd => {
-                                        body_state.delete_to_visual_line_start(wrap_width);
-                                        content_changed = true;
-                                    }
-                                    KeyCode::Char('u') if ctrl => {
-                                        body_state.delete_to_visual_line_start(wrap_width);
-                                        content_changed = true;
-                                    }
-                                    // Opt+Backspace / Ctrl+W: delete previous word.
-                                    KeyCode::Backspace if alt => {
-                                        body_state.delete_word_left();
-                                        content_changed = true;
-                                    }
-                                    KeyCode::Char('w') if ctrl => {
-                                        body_state.delete_word_left();
-                                        content_changed = true;
-                                    }
-                                    KeyCode::Backspace => {
-                                        body_state.backspace();
-                                        content_changed = true;
-                                    }
-                                    KeyCode::Delete => {
-                                        body_state.delete();
-                                        content_changed = true;
-                                    }
-                                    // Cmd+Left/Right and Ctrl+A/E: jump to start/end of visual
-                                    // row. Same reason as Cmd+Backspace — Ctrl is the portable
-                                    // binding.
-                                    KeyCode::Left if cmd => {
-                                        body_state.move_visual_line_start(wrap_width);
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::Right if cmd => {
-                                        body_state.move_visual_line_end(wrap_width);
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::Char('a') if ctrl => {
-                                        body_state.move_visual_line_start(wrap_width);
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::Char('e') if ctrl => {
-                                        body_state.move_visual_line_end(wrap_width);
-                                        cursor_moved = true;
-                                    }
-                                    // Opt+Left/Right: jump by word (matches the new-branch input
-                                    // and the rest of the readline-style world).
-                                    KeyCode::Left if alt => {
-                                        body_state.move_word_left();
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::Right if alt => {
-                                        body_state.move_word_right();
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::Char('b') if alt => {
-                                        body_state.move_word_left();
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::Char('f') if alt => {
-                                        body_state.move_word_right();
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::Left => {
-                                        body_state.move_left();
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::Right => {
-                                        body_state.move_right();
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::Up => {
-                                        body_state.move_visual_up(wrap_width);
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::Down => {
-                                        body_state.move_visual_down(wrap_width);
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::Home => {
-                                        body_state.move_home();
-                                        cursor_moved = true;
-                                    }
-                                    KeyCode::End => {
-                                        body_state.move_end();
-                                        cursor_moved = true;
-                                    }
-                                    _ => {}
+                } else if ctrl && key.code == KeyCode::Enter {
+                    self.submit_commit_input();
+                } else {
+                    match mode {
+                        popup::CommitInputMode::Insert => {
+                            if key.code == KeyCode::Esc {
+                                if let PopupState::CommitInput {
+                                    mode,
+                                    summary_textarea,
+                                    body_textarea,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    summary_textarea.cancel_selection();
+                                    body_textarea.cancel_selection();
+                                    *mode = popup::CommitInputMode::Normal;
                                 }
-                                if content_changed {
-                                    body_state.render_into(body_textarea, wrap_width);
-                                } else if cursor_moved {
-                                    body_state.apply_cursor_into(body_textarea, wrap_width);
+                            } else if key.code == KeyCode::Enter
+                                || (ctrl && key.code == KeyCode::Char('j'))
+                            {
+                                let wrap_width = self.commit_body_wrap_width();
+                                if let PopupState::CommitInput {
+                                    focus,
+                                    summary_textarea,
+                                    body_textarea,
+                                    body_state,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    match *focus {
+                                        popup::CommitInputFocus::Summary => {
+                                            popup::set_commit_input_focus(
+                                                focus,
+                                                summary_textarea,
+                                                body_textarea,
+                                                popup::CommitInputFocus::Body,
+                                            );
+                                        }
+                                        popup::CommitInputFocus::Body => {
+                                            body_state.insert_char('\n');
+                                            body_state.render_into(body_textarea, wrap_width);
+                                        }
+                                    }
+                                }
+                            } else {
+                                let wrap_width = self.commit_body_wrap_width();
+                                if let PopupState::CommitInput {
+                                    summary_textarea,
+                                    body_textarea,
+                                    body_state,
+                                    focus,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    match focus {
+                                        popup::CommitInputFocus::Summary => {
+                                            textarea_input(summary_textarea, key);
+                                        }
+                                        popup::CommitInputFocus::Body => {
+                                            let mut content_changed = false;
+                                            let mut cursor_moved = false;
+                                            match key.code {
+                                                KeyCode::Char(c) if !ctrl && !alt && !cmd => {
+                                                    body_state.insert_char(c);
+                                                    content_changed = true;
+                                                }
+                                                KeyCode::Backspace if cmd => {
+                                                    body_state.delete_to_visual_line_start(wrap_width);
+                                                    content_changed = true;
+                                                }
+                                                KeyCode::Char('u') if ctrl => {
+                                                    body_state.delete_to_visual_line_start(wrap_width);
+                                                    content_changed = true;
+                                                }
+                                                KeyCode::Backspace if alt => {
+                                                    body_state.delete_word_left();
+                                                    content_changed = true;
+                                                }
+                                                KeyCode::Char('w') if ctrl => {
+                                                    body_state.delete_word_left();
+                                                    content_changed = true;
+                                                }
+                                                KeyCode::Backspace => {
+                                                    body_state.backspace();
+                                                    content_changed = true;
+                                                }
+                                                KeyCode::Delete => {
+                                                    body_state.delete();
+                                                    content_changed = true;
+                                                }
+                                                KeyCode::Left if cmd => {
+                                                    body_state.move_visual_line_start(wrap_width);
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Right if cmd => {
+                                                    body_state.move_visual_line_end(wrap_width);
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Char('a') if ctrl => {
+                                                    body_state.move_visual_line_start(wrap_width);
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Char('e') if ctrl => {
+                                                    body_state.move_visual_line_end(wrap_width);
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Left if alt => {
+                                                    body_state.move_word_left();
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Right if alt => {
+                                                    body_state.move_word_right();
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Char('b') if alt => {
+                                                    body_state.move_word_left();
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Char('f') if alt => {
+                                                    body_state.move_word_right();
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Left => {
+                                                    body_state.move_left();
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Right => {
+                                                    body_state.move_right();
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Up => {
+                                                    body_state.move_visual_up(wrap_width);
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Down => {
+                                                    body_state.move_visual_down(wrap_width);
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::Home => {
+                                                    body_state.move_visual_line_start(wrap_width);
+                                                    cursor_moved = true;
+                                                }
+                                                KeyCode::End => {
+                                                    body_state.move_visual_line_end(wrap_width);
+                                                    cursor_moved = true;
+                                                }
+                                                _ => {}
+                                            }
+                                            if content_changed {
+                                                body_state.render_into(body_textarea, wrap_width);
+                                            } else if cursor_moved {
+                                                body_state.apply_cursor_into(body_textarea, wrap_width);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        popup::CommitInputMode::Visual => {
+                            if key.code == KeyCode::Esc || key.code == KeyCode::Char('v') {
+                                if let PopupState::CommitInput {
+                                    mode,
+                                    summary_textarea,
+                                    body_textarea,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    summary_textarea.cancel_selection();
+                                    body_textarea.cancel_selection();
+                                    *mode = popup::CommitInputMode::Normal;
+                                }
+                            } else if matches!(key.code, KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Char('c')) {
+                                let wrap_width = self.commit_body_wrap_width();
+                                let change = key.code == KeyCode::Char('c');
+                                if let PopupState::CommitInput {
+                                    mode,
+                                    focus,
+                                    summary_textarea,
+                                    body_textarea,
+                                    body_state,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    match *focus {
+                                        popup::CommitInputFocus::Summary => {
+                                            if summary_textarea
+                                                .selection_range()
+                                                .is_some_and(|(start, end)| start != end)
+                                            {
+                                                summary_textarea.cut();
+                                            } else {
+                                                summary_textarea.delete_next_char();
+                                            }
+                                            summary_textarea.cancel_selection();
+                                        }
+                                        popup::CommitInputFocus::Body => {
+                                            let deleted = body_textarea
+                                                .selection_range()
+                                                .is_some_and(|(start, end)| {
+                                                    body_state.delete_visual_selection(
+                                                        start,
+                                                        end,
+                                                        wrap_width,
+                                                    )
+                                                });
+                                            if !deleted {
+                                                body_state.delete();
+                                            }
+                                            body_state.render_into(body_textarea, wrap_width);
+                                            body_textarea.cancel_selection();
+                                        }
+                                    }
+                                    *mode = if change {
+                                        popup::CommitInputMode::Insert
+                                    } else {
+                                        popup::CommitInputMode::Normal
+                                    };
+                                }
+                            } else if key.code == KeyCode::Char('y') {
+                                let wrap_width = self.commit_body_wrap_width();
+                                let mut selected = String::new();
+                                if let PopupState::CommitInput {
+                                    mode,
+                                    focus,
+                                    summary_textarea,
+                                    body_textarea,
+                                    body_state,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    match *focus {
+                                        popup::CommitInputFocus::Summary => {
+                                            if let Some(((row, start), (_, end))) =
+                                                summary_textarea.selection_range()
+                                            {
+                                                if let Some(line) = summary_textarea.lines().get(row) {
+                                                    selected = line
+                                                        .chars()
+                                                        .skip(start)
+                                                        .take(end.saturating_sub(start))
+                                                        .collect();
+                                                }
+                                            }
+                                        }
+                                        popup::CommitInputFocus::Body => {
+                                            if let Some((start, end)) = body_textarea.selection_range() {
+                                                selected = body_state.selected_visual_text(
+                                                    start,
+                                                    end,
+                                                    wrap_width,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    summary_textarea.cancel_selection();
+                                    body_textarea.cancel_selection();
+                                    *mode = popup::CommitInputMode::Normal;
+                                }
+                                if !selected.is_empty() {
+                                    Platform::copy_to_clipboard(&selected)?;
+                                    self.show_action_toast("Copied selection");
+                                }
+                            } else {
+                                let wrap_width = self.commit_body_wrap_width();
+                                if let PopupState::CommitInput {
+                                    focus,
+                                    summary_textarea,
+                                    body_textarea,
+                                    body_state,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    match *focus {
+                                        popup::CommitInputFocus::Summary => match key.code {
+                                            KeyCode::Char('h') | KeyCode::Left => {
+                                                summary_textarea.move_cursor(CursorMove::Back)
+                                            }
+                                            KeyCode::Char('l') | KeyCode::Right => {
+                                                summary_textarea.move_cursor(CursorMove::Forward)
+                                            }
+                                            KeyCode::Char('H') | KeyCode::Home | KeyCode::Char('0') => {
+                                                summary_textarea.move_cursor(CursorMove::Head)
+                                            }
+                                            KeyCode::Char('L') | KeyCode::End | KeyCode::Char('$') => {
+                                                summary_textarea.move_cursor(CursorMove::End)
+                                            }
+                                            KeyCode::Char('w') => {
+                                                summary_textarea.move_cursor(CursorMove::WordForward)
+                                            }
+                                            KeyCode::Char('b') => {
+                                                summary_textarea.move_cursor(CursorMove::WordBack)
+                                            }
+                                            _ => {}
+                                        },
+                                        popup::CommitInputFocus::Body => {
+                                            let mut moved = true;
+                                            match key.code {
+                                                KeyCode::Char('h') | KeyCode::Left => body_state.move_left(),
+                                                KeyCode::Char('l') | KeyCode::Right => body_state.move_right(),
+                                                KeyCode::Char('H') | KeyCode::Home | KeyCode::Char('0') => {
+                                                    body_state.move_visual_line_start(wrap_width)
+                                                }
+                                                KeyCode::Char('L') | KeyCode::End | KeyCode::Char('$') => {
+                                                    body_state.move_visual_line_end(wrap_width)
+                                                }
+                                                KeyCode::Char('w') => body_state.move_word_right(),
+                                                KeyCode::Char('b') => body_state.move_word_left(),
+                                                KeyCode::Char('j') | KeyCode::Down => {
+                                                    body_state.move_visual_down(wrap_width)
+                                                }
+                                                KeyCode::Char('k') | KeyCode::Up => {
+                                                    body_state.move_visual_up(wrap_width)
+                                                }
+                                                _ => moved = false,
+                                            }
+                                            if moved {
+                                                body_state.apply_cursor_into(body_textarea, wrap_width);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        popup::CommitInputMode::Normal => {
+                            if key.code == KeyCode::Esc {
+                                let stashed =
+                                    std::mem::replace(&mut self.popup, PopupState::None);
+                                self.saved_commit_popup = Some(stashed);
+                                self.commit_history_idx = None;
+                            } else if key.code == KeyCode::Enter {
+                                self.submit_commit_input();
+                            } else if matches!(
+                                key.code,
+                                KeyCode::Char('i')
+                                    | KeyCode::Char('a')
+                                    | KeyCode::Char('I')
+                                    | KeyCode::Char('A')
+                            ) {
+                                let wrap_width = self.commit_body_wrap_width();
+                                if let PopupState::CommitInput {
+                                    mode,
+                                    focus,
+                                    summary_textarea,
+                                    body_textarea,
+                                    body_state,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    match *focus {
+                                        popup::CommitInputFocus::Summary => match key.code {
+                                            KeyCode::Char('a') => {
+                                                summary_textarea.move_cursor(CursorMove::Forward)
+                                            }
+                                            KeyCode::Char('I') => {
+                                                summary_textarea.move_cursor(CursorMove::Head)
+                                            }
+                                            KeyCode::Char('A') => {
+                                                summary_textarea.move_cursor(CursorMove::End)
+                                            }
+                                            _ => {}
+                                        },
+                                        popup::CommitInputFocus::Body => {
+                                            match key.code {
+                                                KeyCode::Char('a') => body_state.move_right(),
+                                                KeyCode::Char('I') => {
+                                                    body_state.move_visual_line_start(wrap_width)
+                                                }
+                                                KeyCode::Char('A') => {
+                                                    body_state.move_visual_line_end(wrap_width)
+                                                }
+                                                _ => {}
+                                            }
+                                            body_state.apply_cursor_into(body_textarea, wrap_width);
+                                        }
+                                    }
+                                    *mode = popup::CommitInputMode::Insert;
+                                }
+                            } else if key.code == KeyCode::Char('v') {
+                                if let PopupState::CommitInput {
+                                    mode,
+                                    focus,
+                                    summary_textarea,
+                                    body_textarea,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    match *focus {
+                                        popup::CommitInputFocus::Summary => summary_textarea.start_selection(),
+                                        popup::CommitInputFocus::Body => body_textarea.start_selection(),
+                                    }
+                                    *mode = popup::CommitInputMode::Visual;
+                                }
+                            } else if focus == popup::CommitInputFocus::Body
+                                && ((ctrl
+                                    && matches!(
+                                        key.code,
+                                        KeyCode::Char('u')
+                                            | KeyCode::Char('d')
+                                            | KeyCode::Char('b')
+                                            | KeyCode::Char('f')
+                                    ))
+                                    || matches!(key.code, KeyCode::PageUp | KeyCode::PageDown))
+                            {
+                                let area = Rect::new(0, 0, self.layout.width, self.layout.height);
+                                let visible_rows = views::commit_description_textarea_geometry(
+                                    &self.popup,
+                                    area,
+                                )
+                                .map(|rect| rect.height as isize)
+                                .unwrap_or(1)
+                                .max(1);
+                                let amount = if matches!(
+                                    key.code,
+                                    KeyCode::PageUp
+                                        | KeyCode::PageDown
+                                        | KeyCode::Char('b')
+                                        | KeyCode::Char('f')
+                                ) {
+                                    visible_rows
+                                } else {
+                                    (visible_rows / 2).max(1)
+                                };
+                                let direction = if matches!(
+                                    key.code,
+                                    KeyCode::Char('u') | KeyCode::Char('b') | KeyCode::PageUp
+                                ) {
+                                    -1
+                                } else {
+                                    1
+                                };
+                                if let PopupState::CommitInput {
+                                    body_scroll_remaining,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    *body_scroll_remaining = direction * amount;
+                                }
+                            } else if focus == popup::CommitInputFocus::Summary
+                                && (key.code == KeyCode::Up || key.code == KeyCode::Down)
+                                && !self.commit_message_history.is_empty()
+                            {
+                                let wrap_width = self.commit_body_wrap_width();
+                                if let PopupState::CommitInput {
+                                    summary_textarea,
+                                    body_textarea,
+                                    body_state,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    let history_len = self.commit_message_history.len();
+                                    let load_msg = |
+                                        summary_textarea: &mut tui_textarea::TextArea<'static>,
+                                        body_textarea: &mut tui_textarea::TextArea<'static>,
+                                        body_state: &mut popup::BodySoftWrap,
+                                        msg: &str,
+                                    | {
+                                        let (summary, body) = split_commit_message(msg);
+                                        popup::set_commit_summary_text(summary_textarea, &summary);
+                                        *body_textarea = popup::make_commit_body_textarea();
+                                        body_state.set_text(popup::unwrap_commit_body(&body));
+                                        body_state.render_into(body_textarea, wrap_width);
+                                    };
+                                    match key.code {
+                                        KeyCode::Up => {
+                                            let new_idx = match self.commit_history_idx {
+                                                None => {
+                                                    let s = summary_textarea.lines().join("");
+                                                    let b = body_state.raw().to_string();
+                                                    self.commit_history_draft = if b.trim().is_empty() {
+                                                        s
+                                                    } else {
+                                                        format!("{}\n\n{}", s, b)
+                                                    };
+                                                    0
+                                                }
+                                                Some(idx) => (idx + 1).min(history_len - 1),
+                                            };
+                                            self.commit_history_idx = Some(new_idx);
+                                            let msg = self.commit_message_history[new_idx].clone();
+                                            load_msg(summary_textarea, body_textarea, body_state, &msg);
+                                        }
+                                        KeyCode::Down => match self.commit_history_idx {
+                                            Some(0) => {
+                                                self.commit_history_idx = None;
+                                                let draft = self.commit_history_draft.clone();
+                                                load_msg(summary_textarea, body_textarea, body_state, &draft);
+                                            }
+                                            Some(idx) => {
+                                                let new_idx = idx - 1;
+                                                self.commit_history_idx = Some(new_idx);
+                                                let msg = self.commit_message_history[new_idx].clone();
+                                                load_msg(summary_textarea, body_textarea, body_state, &msg);
+                                            }
+                                            None => {}
+                                        },
+                                        _ => {}
+                                    }
+                                }
+                            } else {
+                                let wrap_width = self.commit_body_wrap_width();
+                                if let PopupState::CommitInput {
+                                    focus,
+                                    summary_textarea,
+                                    body_textarea,
+                                    body_state,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    match *focus {
+                                        popup::CommitInputFocus::Summary => match key.code {
+                                            KeyCode::Char('j') | KeyCode::Down => {
+                                                popup::set_commit_input_focus(
+                                                    focus,
+                                                    summary_textarea,
+                                                    body_textarea,
+                                                    popup::CommitInputFocus::Body,
+                                                );
+                                            }
+                                            KeyCode::Char('h') | KeyCode::Left => {
+                                                summary_textarea.move_cursor(CursorMove::Back)
+                                            }
+                                            KeyCode::Char('l') | KeyCode::Right => {
+                                                summary_textarea.move_cursor(CursorMove::Forward)
+                                            }
+                                            KeyCode::Char('H') | KeyCode::Home | KeyCode::Char('0') => {
+                                                summary_textarea.move_cursor(CursorMove::Head)
+                                            }
+                                            KeyCode::Char('L') | KeyCode::End | KeyCode::Char('$') => {
+                                                summary_textarea.move_cursor(CursorMove::End)
+                                            }
+                                            KeyCode::Char('w') => {
+                                                summary_textarea.move_cursor(CursorMove::WordForward)
+                                            }
+                                            KeyCode::Char('b') => {
+                                                summary_textarea.move_cursor(CursorMove::WordBack)
+                                            }
+                                            KeyCode::Char('x') | KeyCode::Delete => {
+                                                summary_textarea.delete_next_char();
+                                            }
+                                            _ => {}
+                                        },
+                                        popup::CommitInputFocus::Body => {
+                                            let mut moved = true;
+                                            let mut content_changed = false;
+                                            match key.code {
+                                                KeyCode::Char('k') | KeyCode::Up => {
+                                                    let (row, _) = body_state.visual_cursor(wrap_width);
+                                                    if row == 0 {
+                                                        popup::set_commit_input_focus(
+                                                            focus,
+                                                            summary_textarea,
+                                                            body_textarea,
+                                                            popup::CommitInputFocus::Summary,
+                                                        );
+                                                        moved = false;
+                                                    } else {
+                                                        body_state.move_visual_up(wrap_width);
+                                                    }
+                                                }
+                                                KeyCode::Char('j') | KeyCode::Down => {
+                                                    body_state.move_visual_down(wrap_width)
+                                                }
+                                                KeyCode::Char('h') | KeyCode::Left => body_state.move_left(),
+                                                KeyCode::Char('l') | KeyCode::Right => body_state.move_right(),
+                                                KeyCode::Char('H') | KeyCode::Home | KeyCode::Char('0') => {
+                                                    body_state.move_visual_line_start(wrap_width)
+                                                }
+                                                KeyCode::Char('L') | KeyCode::End | KeyCode::Char('$') => {
+                                                    body_state.move_visual_line_end(wrap_width)
+                                                }
+                                                KeyCode::Char('w') => body_state.move_word_right(),
+                                                KeyCode::Char('b') => body_state.move_word_left(),
+                                                KeyCode::Char('x') | KeyCode::Delete => {
+                                                    body_state.delete();
+                                                    moved = false;
+                                                    content_changed = true;
+                                                }
+                                                _ => moved = false,
+                                            }
+                                            if content_changed {
+                                                body_state.render_into(body_textarea, wrap_width);
+                                            } else if moved {
+                                                body_state.apply_cursor_into(body_textarea, wrap_width);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -9088,6 +9427,24 @@ impl Gui {
 
     /// Show the commit menu from within the commit message editor (<c-o>).
     fn show_commit_editor_menu(&mut self) -> Result<()> {
+        // A visual selection belongs to the currently-rendered textarea. Menu
+        // actions can rebuild either field, so normalize it before stashing.
+        if let PopupState::CommitInput {
+            summary_textarea,
+            body_textarea,
+            mode,
+            body_scroll_remaining,
+            ..
+        } = &mut self.popup
+        {
+            if *mode == popup::CommitInputMode::Visual {
+                summary_textarea.cancel_selection();
+                body_textarea.cancel_selection();
+                *mode = popup::CommitInputMode::Normal;
+            }
+            *body_scroll_remaining = 0;
+        }
+
         // Stash the current commit editor popup
         let stashed = std::mem::replace(&mut self.popup, PopupState::None);
         self.pending_commit_popup = Some(stashed);
@@ -9727,21 +10084,17 @@ impl Gui {
             {
                 match mouse.kind {
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                        let rows: i16 = if matches!(mouse.kind, MouseEventKind::ScrollDown) {
+                        let rows: isize = if matches!(mouse.kind, MouseEventKind::ScrollDown) {
                             3
                         } else {
                             -3
                         };
-                        let wrap_width = self.commit_body_wrap_width();
                         if let PopupState::CommitInput {
-                            body_textarea,
-                            body_state,
+                            body_scroll_remaining,
                             ..
                         } = &mut self.popup
                         {
-                            body_textarea.scroll((rows, 0));
-                            let (row, col) = body_textarea.cursor();
-                            body_state.set_cursor_from_visual(row, col, wrap_width);
+                            *body_scroll_remaining = (*body_scroll_remaining + rows).clamp(-24, 24);
                         }
                         return;
                     }
@@ -11998,15 +12351,90 @@ impl Gui {
     /// Effective wrap width for the commit-body textarea, derived from popup
     /// geometry and the user's `git.commit.auto_wrap_width` config.
     fn commit_body_wrap_width(&self) -> usize {
-        let popup_inner = popup::commit_popup_width(self.layout.width.max(1))
-            .saturating_sub(4) as usize;
-        let config_width = self.config.user_config.git.commit.auto_wrap_width;
-        if config_width > 0 {
-            popup_inner.min(config_width)
+        popup::commit_body_text_width(
+            self.layout.width.max(1),
+            self.config.user_config.git.commit.auto_wrap_width,
+        )
+    }
+
+    fn submit_commit_input(&mut self) {
+        let popup_state = std::mem::replace(&mut self.popup, PopupState::None);
+        let PopupState::CommitInput {
+            summary_textarea,
+            body_state,
+            on_confirm,
+            ..
+        } = popup_state
+        else {
+            self.popup = popup_state;
+            return;
+        };
+
+        let summary = summary_textarea.lines().join("");
+        let raw_body = body_state.raw().trim();
+        let body = if raw_body.is_empty() {
+            String::new()
         } else {
-            popup_inner
+            let commit_config = &self.config.user_config.git.commit;
+            if commit_config.auto_wrap_commit_message && commit_config.auto_wrap_width > 0 {
+                popup::hard_wrap_commit_body(raw_body, commit_config.auto_wrap_width)
+            } else {
+                popup::unwrap_commit_body(raw_body)
+            }
+        };
+        let text = if body.is_empty() {
+            summary
+        } else {
+            format!("{}\n\n{}", summary, body)
+        };
+
+        if !text.trim().is_empty() {
+            self.commit_message_history.retain(|m| m != &text);
+            self.commit_message_history.insert(0, text.clone());
+            self.commit_message_history.truncate(50);
+            self.save_commit_history();
         }
-        .max(1)
+        self.commit_history_idx = None;
+        self.saved_commit_popup = None;
+        if let Err(e) = on_confirm(self, &text) {
+            self.popup = PopupState::Message {
+                title: "Error".to_string(),
+                message: format!("{}", e),
+                kind: MessageKind::Error,
+            };
+        }
+    }
+
+    fn commit_input_scroll_animation_active(&self) -> bool {
+        matches!(
+            &self.popup,
+            PopupState::CommitInput {
+                body_scroll_remaining,
+                ..
+            } if *body_scroll_remaining != 0
+        )
+    }
+
+    fn tick_commit_input_scroll_animation(&mut self) {
+        let wrap_width = self.commit_body_wrap_width();
+        let PopupState::CommitInput {
+            body_textarea,
+            body_state,
+            body_scroll_remaining,
+            ..
+        } = &mut self.popup
+        else {
+            return;
+        };
+        if *body_scroll_remaining == 0 {
+            return;
+        }
+
+        let step: isize = if *body_scroll_remaining > 0 { 1 } else { -1 };
+        body_textarea.scroll((step as i16, 0));
+        let (row, col) = body_textarea.cursor();
+        body_state.set_cursor_from_visual(row, col, wrap_width);
+        *body_scroll_remaining -= step;
     }
 
     fn save_commit_history(&self) {
@@ -14982,6 +15410,120 @@ mod terminal_mouse_tests {
     }
 
     #[test]
+    fn commit_editor_vim_modes_move_between_fields_and_delete_visual_selection() {
+        let repo = TempRepo::new("commit-vim-modes");
+        repo.commit("file", "base");
+        std::fs::write(repo.path().join("file"), "changed").unwrap();
+        repo.git(&["add", "file"]);
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(&gui.popup, PopupState::CommitInput { mode, focus, .. }
+            if *mode == popup::CommitInputMode::Normal
+                && *focus == popup::CommitInputFocus::Summary));
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
+            .unwrap();
+        for c in "subject".chars() {
+            gui.handle_popup_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput { mode, focus, .. }
+            if *mode == popup::CommitInputMode::Normal
+                && *focus == popup::CommitInputFocus::Body));
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
+            .unwrap();
+        for c in "alpha beta".chars() {
+            gui.handle_popup_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(&gui.popup, PopupState::CommitInput { mode, body_state, focus, .. }
+            if *mode == popup::CommitInputMode::Normal
+                && *focus == popup::CommitInputFocus::Body
+                && body_state.raw() == "pha beta"
+                && body_state.cursor == 0));
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput { focus, .. }
+            if *focus == popup::CommitInputFocus::Summary));
+    }
+
+    #[test]
+    fn commit_editor_ctrl_d_queues_smooth_body_scroll() {
+        let repo = TempRepo::new("commit-vim-scroll");
+        repo.commit("file", "base");
+        std::fs::write(repo.path().join("file"), "changed").unwrap();
+        repo.git(&["add", "file"]);
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
+        gui.layout.update_size(120, 40);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+
+        let wrap_width = gui.commit_body_wrap_width();
+        if let PopupState::CommitInput {
+            focus,
+            summary_textarea,
+            body_textarea,
+            body_state,
+            ..
+        } = &mut gui.popup
+        {
+            body_state.set_text(
+                (0..60)
+                    .map(|i| format!("line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            body_state.move_to_start();
+            body_state.render_into(body_textarea, wrap_width);
+            popup::set_commit_input_focus(
+                focus,
+                summary_textarea,
+                body_textarea,
+                popup::CommitInputFocus::Body,
+            );
+        }
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .unwrap();
+        let queued = match &gui.popup {
+            PopupState::CommitInput {
+                body_scroll_remaining,
+                ..
+            } => *body_scroll_remaining,
+            _ => 0,
+        };
+        assert!(queued > 0);
+        gui.tick_commit_input_scroll_animation();
+        assert!(matches!(&gui.popup, PopupState::CommitInput { body_scroll_remaining, .. }
+            if *body_scroll_remaining == queued - 1));
+    }
+
+    #[test]
     fn reopening_saved_commit_draft_resets_view_to_top_left() {
         let repo = TempRepo::new("commit-draft-view");
         repo.commit("file", "base");
@@ -14991,6 +15533,8 @@ mod terminal_mouse_tests {
         let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
         *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
         gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
             .unwrap();
 
         for c in "subject".chars() {
@@ -15003,6 +15547,8 @@ mod terminal_mouse_tests {
             gui.handle_popup_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
                 .unwrap();
         }
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
         gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
         gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
@@ -15026,6 +15572,8 @@ mod terminal_mouse_tests {
         let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
         *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
         gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
             .unwrap();
 
         for c in "subject".chars() {

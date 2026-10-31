@@ -56,6 +56,23 @@ pub fn commit_popup_height(terminal_height: u16) -> u16 {
         .min(terminal_height)
 }
 
+/// Width reserved for Vim-style relative line numbers in the commit body.
+pub const COMMIT_BODY_GUTTER_WIDTH: u16 = 4;
+
+/// Effective text width of the commit description after popup chrome and the
+/// relative-number gutter are accounted for.
+pub fn commit_body_text_width(terminal_width: u16, configured_width: usize) -> usize {
+    let inner = commit_popup_width(terminal_width)
+        .saturating_sub(4)
+        .saturating_sub(COMMIT_BODY_GUTTER_WIDTH) as usize;
+    if configured_width > 0 {
+        inner.min(configured_width)
+    } else {
+        inner
+    }
+    .max(1)
+}
+
 fn looks_like_commit_trailer(line: &str) -> bool {
     let Some((token, _)) = line.split_once(':') else {
         return false;
@@ -573,9 +590,60 @@ impl BodySoftWrap {
         self.cursor = target.raw_start + col.min(target.char_len);
     }
 
+    pub fn visual_cursor(&self, wrap_width: usize) -> (usize, usize) {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        layout.cursor_to_visual(self.cursor)
+    }
+
     pub fn set_cursor_from_visual(&mut self, row: usize, col: usize, wrap_width: usize) {
         let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
         self.cursor = layout.visual_to_cursor(row, col);
+    }
+
+    /// Return the raw text covered by a selection in the soft-wrapped display.
+    pub fn selected_visual_text(
+        &self,
+        start: (usize, usize),
+        end: (usize, usize),
+        wrap_width: usize,
+    ) -> String {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let start = layout.visual_to_cursor(start.0, start.1);
+        let end = layout.visual_to_cursor(end.0, end.1);
+        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        self.raw.chars().skip(start).take(end.saturating_sub(start)).collect()
+    }
+
+    /// Delete a selection expressed in visual soft-wrap coordinates.
+    /// The projection-only wrap boundaries never become real newlines.
+    pub fn delete_visual_selection(
+        &mut self,
+        start: (usize, usize),
+        end: (usize, usize),
+        wrap_width: usize,
+    ) -> bool {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let start = layout.visual_to_cursor(start.0, start.1);
+        let end = layout.visual_to_cursor(end.0, end.1);
+        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        if start == end {
+            return false;
+        }
+        let start_byte = self
+            .raw
+            .char_indices()
+            .nth(start)
+            .map(|(b, _)| b)
+            .unwrap_or(self.raw.len());
+        let end_byte = self
+            .raw
+            .char_indices()
+            .nth(end)
+            .map(|(b, _)| b)
+            .unwrap_or(self.raw.len());
+        self.raw.replace_range(start_byte..end_byte, "");
+        self.cursor = start;
+        true
     }
 
     /// Place the visual cursor on an already-projected `textarea` without
@@ -645,6 +713,23 @@ pub enum MessageKind {
 pub enum CommitInputFocus {
     Summary,
     Body,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitInputMode {
+    Normal,
+    Insert,
+    Visual,
+}
+
+impl CommitInputMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "NORMAL",
+            Self::Insert => "INSERT",
+            Self::Visual => "VISUAL",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1009,6 +1094,9 @@ pub enum PopupState {
         /// prose is hard-wrapped to the configured commit-message width.
         body_state: BodySoftWrap,
         focus: CommitInputFocus,
+        mode: CommitInputMode,
+        /// Remaining rows for the neoscroll-style animated body viewport.
+        body_scroll_remaining: isize,
         on_confirm: InputAction,
     },
     Menu {
@@ -1197,6 +1285,28 @@ pub fn make_commit_body_textarea() -> TextArea<'static> {
     ta
 }
 
+pub fn set_commit_input_focus(
+    focus: &mut CommitInputFocus,
+    summary_textarea: &mut TextArea<'static>,
+    body_textarea: &mut TextArea<'static>,
+    new_focus: CommitInputFocus,
+) {
+    let visible = ratatui::style::Style::default()
+        .add_modifier(ratatui::style::Modifier::REVERSED);
+    let hidden = ratatui::style::Style::default();
+    *focus = new_focus;
+    match new_focus {
+        CommitInputFocus::Summary => {
+            summary_textarea.set_cursor_style(visible);
+            body_textarea.set_cursor_style(hidden);
+        }
+        CommitInputFocus::Body => {
+            summary_textarea.set_cursor_style(hidden);
+            body_textarea.set_cursor_style(visible);
+        }
+    }
+}
+
 /// Reset a restored commit draft to a readable top-left viewport.  Draft
 /// contents are preserved; only focus, cursor position, and textarea scroll
 /// state are reset.
@@ -1206,6 +1316,8 @@ pub fn reset_commit_input_view(popup: &mut PopupState, wrap_width: usize) {
         body_textarea,
         body_state,
         focus,
+        mode,
+        body_scroll_remaining,
         ..
     } = popup
     else {
@@ -1223,9 +1335,13 @@ pub fn reset_commit_input_view(popup: &mut PopupState, wrap_width: usize) {
     let visible = ratatui::style::Style::default()
         .add_modifier(ratatui::style::Modifier::REVERSED);
     let hidden = ratatui::style::Style::default();
+    summary_textarea.cancel_selection();
+    body_textarea.cancel_selection();
     summary_textarea.set_cursor_style(visible);
     body_textarea.set_cursor_style(hidden);
     *focus = CommitInputFocus::Summary;
+    *mode = CommitInputMode::Normal;
+    *body_scroll_remaining = 0;
 }
 
 pub fn make_command_palette_search_textarea() -> TextArea<'static> {
@@ -1346,6 +1462,18 @@ mod commit_body_wrap_tests {
         state.render_into(&mut ta, 80);
         assert_eq!(state.raw(), "- something\n- something 2");
         assert_eq!(ta.lines().join("\n"), "- something\n- something 2");
+    }
+
+    #[test]
+    fn visual_selection_maps_soft_wrap_back_to_raw_text() {
+        let mut state = BodySoftWrap::from_text("alpha beta gamma");
+        assert_eq!(
+            state.selected_visual_text((0, 0), (1, 4), 6),
+            "alpha beta"
+        );
+        assert!(state.delete_visual_selection((0, 0), (1, 4), 6));
+        assert_eq!(state.raw(), " gamma");
+        assert_eq!(state.cursor, 0);
     }
 
     #[test]
