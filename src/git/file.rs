@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
@@ -68,33 +68,58 @@ impl GitCommands {
     /// Populate final working-tree stats relative to HEAD. Failures are
     /// intentionally non-fatal: status remains useful even when a diff cannot
     /// be produced (for example, during unusual index states).
-    fn populate_file_diff_stats(&self, files: &mut [File]) {
+    pub(super) fn populate_file_diff_stats(&self, files: &mut [File]) {
         let diff_base = if self.head_state().is_ok() {
-            vec!["diff", "HEAD"]
+            vec!["--literal-pathspecs".to_string(), "diff".to_string(), "HEAD".to_string()]
         } else {
-            vec!["diff", "--cached"]
+            vec![
+                "--literal-pathspecs".to_string(),
+                "diff".to_string(),
+                "--cached".to_string(),
+            ]
         };
 
-        let mut numstat_args = diff_base.clone();
-        numstat_args.extend(["--numstat", "-z", "--find-renames", "--no-color"]);
-        let line_stats = self
-            .git()
-            .args(&numstat_args)
-            .run()
-            .ok()
-            .filter(|result| result.success)
-            .map(|result| parse_numstat_z(&result.stdout))
-            .unwrap_or_default();
+        // Status already told us exactly which tracked paths changed. Restrict
+        // the expensive numstat/hunk diffs to those paths instead of making Git
+        // rescan the entire worktree. For an unusually huge changed-path list,
+        // fall back to the full-tree diff rather than risk exceeding argv limits.
+        let mut seen = HashSet::new();
+        let mut paths = Vec::new();
+        for file in files.iter().filter(|file| file.tracked) {
+            for path in file.diff_paths() {
+                if seen.insert(path.to_string()) {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+        let path_arg_bytes = paths.iter().map(|path| path.len() + 1).sum::<usize>();
+        let pathspecs = if !paths.is_empty() && path_arg_bytes <= MAX_GIT_PATH_ARG_BYTES {
+            Some(paths)
+        } else {
+            None
+        };
 
-        let mut patch_args = diff_base;
-        patch_args.extend(["--unified=0", "--find-renames", "--no-color", "--no-prefix"]);
-        let hunk_counts = self
-            .git()
-            .args(&patch_args)
-            .run()
-            .ok()
-            .filter(|result| result.success)
-            .map(|result| parse_hunk_counts(&result.stdout))
+        let run = |extra: &[&str]| {
+            let mut args = diff_base.clone();
+            args.extend(extra.iter().map(|arg| (*arg).to_string()));
+            if let Some(paths) = &pathspecs {
+                args.push("--".to_string());
+                args.extend(paths.iter().cloned());
+            }
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            self.git()
+                .args(&refs)
+                .run()
+                .ok()
+                .filter(|result| result.success)
+                .map(|result| result.stdout)
+        };
+
+        let line_stats = run(&["--numstat", "-z", "--find-renames", "--no-color"])
+            .map(|output| parse_numstat_z(&output))
+            .unwrap_or_default();
+        let hunk_counts = run(&["--unified=0", "--find-renames", "--no-color", "--no-prefix"])
+            .map(|output| parse_hunk_counts(&output))
             .unwrap_or_default();
 
         // Match lazygit: only attach numstat/hunk counts for tracked paths.

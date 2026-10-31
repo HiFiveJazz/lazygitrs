@@ -227,6 +227,22 @@ impl Model {
 
         self.files = out;
     }
+
+    /// Apply diff-derived stats without replacing status/order. The status-only
+    /// Files result is intentionally rendered first during startup; this later
+    /// enrichment should only fill the columns that depend on `git diff`.
+    pub fn apply_file_stats(&mut self, stats: Vec<File>) {
+        let by_name: HashMap<String, File> =
+            stats.into_iter().map(|file| (file.name.clone(), file)).collect();
+        for file in &mut self.files {
+            let Some(stat) = by_name.get(&file.name) else {
+                continue;
+            };
+            file.additions = stat.additions;
+            file.deletions = stat.deletions;
+            file.hunk_count = stat.hunk_count;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

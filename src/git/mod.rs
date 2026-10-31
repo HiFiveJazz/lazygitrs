@@ -32,6 +32,9 @@ use read_backend::{ReadRepository, RefSnapshot};
 /// independently so the UI can display whichever data is ready first.
 pub enum ModelPart {
     Files(Vec<model::File>),
+    /// Per-file line/hunk counts streamed after the status-only file list so
+    /// the Files panel can become interactive before diff enrichment finishes.
+    FileStats(Vec<model::File>),
     Branches(Vec<model::Branch>),
     Commits(Vec<model::Commit>),
     /// Commit hashes currently ahead of the configured upstream. Commit rows are
@@ -71,7 +74,7 @@ pub enum ModelPart {
 pub const DEFAULT_COMMIT_LIMIT: usize = 300;
 
 /// Total number of `ModelPart` variants that `load_model_streaming` sends.
-pub const MODEL_PART_COUNT: usize = 15;
+pub const MODEL_PART_COUNT: usize = 16;
 
 /// Confirmed HEAD identity, read after a successful checkout.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -395,10 +398,9 @@ impl GitCommands {
     /// of the worktree/index. Running them concurrently caused measurable I/O
     /// contention on large repositories (notably the Linux kernel tree).
     ///
-    /// `include_file_stats` keeps full-refresh behavior intact by enriching
-    /// per-file numstat/hunk counts before the Files part is sent. Targeted
-    /// refreshes pass `false` so the latency-critical status reaches the UI
-    /// without those extra scans.
+    /// Status-only Files are always sent first. `include_file_stats` controls
+    /// whether a second FileStats part enriches those visible rows with per-file
+    /// numstat/hunk counts; targeted refreshes send an empty enrichment marker.
     fn stream_files_then_diff_stats(
         self: &Arc<Self>,
         tx: &mpsc::Sender<ModelPart>,
@@ -414,18 +416,24 @@ impl GitCommands {
                 }
             };
 
-            let files = if include_file_stats {
-                git.load_files()
-            } else {
-                git.load_files_status_only()
-            };
-
-            if let Ok(files) = files {
+            if let Ok(mut files) = git.load_files_status_only() {
                 let has_tracked_changes = files.iter().any(|file| file.tracked);
-                // If the GUI dropped this stream (for example because checkout
-                // superseded an in-flight refresh), do not launch the next
-                // expensive worktree scan for a result nobody can use.
-                if tx.send(ModelPart::Files(files)).is_err() {
+
+                // Status is the latency-critical result. Publish it immediately
+                // instead of holding the whole Files panel behind numstat/hunk
+                // enrichment. Keep our local copy for the follow-up stats pass.
+                if tx.send(ModelPart::Files(files.clone())).is_err() {
+                    trim_if_abandoned();
+                    return;
+                }
+
+                if include_file_stats && has_tracked_changes {
+                    git.populate_file_diff_stats(&mut files);
+                    if tx.send(ModelPart::FileStats(files)).is_err() {
+                        trim_if_abandoned();
+                        return;
+                    }
+                } else if tx.send(ModelPart::FileStats(Vec::new())).is_err() {
                     trim_if_abandoned();
                     return;
                 }
@@ -1406,6 +1414,43 @@ mod tests {
             elapsed.as_secs() < 5,
             "load_files too slow on large untracked tree: {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn file_stream_publishes_status_before_diff_enrichment() {
+        let temp = TempDir::new("stream-files-first");
+        let run = |args: &[&str]| run_test_git(temp.path(), args);
+        run(&["init", "-b", "main"]);
+        std::fs::write(temp.path().join("tracked.txt"), "one\n").expect("write tracked");
+        run(&["add", "tracked.txt"]);
+        run(&["commit", "-m", "initial"]);
+        std::fs::write(temp.path().join("tracked.txt"), "one\ntwo\n").expect("modify tracked");
+
+        let git = Arc::new(GitCommands::new(temp.path()).expect("git"));
+        let (tx, rx) = mpsc::channel();
+        git.stream_files_then_diff_stats(&tx, true, false);
+        drop(tx);
+
+        let parts: Vec<_> = rx.into_iter().collect();
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(&parts[0], ModelPart::Files(_)));
+        assert!(matches!(&parts[1], ModelPart::FileStats(_)));
+        assert!(matches!(&parts[2], ModelPart::DiffStats { .. }));
+
+        let ModelPart::Files(status_files) = &parts[0] else {
+            unreachable!();
+        };
+        assert_eq!(status_files.len(), 1);
+        assert_eq!(status_files[0].additions, 0);
+        assert_eq!(status_files[0].hunk_count, 0);
+
+        let ModelPart::FileStats(enriched_files) = &parts[1] else {
+            unreachable!();
+        };
+        assert_eq!(enriched_files.len(), 1);
+        assert_eq!(enriched_files[0].additions, 1);
+        assert_eq!(enriched_files[0].deletions, 0);
+        assert_eq!(enriched_files[0].hunk_count, 1);
     }
 
     fn assert_success(status: std::io::Result<std::process::ExitStatus>) {

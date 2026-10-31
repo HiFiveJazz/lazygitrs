@@ -1674,6 +1674,10 @@ impl Gui {
                             model.set_files(v);
                             got_files = true;
                         }
+                        ModelPart::FileStats(v) => {
+                            model.apply_file_stats(v);
+                            got_files = true;
+                        }
                         ModelPart::Branches(v) => model.branches = v,
                         ModelPart::Commits(v) => {
                             got_commits = true;
