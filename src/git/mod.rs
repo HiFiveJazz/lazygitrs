@@ -394,7 +394,7 @@ impl GitCommands {
     /// Stream working-tree files first, then compute the aggregate shortstat on
     /// the same worker.
     ///
-    /// `git status -uall` and `git diff --shortstat` both walk a large portion
+    /// File-status discovery and `git diff --shortstat` both walk a large portion
     /// of the worktree/index. Running them concurrently caused measurable I/O
     /// contention on large repositories (notably the Linux kernel tree).
     ///

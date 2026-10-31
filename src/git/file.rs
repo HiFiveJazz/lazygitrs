@@ -22,47 +22,56 @@ impl GitCommands {
     /// Fast status-only load (no numstat / hunk-count subprocesses).
     /// Rapid stage/unstage stays responsive; stats catch up on full refresh.
     ///
-    /// Keep status in a short-lived Git subprocess instead of gix. On very
+    /// Keep status in short-lived Git subprocesses instead of gix. On very
     /// large repositories, in-process gix status can fault hundreds of MiB of
     /// pack/MIDX pages into lazygitrs and retain allocator state in the main
-    /// process. The subprocess releases all of that memory when it exits.
+    /// process. The subprocesses release all of that memory when they exit.
     pub fn load_files_status_only(&self) -> Result<Vec<File>> {
         self.load_files_status_only_git()
     }
 
     fn load_files_status_only_git(&self) -> Result<Vec<File>> {
+        // `git status -uall` is surprisingly expensive on large repositories even
+        // when both halves of the work are independently cheap. Split tracked
+        // status from untracked discovery and run them concurrently. Besides
+        // avoiding status' untracked-directory bookkeeping, `-z` gives us paths
+        // verbatim so filenames containing whitespace/newlines need no unquoting.
+        let (tracked, untracked) = std::thread::scope(|scope| {
+            let tracked = scope.spawn(|| {
+                self.git()
+                    .args(&["status", "--porcelain", "-z", "-uno"])
+                    .run_expecting_success()
+            });
+            let untracked = scope.spawn(|| {
+                self.git()
+                    .args(&["ls-files", "-z", "--others", "--exclude-standard"])
+                    .run_expecting_success()
+            });
+            (tracked.join(), untracked.join())
+        });
+
+        if let (Ok(Ok(tracked)), Ok(Ok(untracked))) = (tracked, untracked) {
+            let mut files = parse_porcelain_status_z(&tracked.stdout);
+            files.extend(parse_untracked_paths_z(&untracked.stdout));
+            // `status -uall` returned one path-sorted stream. Preserve that UI
+            // ordering after merging the two independently sorted commands.
+            files.sort_by(|a, b| a.current_path().cmp(b.current_path()));
+            return Ok(files);
+        }
+
+        // Compatibility fallback for unusual repositories/configurations where
+        // either half of the split query fails. This is the previous behavior, so
+        // a performance optimization can never make the Files panel incomplete.
+        self.load_files_status_only_git_uall()
+    }
+
+    fn load_files_status_only_git_uall(&self) -> Result<Vec<File>> {
         let result = self
             .git()
             .args(&["status", "--porcelain", "-uall"])
             .run_expecting_success()?;
 
-        let mut files = Vec::new();
-        for line in result.stdout.lines() {
-            if line.len() < 4 {
-                continue;
-            }
-
-            let x = line.chars().nth(0).unwrap_or(' ');
-            let y = line.chars().nth(1).unwrap_or(' ');
-            let raw = &line[3..];
-
-            let (_, _, tracked, status) = parse_status_codes(x, y);
-
-            let name = if raw.contains(" -> ") {
-                let parts: Vec<&str> = raw.splitn(2, " -> ").collect();
-                format!(
-                    "{} -> {}",
-                    unquote_porcelain_path(parts[0]),
-                    unquote_porcelain_path(parts.get(1).copied().unwrap_or(""))
-                )
-            } else {
-                unquote_porcelain_path(raw)
-            };
-
-            files.push(file_from_status_parts(x, y, name, tracked, status));
-        }
-
-        Ok(files)
+        Ok(parse_porcelain_status_lines(&result.stdout))
     }
 
     /// Populate final working-tree stats relative to HEAD. Failures are
@@ -471,6 +480,74 @@ mod tests {
             .collect()
     }
 
+    fn file_status_signature(files: &[File]) -> Vec<(String, String, FileStatus, bool, bool, bool)> {
+        let mut signature = files
+            .iter()
+            .map(|file| {
+                (
+                    file.name.clone(),
+                    file.short_status.clone(),
+                    file.status,
+                    file.has_staged_changes,
+                    file.has_unstaged_changes,
+                    file.tracked,
+                )
+            })
+            .collect::<Vec<_>>();
+        signature.sort_by(|a, b| a.0.cmp(&b.0));
+        signature
+    }
+
+    #[test]
+    fn split_status_matches_uall_for_mixed_changes() {
+        let temp = TempDir::new("split-status-equivalence");
+        let repo = &temp.path;
+        init_repo(repo);
+
+        std::fs::write(repo.join("modified.txt"), "base\n").expect("write modified");
+        std::fs::write(repo.join("old name.txt"), "rename\n").expect("write rename");
+        std::fs::write(repo.join("staged.txt"), "base\n").expect("write staged");
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "base"]);
+
+        std::fs::write(repo.join("modified.txt"), "worktree\n").expect("modify");
+        std::fs::write(repo.join("staged.txt"), "index\n").expect("stage contents");
+        git(repo, &["add", "staged.txt"]);
+        git(repo, &["mv", "old name.txt", "new name.txt"]);
+        std::fs::write(repo.join("untracked name.txt"), "new\n").expect("write untracked");
+        std::fs::write(repo.join("line\nbreak.txt"), "odd\n").expect("write odd untracked");
+
+        let git_cmds = GitCommands::new(repo).expect("git");
+        let split = git_cmds.load_files_status_only_git().expect("split status");
+        let legacy = git_cmds
+            .load_files_status_only_git_uall()
+            .expect("legacy status");
+
+        assert_eq!(file_status_signature(&split), file_status_signature(&legacy));
+        assert!(split.iter().any(|file| {
+            file.name == "old name.txt -> new name.txt"
+                && file.status == FileStatus::Renamed
+                && file.tracked
+        }));
+        assert!(split.iter().any(|file| {
+            file.name == "line\nbreak.txt"
+                && file.status == FileStatus::Untracked
+                && !file.tracked
+        }));
+    }
+
+    #[test]
+    fn parses_nul_status_rename_in_git_field_order() {
+        let files = parse_porcelain_status_z("R  new name.txt\0old name.txt\0 M src/lib.rs\0");
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].name, "old name.txt -> new name.txt");
+        assert_eq!(files[0].status, FileStatus::Renamed);
+        assert_eq!(files[0].current_path(), "new name.txt");
+        assert_eq!(files[1].name, "src/lib.rs");
+        assert_eq!(files[1].short_status, " M");
+    }
+
     #[test]
     fn porcelain_status_reports_conflicts() {
         let temp = TempDir::new("porcelain-status-conflict");
@@ -663,6 +740,84 @@ fn chunk_paths(paths: &[String], max_arg_bytes: usize) -> Vec<&[String]> {
         start = end;
     }
     chunks
+}
+
+/// Parse NUL-delimited porcelain-v1 tracked status. For rename/copy entries Git
+/// emits the destination path in the status record followed by the source path
+/// as a second NUL-delimited field (the reverse of the human `old -> new` form).
+fn parse_porcelain_status_z(output: &str) -> Vec<File> {
+    let mut fields = output.split('\0');
+    let mut files = Vec::new();
+
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let bytes = record.as_bytes();
+        if bytes.len() < 4 || bytes[2] != b' ' {
+            continue;
+        }
+
+        let x = bytes[0] as char;
+        let y = bytes[1] as char;
+        let current_path = &record[3..];
+        let (_, _, tracked, status) = parse_status_codes(x, y);
+
+        let name = if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
+            let source_path = fields.next().unwrap_or_default();
+            format!("{source_path} -> {current_path}")
+        } else {
+            current_path.to_string()
+        };
+
+        files.push(file_from_status_parts(x, y, name, tracked, status));
+    }
+
+    files
+}
+
+fn parse_untracked_paths_z(output: &str) -> Vec<File> {
+    output
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            file_from_status_parts(
+                '?',
+                '?',
+                path.to_string(),
+                false,
+                FileStatus::Untracked,
+            )
+        })
+        .collect()
+}
+
+fn parse_porcelain_status_lines(output: &str) -> Vec<File> {
+    let mut files = Vec::new();
+    for line in output.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+
+        let x = line.chars().nth(0).unwrap_or(' ');
+        let y = line.chars().nth(1).unwrap_or(' ');
+        let raw = &line[3..];
+        let (_, _, tracked, status) = parse_status_codes(x, y);
+
+        let name = if raw.contains(" -> ") {
+            let parts: Vec<&str> = raw.splitn(2, " -> ").collect();
+            format!(
+                "{} -> {}",
+                unquote_porcelain_path(parts[0]),
+                unquote_porcelain_path(parts.get(1).copied().unwrap_or(""))
+            )
+        } else {
+            unquote_porcelain_path(raw)
+        };
+
+        files.push(file_from_status_parts(x, y, name, tracked, status));
+    }
+    files
 }
 
 fn file_from_status_parts(
