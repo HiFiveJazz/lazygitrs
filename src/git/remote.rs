@@ -13,6 +13,50 @@ struct GithubRemoteRepo {
     owner: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullStrategy {
+    Rebase,
+    Merge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullOutcome {
+    UpToDate {
+        upstream: String,
+    },
+    AheadOnly {
+        upstream: String,
+        ahead: usize,
+    },
+    FastForwarded {
+        upstream: String,
+        behind: usize,
+    },
+    Diverged {
+        upstream: String,
+        ahead: usize,
+        behind: usize,
+    },
+    FastForwardOnlyBlocked {
+        upstream: String,
+        ahead: usize,
+        behind: usize,
+    },
+    NeedsCleanWorktree {
+        upstream: String,
+        ahead: usize,
+        behind: usize,
+    },
+    Integrated {
+        upstream: String,
+        strategy: PullStrategy,
+        conflicted: bool,
+    },
+    NoUpstream {
+        branch: String,
+    },
+}
+
 impl GitCommands {
     pub fn load_remotes(&self) -> Result<Vec<Remote>> {
         if let Some(repo) = &self.read_repo
@@ -206,16 +250,206 @@ impl GitCommands {
             .unwrap_or(true))
     }
 
-    pub fn pull(&self) -> Result<()> {
-        // Successful pull output is not shown by the TUI. Suppress the merge
-        // diffstat so large fast-forwards (notably the Linux kernel) do not
-        // spend time walking and formatting thousands of changed paths only
-        // for CmdBuilder to capture and discard that output. Error output is
-        // unchanged, so failed pulls still surface useful diagnostics.
+    /// Fetch the current upstream, classify the relationship with HEAD, and
+    /// integrate only when the choice is unambiguous (or already configured).
+    ///
+    /// This intentionally avoids opaque `git pull` failures such as Git asking
+    /// the user to choose merge vs rebase. The UI can present that decision as
+    /// a first-class menu instead.
+    pub fn pull(&self) -> Result<PullOutcome> {
+        let upstream = match self.current_upstream_ref() {
+            Ok(upstream) => upstream,
+            Err(_) => {
+                return Ok(PullOutcome::NoUpstream {
+                    branch: self.current_branch_name().unwrap_or_default(),
+                });
+            }
+        };
+
+        // Fetch first, but never rely on FETCH_HEAD for integration. Using the
+        // configured upstream ref keeps the workflow deterministic and lets us
+        // inspect ahead/behind counts before mutating the worktree.
         self.git()
-            .args(&["pull", "--no-stat"])
+            .args(&[
+                "fetch",
+                "--quiet",
+                "--no-write-fetch-head",
+                "--no-show-forced-updates",
+            ])
+            .run_expecting_success()?;
+
+        let (ahead, behind) = self.diff_refs_ahead_behind("HEAD", &upstream)?;
+        if behind == 0 {
+            return Ok(if ahead == 0 {
+                PullOutcome::UpToDate { upstream }
+            } else {
+                PullOutcome::AheadOnly { upstream, ahead }
+            });
+        }
+
+        if self.has_tracked_worktree_changes()? {
+            return Ok(PullOutcome::NeedsCleanWorktree {
+                upstream,
+                ahead,
+                behind,
+            });
+        }
+
+        if ahead == 0 {
+            self.fast_forward_upstream(&upstream)?;
+            return Ok(PullOutcome::FastForwarded { upstream, behind });
+        }
+
+        if self.configured_pull_ff_only()? {
+            return Ok(PullOutcome::FastForwardOnlyBlocked {
+                upstream,
+                ahead,
+                behind,
+            });
+        }
+
+        if let Some(strategy) = self.configured_pull_strategy()? {
+            let conflicted = self.integrate_upstream(&upstream, strategy)?;
+            return Ok(PullOutcome::Integrated {
+                upstream,
+                strategy,
+                conflicted,
+            });
+        }
+
+        Ok(PullOutcome::Diverged {
+            upstream,
+            ahead,
+            behind,
+        })
+    }
+
+    /// Integrate an already-fetched upstream. Returns true when Git stopped on
+    /// conflicts but deliberately left merge/rebase state for the conflict UI.
+    pub fn integrate_upstream(&self, upstream: &str, strategy: PullStrategy) -> Result<bool> {
+        match strategy {
+            PullStrategy::Rebase => {
+                let result = self.git().args(&["rebase", upstream]).run()?;
+                // A conflict intentionally leaves an in-progress rebase for the
+                // normal rebase UI to handle. Treat that as a successful start
+                // rather than replacing useful conflict state with a raw error.
+                if result.success {
+                    Ok(false)
+                } else if self.is_rebase_in_progress() {
+                    Ok(true)
+                } else {
+                    anyhow::bail!(
+                        "Command failed (exit {}): git rebase {}\n\n{}{}",
+                        result.exit_code.unwrap_or(-1),
+                        upstream,
+                        result.stdout,
+                        result.stderr
+                    )
+                }
+            }
+            PullStrategy::Merge => {
+                let result = self
+                    .git()
+                    .args(&["merge", "--no-stat", upstream])
+                    .run()?;
+                let merge_in_progress = self
+                    .git()
+                    .args(&["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+                    .run()
+                    .map(|probe| probe.success)
+                    .unwrap_or(false);
+                if result.success {
+                    Ok(false)
+                } else if merge_in_progress {
+                    Ok(true)
+                } else {
+                    anyhow::bail!(
+                        "Command failed (exit {}): git merge --no-stat {}\n\n{}{}",
+                        result.exit_code.unwrap_or(-1),
+                        upstream,
+                        result.stdout,
+                        result.stderr
+                    )
+                }
+            }
+        }
+    }
+
+    pub fn remember_pull_strategy(&self, strategy: PullStrategy) -> Result<()> {
+        let value = match strategy {
+            PullStrategy::Rebase => "true",
+            PullStrategy::Merge => "false",
+        };
+        self.git()
+            .args(&["config", "--local", "pull.rebase", value])
             .run_expecting_success()?;
         Ok(())
+    }
+
+    fn current_upstream_ref(&self) -> Result<String> {
+        let result = self
+            .git()
+            .args(&[
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{u}",
+            ])
+            .run()?;
+        let upstream = result.stdout.trim();
+        if result.success && !upstream.is_empty() {
+            Ok(upstream.to_string())
+        } else {
+            anyhow::bail!(
+                "The current branch has no upstream. Push it with 'set upstream' first, then pull."
+            )
+        }
+    }
+
+    fn has_tracked_worktree_changes(&self) -> Result<bool> {
+        let result = self
+            .git()
+            .args(&["status", "--porcelain=v1", "-uno"])
+            .run_expecting_success()?;
+        Ok(!result.stdout.trim().is_empty())
+    }
+
+    fn fast_forward_upstream(&self, upstream: &str) -> Result<()> {
+        self.git()
+            .args(&["merge", "--ff-only", "--no-stat", upstream])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
+    fn configured_pull_ff_only(&self) -> Result<bool> {
+        let result = self.git().args(&["config", "--get", "pull.ff"]).run()?;
+        Ok(result.success && result.stdout.trim().eq_ignore_ascii_case("only"))
+    }
+
+    fn configured_pull_strategy(&self) -> Result<Option<PullStrategy>> {
+        let branch = self.current_branch_name().unwrap_or_default();
+        if !branch.is_empty()
+            && let Some(strategy) = self.configured_rebase_value(&format!("branch.{branch}.rebase"))?
+        {
+            return Ok(Some(strategy));
+        }
+        self.configured_rebase_value("pull.rebase")
+    }
+
+    fn configured_rebase_value(&self, key: &str) -> Result<Option<PullStrategy>> {
+        let result = self.git().args(&["config", "--get", key]).run()?;
+        if !result.success {
+            return Ok(None);
+        }
+        let value = result.stdout.trim().to_ascii_lowercase();
+        Ok(match value.as_str() {
+            "true" | "yes" | "on" | "1" => Some(PullStrategy::Rebase),
+            "false" | "no" | "off" | "0" => Some(PullStrategy::Merge),
+            // Values such as `merges` and `interactive` carry semantics beyond
+            // a plain rebase. Let the user choose instead of silently changing
+            // their history shape.
+            _ => None,
+        })
     }
 
     pub fn push(&self, force: bool) -> Result<()> {
@@ -809,7 +1043,138 @@ fn github_pr_head_selectors(branch: &str, repos: &[GithubRemoteRepo]) -> Vec<Str
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "lazygitrs-{prefix}-{unique}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn configure_identity(repo: &Path) {
+        git(repo, &["config", "user.email", "test@example.com"]);
+        git(repo, &["config", "user.name", "Test"]);
+    }
+
+    #[test]
+    fn guided_pull_classifies_fast_forward_ahead_and_divergence() {
+        let temp = TempDir::new("guided-pull");
+        let remote = temp.path.join("remote.git");
+        let seed = temp.path.join("seed");
+        let local = temp.path.join("local");
+        let peer = temp.path.join("peer");
+        std::fs::create_dir_all(&seed).expect("create seed");
+
+        let remote_arg = remote.to_string_lossy().to_string();
+        let local_arg = local.to_string_lossy().to_string();
+        let peer_arg = peer.to_string_lossy().to_string();
+
+        git(
+            &temp.path,
+            &["init", "-q", "--bare", "--initial-branch=main", &remote_arg],
+        );
+        git(&seed, &["init", "-q", "--initial-branch=main"]);
+        configure_identity(&seed);
+        std::fs::write(seed.join("file"), "base\n").expect("write seed");
+        git(&seed, &["add", "file"]);
+        git(&seed, &["commit", "-q", "-m", "base"]);
+        git(&seed, &["remote", "add", "origin", &remote_arg]);
+        git(&seed, &["push", "-q", "-u", "origin", "main"]);
+
+        git(&temp.path, &["clone", "-q", &remote_arg, &local_arg]);
+        git(&temp.path, &["clone", "-q", &remote_arg, &peer_arg]);
+        configure_identity(&local);
+        configure_identity(&peer);
+
+        let commands = GitCommands::new(&local).expect("open local clone");
+        assert!(matches!(
+            commands.pull().expect("up-to-date pull"),
+            PullOutcome::UpToDate { .. }
+        ));
+
+        std::fs::write(peer.join("remote-only"), "remote\n").expect("write peer change");
+        git(&peer, &["add", "remote-only"]);
+        git(&peer, &["commit", "-q", "-m", "remote"]);
+        git(&peer, &["push", "-q"]);
+
+        std::fs::write(local.join("file"), "dirty\n").expect("dirty tracked file");
+        assert!(matches!(
+            commands.pull().expect("dirty pull preflight"),
+            PullOutcome::NeedsCleanWorktree { behind: 1, .. }
+        ));
+        git(&local, &["restore", "file"]);
+
+        assert!(matches!(
+            commands.pull().expect("fast-forward pull"),
+            PullOutcome::FastForwarded { behind: 1, .. }
+        ));
+
+        std::fs::write(local.join("local-only"), "local\n").expect("write local change");
+        git(&local, &["add", "local-only"]);
+        git(&local, &["commit", "-q", "-m", "local"]);
+        assert!(matches!(
+            commands.pull().expect("ahead-only pull"),
+            PullOutcome::AheadOnly { ahead: 1, .. }
+        ));
+
+        std::fs::write(peer.join("remote-two"), "remote two\n").expect("write peer two");
+        git(&peer, &["add", "remote-two"]);
+        git(&peer, &["commit", "-q", "-m", "remote two"]);
+        git(&peer, &["push", "-q"]);
+
+        // Override any global pull.rebase preference so this test exercises the
+        // UI-decision path deterministically. Unknown values are intentionally
+        // treated as "ask" by the guided pull implementation.
+        git(&local, &["config", "pull.rebase", "ask"]);
+        git(&local, &["config", "branch.main.rebase", "ask"]);
+        git(&local, &["config", "pull.ff", "false"]);
+        assert!(matches!(
+            commands.pull().expect("diverged pull"),
+            PullOutcome::Diverged {
+                ahead: 1,
+                behind: 1,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn builds_browser_urls_for_common_git_transports_and_forges() {

@@ -136,6 +136,7 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
 
     // q to exit diff mode
     if key.code == KeyCode::Char('q') {
+        gui.cancel_compare_load();
         gui.diff_mode.exit();
         return Ok(());
     }
@@ -820,6 +821,7 @@ pub(in crate::gui) fn reload_diff_files_with_commit_limit(
     gui: &mut Gui,
     commit_limit: usize,
 ) -> Result<()> {
+    gui.cancel_compare_load();
     let ref_a = gui.diff_mode.ref_a.clone();
     let ref_b = gui.diff_mode.ref_b.clone();
     gui.diff_mode.ahead_behind = None;

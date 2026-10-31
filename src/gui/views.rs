@@ -1372,13 +1372,23 @@ pub fn checklist_item_at(popup: &PopupState, area: Rect, col: u16, row: u16) -> 
 mod tests {
     use super::{
         checklist_item_at, command_log_geometry, email_recipient_row_allocation, format_key_hint,
-        menu_item_at, render_popup,
+        menu_item_at, pull_divergence_popup_geometry, render_popup,
     };
     use crate::config::Theme;
     use crate::gui::popup::{ChecklistItem, MenuItem, MessageKind, PopupState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn pull_divergence_popup_uses_large_dialog_geometry() {
+        let area = Rect::new(0, 0, 120, 30);
+        let rect = pull_divergence_popup_geometry(area).unwrap();
+        assert_eq!(rect.width, 96);
+        assert_eq!(rect.height, 20);
+        assert_eq!(rect.x, 12);
+        assert_eq!(rect.y, 5);
+    }
 
     #[test]
     fn email_recipient_rows_reuse_space_from_shorter_list() {
@@ -4022,6 +4032,26 @@ fn email_recipient_row_allocation(to_len: usize, cc_len: usize, budget: usize) -
     (to_rows.max(1), cc_rows.max(1))
 }
 
+fn pull_divergence_popup_geometry(area: Rect) -> Option<Rect> {
+    let width = (area.width.saturating_mul(82) / 100)
+        .min(96)
+        .max(56)
+        .min(area.width);
+    if width < 36 || area.height < 12 {
+        return None;
+    }
+    let desired_height = 20u16.min(area.height.saturating_sub(2));
+    if desired_height < 12 {
+        return None;
+    }
+    Some(Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(desired_height) / 2,
+        width,
+        desired_height,
+    ))
+}
+
 fn email_popup_geometry(area: Rect) -> Option<Rect> {
     let width = (area.width.saturating_mul(82) / 100)
         .min(96)
@@ -5007,6 +5037,108 @@ pub fn render_popup(
                 // Fallback: just render summary
                 frame.render_widget(summary_textarea, inner);
             }
+        }
+        PopupState::PullDivergence {
+            branch,
+            upstream,
+            ahead,
+            behind,
+            selected,
+        } => {
+            let Some(rect) = pull_divergence_popup_geometry(area) else {
+                return;
+            };
+            frame.render_widget(Clear, rect);
+            let block = Block::default()
+                .title(" Branches have diverged ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent));
+            frame.render_widget(block, rect);
+
+            let inner = rect.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 1,
+            });
+            let normal = Style::default().fg(theme.text);
+            let dim = Style::default().fg(theme.text_dimmed);
+            let key = Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD);
+            let selected_style = Style::default()
+                .bg(theme.selected_bg)
+                .add_modifier(Modifier::BOLD);
+            let branch_name = if branch.is_empty() { "HEAD" } else { branch.as_str() };
+
+            let option = |index: usize, shortcut: &str, label: String| {
+                let line = Line::from(vec![
+                    Span::styled(format!(" {shortcut} "), key),
+                    Span::styled(label, normal),
+                ]);
+                if *selected == index {
+                    line.style(selected_style)
+                } else {
+                    line
+                }
+            };
+
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!("{branch_name} and {upstream} have diverged"),
+                    normal.add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  Local:   ", dim),
+                    Span::styled(
+                        format!("{ahead} commit{} ahead", if *ahead == 1 { "" } else { "s" }),
+                        normal,
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("  Remote:  ", dim),
+                    Span::styled(
+                        format!("{behind} commit{} ahead", if *behind == 1 { "" } else { "s" }),
+                        normal,
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "How should the histories be combined?",
+                    normal.add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                option(0, "r", "Rebase local commits onto upstream".to_string()),
+                Line::from(Span::styled(
+                    format!(
+                        "    Replays your {ahead} local commit{} after the {behind} upstream commit{}",
+                        if *ahead == 1 { "" } else { "s" },
+                        if *behind == 1 { "" } else { "s" }
+                    ),
+                    dim,
+                )),
+                Line::from(""),
+                option(1, "m", "Merge upstream into local branch".to_string()),
+                Line::from(Span::styled(
+                    "    Keeps both histories and creates a merge commit",
+                    dim,
+                )),
+                Line::from(""),
+                option(2, "v", "View divergent commits".to_string()),
+                Line::from(Span::styled(
+                    format!("    Compare HEAD with {upstream} before choosing"),
+                    dim,
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(" R/M ", key),
+                    Span::styled("choose rebase/merge and remember it for this repository", dim),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Esc ", key),
+                    Span::styled("cancel", dim),
+                ]),
+            ];
+            frame.render_widget(Paragraph::new(lines), inner);
         }
         PopupState::Menu {
             title,

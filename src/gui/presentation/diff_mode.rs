@@ -446,7 +446,9 @@ fn render_compare_commits(
         .border_style(border);
     let inner = block.inner(area);
     if state.commits.is_empty() {
-        let message = if !state.has_both_refs() {
+        let message = if state.comparison_loading {
+            "Loading comparison…"
+        } else if !state.has_both_refs() {
             "Select refs A and B to compare"
         } else if state.ahead_behind == Some((0, 0)) {
             "Same commit — no unique commits"
@@ -526,7 +528,9 @@ fn render_commit_files(frame: &mut Frame, area: Rect, state: &mut DiffModeState,
     };
 
     if state.diff_files.is_empty() {
-        let msg = if state.has_both_refs() {
+        let msg = if state.comparison_loading {
+            "Loading comparison…"
+        } else if state.has_both_refs() {
             "No files changed"
         } else {
             "Select refs A and B to compare"

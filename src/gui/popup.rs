@@ -854,6 +854,17 @@ pub enum PopupState {
         /// When set, this menu item index is running an async operation (shows inline spinner).
         loading_index: Option<usize>,
     },
+    /// Guided reconciliation UI shown when the current branch and upstream have diverged.
+    /// This is intentionally a dedicated large modal instead of the compact generic menu
+    /// so the consequences of rebase/merge can be explained without truncation.
+    PullDivergence {
+        branch: String,
+        upstream: String,
+        ahead: usize,
+        behind: usize,
+        /// Primary selection: 0=rebase, 1=merge, 2=view.
+        selected: usize,
+    },
     /// Informational or error message — dismissed by any key press.
     Message {
         title: String,

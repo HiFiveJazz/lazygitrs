@@ -26,6 +26,7 @@ use ratatui::layout::Rect;
 use crate::config::keybindings::parse_key;
 use crate::config::{AppConfig, AppState};
 use crate::git::{DEFAULT_COMMIT_LIMIT, GitCommands, HeadState, MODEL_PART_COUNT, ModelPart};
+use crate::git::remote::{PullOutcome, PullStrategy};
 use crate::model::Model;
 use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode, build_file_tree};
 use crate::os::platform::Platform;
@@ -349,6 +350,21 @@ pub(crate) enum DiffPayload {
     Empty,
 }
 
+enum CompareLoadEvent {
+    Files {
+        generation: u64,
+        ref_a: String,
+        ref_b: String,
+        result: Result<Vec<crate::model::CommitFile>>,
+    },
+    Commits {
+        generation: u64,
+        ref_a: String,
+        ref_b: String,
+        result: Result<Vec<crate::model::Commit>>,
+    },
+}
+
 /// Return large temporary allocations to glibc after workflows that are known
 /// to allocate substantial short-lived buffers. Other allocators/platforms
 /// already reclaim/reuse this memory appropriately, so this is a no-op there.
@@ -366,6 +382,7 @@ pub(crate) fn trim_process_heap() {
 pub(crate) enum RemoteOpKind {
     Push,
     Pull,
+    PullIntegrate,
     Fetch,
     FetchAndCheckout,
     /// A single newly-created commit appended to the current HEAD.
@@ -382,7 +399,12 @@ pub(crate) enum RemoteOpKind {
     Other,
 }
 
-type RemoteOpFn = Box<dyn FnOnce(&GitCommands) -> Result<()> + Send>;
+enum RemoteOpResult {
+    Done,
+    Pull(PullOutcome),
+}
+
+type RemoteOpFn = Box<dyn FnOnce(&GitCommands) -> Result<RemoteOpResult> + Send>;
 
 struct PendingRemoteOp {
     kind: RemoteOpKind,
@@ -392,14 +414,11 @@ struct PendingRemoteOp {
 
 struct RemoteOpCompletion {
     head: Option<HeadState>,
-    /// Some(false) proves that no refs affecting `git log --all` changed.
+    pull_outcome: Option<PullOutcome>,
+    /// Some(false) proves that the network operation moved no repository refs.
     /// None means the operation does not use ref-change short-circuiting or
     /// the pre-operation snapshot could not be captured.
     refs_changed: Option<bool>,
-    /// For pull, whether the checked-out commit itself moved. A pull can fetch
-    /// updated remote refs while leaving HEAD unchanged; in that case the
-    /// lighter fetch refresh is sufficient and avoids rescanning the worktree.
-    head_changed: Option<bool>,
 }
 
 struct DiffJob {
@@ -1023,6 +1042,11 @@ pub struct Gui {
     pub patch_building: PatchBuildingState,
     /// Diff/compare mode state.
     pub diff_mode: DiffModeState,
+    /// Initial compare-mode lists are loaded off the UI thread so large histories
+    /// (for example Linux kernel branches with tens of thousands of divergent commits)
+    /// never block input/rendering.
+    compare_load_rx: Option<mpsc::Receiver<CompareLoadEvent>>,
+    compare_load_generation: u64,
     /// Interactive rebase mode state.
     pub rebase_mode: RebaseModeState,
     /// Stashed commit editor popup while commit menu or AI generation is shown.
@@ -1557,6 +1581,8 @@ impl Gui {
             undo_reflog_idx: 0,
             patch_building: PatchBuildingState::new(),
             diff_mode: DiffModeState::new(),
+            compare_load_rx: None,
+            compare_load_generation: 0,
             rebase_mode: RebaseModeState::new(),
             pending_commit_popup: None,
             saved_commit_popup: None,
@@ -1890,6 +1916,9 @@ impl Gui {
                     }
                 }
             }
+
+            // Apply initial compare-mode data before scheduling a selected-file diff.
+            self.receive_compare_load_results();
 
             // Request diff loading on background thread if selection changed
             self.maybe_request_diff();
@@ -3475,17 +3504,30 @@ impl Gui {
         while let Ok(result) = self.auto_fetch_rx.try_recv() {
             self.auto_fetch_in_flight = false;
 
-            if matches!(result, Ok(true)) && !self.start_background_fetch_refresh() {
+            // Manual network operations own the lane as soon as auto-fetch
+            // releases it. A queued guided pull immediately fetches/classifies
+            // the same upstream refs itself, so don't start a stale fetch-model
+            // refresh immediately in front of it.
+            let pending = if self.remote_op_label.is_none() {
+                self.pending_remote_op.take()
+            } else {
+                None
+            };
+            let guided_pull_owns_refresh = matches!(
+                pending.as_ref().map(|pending| pending.kind),
+                Some(RemoteOpKind::Pull)
+            );
+
+            if matches!(result, Ok(true))
+                && !guided_pull_owns_refresh
+                && !self.start_background_fetch_refresh()
+            {
                 // Another model refresh is already in flight. Queue the normal
                 // refresh rather than risk leaving stale remote state.
                 self.needs_refresh = true;
             }
 
-            // Manual network operations own the lane as soon as auto-fetch
-            // releases it. Do not wait for the next keypress.
-            if self.remote_op_label.is_none()
-                && let Some(pending) = self.pending_remote_op.take()
-            {
+            if let Some(pending) = pending {
                 let PendingRemoteOp { kind, title, op } = pending;
                 self.launch_remote_op(kind, &title, op);
             }
@@ -3503,6 +3545,19 @@ impl Gui {
             self.remote_op_label = None;
             match result {
                 Ok(completion) => {
+                    let mark_remote_success = !matches!(
+                        completion.pull_outcome.as_ref(),
+                        Some(
+                            PullOutcome::Diverged { .. }
+                                | PullOutcome::FastForwardOnlyBlocked { .. }
+                                | PullOutcome::NeedsCleanWorktree { .. }
+                                | PullOutcome::NoUpstream { .. }
+                                | PullOutcome::Integrated {
+                                    conflicted: true,
+                                    ..
+                                }
+                        )
+                    );
                     let was_checkout = self.pending_checkout_by_name.take().is_some();
                     let confirmed_checkout_head = if was_checkout {
                         completion.head.clone()
@@ -3567,27 +3622,35 @@ impl Gui {
                             }
                         }
                         RemoteOpKind::Pull => {
-                            // If neither HEAD nor any ref moved, the pull cannot
-                            // have changed the global commit model. Avoid the
-                            // ~O(global graph) --all topo walk entirely.
-                            if completion.refs_changed != Some(false) {
-                                // `git pull` fetches before it integrates. It can
-                                // therefore update remote-tracking refs while the
-                                // checked-out commit stays put (for example when
-                                // only another remote branch advanced). In that
-                                // case no worktree/reflog/submodule refresh is
-                                // needed; the existing fetch refresh is enough.
-                                let started = if completion.head_changed == Some(false) {
-                                    self.start_background_fetch_refresh()
-                                } else {
-                                    self.start_background_pull_refresh()
-                                };
+                            let integrated = matches!(
+                                completion.pull_outcome.as_ref(),
+                                Some(PullOutcome::FastForwarded { .. } | PullOutcome::Integrated { .. })
+                            );
 
-                                if !started {
-                                    // Another model refresh is already in flight. Queue the
-                                    // normal refresh rather than risk leaving stale state.
+                            if integrated {
+                                if !self.start_background_pull_refresh() {
                                     self.needs_refresh = true;
                                 }
+                            } else if completion.refs_changed != Some(false)
+                                && !self.start_background_fetch_refresh()
+                            {
+                                // Fetch may have advanced remote-tracking refs even
+                                // when the workflow stops to ask how to reconcile.
+                                self.needs_refresh = true;
+                            }
+
+                            if let Some(outcome) = completion.pull_outcome.clone() {
+                                self.present_pull_outcome(outcome);
+                            }
+                        }
+                        RemoteOpKind::PullIntegrate => {
+                            // Merge/rebase can leave conflicts with unchanged refs,
+                            // so never use the no-op ref shortcut for this phase.
+                            if !self.start_background_pull_refresh() {
+                                self.needs_refresh = true;
+                            }
+                            if let Some(outcome) = completion.pull_outcome.clone() {
+                                self.present_pull_outcome(outcome);
                             }
                         }
                         RemoteOpKind::Fetch => {
@@ -3620,7 +3683,7 @@ impl Gui {
                             self.needs_refresh = true;
                         }
                     }
-                    if !matches!(kind, RemoteOpKind::Email(_)) {
+                    if mark_remote_success && !matches!(kind, RemoteOpKind::Email(_)) {
                         self.remote_op_success_at = Some(Instant::now());
                     }
                     if was_checkout {
@@ -3683,11 +3746,265 @@ impl Gui {
                     if failed_checkout {
                         self.recover_refresh_after_failed_checkout();
                     }
+                    if matches!(kind, RemoteOpKind::PullIntegrate) {
+                        self.needs_refresh = true;
+                    }
                     if matches!(kind, RemoteOpKind::Email(_)) {
                         trim_process_heap();
                     }
                 }
             }
+        }
+    }
+
+    fn present_pull_outcome(&mut self, outcome: PullOutcome) {
+        match outcome {
+            PullOutcome::UpToDate { upstream } => {
+                self.show_action_toast(format!("Already up to date with {upstream}"));
+            }
+            PullOutcome::AheadOnly { upstream, ahead } => {
+                self.popup = PopupState::Message {
+                    title: "Nothing to pull".to_string(),
+                    message: format!(
+                        "Your branch is {ahead} commit{} ahead of {upstream} and has no upstream commits to pull.\n\nPush to publish your local commits.",
+                        if ahead == 1 { "" } else { "s" }
+                    ),
+                    kind: MessageKind::Info,
+                };
+            }
+            PullOutcome::FastForwarded { upstream, behind } => {
+                self.show_action_toast(format!(
+                    "Fast-forwarded {behind} commit{} from {upstream}",
+                    if behind == 1 { "" } else { "s" }
+                ));
+            }
+            PullOutcome::FastForwardOnlyBlocked {
+                upstream,
+                ahead,
+                behind,
+            } => {
+                self.popup = PopupState::Message {
+                    title: "Fast-forward only pull".to_string(),
+                    message: format!(
+                        "Your branch has diverged from {upstream} ({ahead} local / {behind} upstream), but this repository is configured with pull.ff=only.\n\nChange that Git setting if you want lazygitrs to offer merge/rebase reconciliation."
+                    ),
+                    kind: MessageKind::Info,
+                };
+            }
+            PullOutcome::NeedsCleanWorktree {
+                upstream,
+                ahead,
+                behind,
+            } => {
+                self.popup = PopupState::Message {
+                    title: "Local changes before pull".to_string(),
+                    message: format!(
+                        "Your branch is {ahead} commit{} ahead and {behind} commit{} behind {upstream}.\n\nTracked local changes are present. Commit, stash, or discard them before pulling so lazygitrs does not hide an integration conflict behind an automatic stash.",
+                        if ahead == 1 { "" } else { "s" },
+                        if behind == 1 { "" } else { "s" }
+                    ),
+                    kind: MessageKind::Info,
+                };
+            }
+            PullOutcome::Diverged {
+                upstream,
+                ahead,
+                behind,
+            } => {
+                self.show_pull_divergence_menu(upstream, ahead, behind);
+            }
+            PullOutcome::Integrated {
+                upstream,
+                strategy,
+                conflicted,
+            } => {
+                if conflicted {
+                    let operation = match strategy {
+                        PullStrategy::Rebase => "rebase",
+                        PullStrategy::Merge => "merge",
+                    };
+                    self.popup = PopupState::Message {
+                        title: "Pull paused on conflicts".to_string(),
+                        message: format!(
+                            "The {operation} with {upstream} started but stopped on conflicts. Resolve the conflicted files, then use the existing continue/abort controls."
+                        ),
+                        kind: MessageKind::Info,
+                    };
+                } else {
+                    let action = match strategy {
+                        PullStrategy::Rebase => "Rebased onto",
+                        PullStrategy::Merge => "Merged",
+                    };
+                    self.show_action_toast(format!("{action} {upstream}"));
+                }
+            }
+            PullOutcome::NoUpstream { branch } => {
+                let subject = if branch.is_empty() {
+                    "The current detached HEAD".to_string()
+                } else {
+                    format!("Branch '{branch}'")
+                };
+                self.popup = PopupState::Message {
+                    title: "No upstream configured".to_string(),
+                    message: format!(
+                        "{subject} has no upstream branch. Push it with the 'set upstream' option first, then pull."
+                    ),
+                    kind: MessageKind::Info,
+                };
+            }
+        }
+    }
+
+    fn show_pull_divergence_menu(&mut self, upstream: String, ahead: usize, behind: usize) {
+        let branch = self.model.lock().unwrap().head_branch_name.clone();
+        self.popup = PopupState::PullDivergence {
+            branch,
+            upstream,
+            ahead,
+            behind,
+            selected: 0,
+        };
+    }
+
+    fn start_pull_divergence_compare(&mut self, upstream: String, ahead: usize, behind: usize) {
+        self.popup = PopupState::None;
+        self.diff_mode.enter(self.show_file_tree);
+        self.diff_mode.ref_a = "HEAD".to_string();
+        self.diff_mode.ref_a_display = "HEAD (local)".to_string();
+        self.diff_mode.ref_b = upstream.clone();
+        self.diff_mode.ref_b_display = upstream.clone();
+        self.diff_mode.ahead_behind = Some((ahead, behind));
+        self.diff_mode.comparison_loading = true;
+        self.diff_mode
+            .set_focus(crate::gui::modes::diff_mode::DiffModeFocus::Commits);
+        self.clear_diff_view();
+        self.start_compare_load_async("HEAD".to_string(), upstream);
+    }
+
+    pub(crate) fn cancel_compare_load(&mut self) {
+        self.compare_load_generation = self.compare_load_generation.wrapping_add(1);
+        self.compare_load_rx = None;
+        self.diff_mode.comparison_loading = false;
+    }
+
+    fn start_compare_load_async(&mut self, ref_a: String, ref_b: String) {
+        self.compare_load_generation = self.compare_load_generation.wrapping_add(1);
+        let generation = self.compare_load_generation;
+        let git = Arc::clone(&self.git);
+        let (tx, rx) = mpsc::channel();
+        self.compare_load_rx = Some(rx);
+        self.diff_mode.comparison_loading = true;
+
+        std::thread::spawn(move || {
+            let files = git.diff_refs_files(&ref_a, &ref_b);
+            let files_ok = files.is_ok();
+            let _ = tx.send(CompareLoadEvent::Files {
+                generation,
+                ref_a: ref_a.clone(),
+                ref_b: ref_b.clone(),
+                result: files,
+            });
+            if !files_ok {
+                return;
+            }
+
+            // This is the potentially expensive part on very divergent repositories.
+            // Keep it off the UI thread and cap the first page just like normal Compare mode.
+            let commits = git.load_compare_commits(
+                &ref_a,
+                &ref_b,
+                DEFAULT_COMMIT_LIMIT,
+                0,
+            );
+            let _ = tx.send(CompareLoadEvent::Commits {
+                generation,
+                ref_a,
+                ref_b,
+                result: commits,
+            });
+        });
+    }
+
+    fn receive_compare_load_results(&mut self) {
+        let mut finished = false;
+        loop {
+            let event = match self.compare_load_rx.as_ref() {
+                Some(rx) => match rx.try_recv() {
+                    Ok(event) => event,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        finished = true;
+                        break;
+                    }
+                },
+                None => break,
+            };
+
+            match event {
+                CompareLoadEvent::Files {
+                    generation,
+                    ref_a,
+                    ref_b,
+                    result,
+                } => {
+                    if generation != self.compare_load_generation
+                        || !self.diff_mode.active
+                        || self.diff_mode.ref_a != ref_a
+                        || self.diff_mode.ref_b != ref_b
+                    {
+                        continue;
+                    }
+                    match result {
+                        Ok(files) => {
+                            self.diff_mode.diff_files = files;
+                            self.diff_mode.diff_files_selected = 0;
+                            self.diff_mode.diff_files_scroll = 0;
+                            self.diff_mode.viewport_manually_scrolled = false;
+                            self.diff_mode.collapsed_dirs.clear();
+                            self.diff_mode.clear_list_search();
+                            controller::diff_mode::update_diff_mode_tree(self);
+                            self.needs_diff_refresh = true;
+                        }
+                        Err(err) => {
+                            self.diff_mode.comparison_loading = false;
+                            finished = true;
+                            self.show_error("Compare failed", err);
+                        }
+                    }
+                }
+                CompareLoadEvent::Commits {
+                    generation,
+                    ref_a,
+                    ref_b,
+                    result,
+                } => {
+                    finished = true;
+                    if generation != self.compare_load_generation
+                        || !self.diff_mode.active
+                        || self.diff_mode.ref_a != ref_a
+                        || self.diff_mode.ref_b != ref_b
+                    {
+                        continue;
+                    }
+                    self.diff_mode.comparison_loading = false;
+                    match result {
+                        Ok(commits) => {
+                            self.diff_mode.commits = commits;
+                            self.diff_mode.commits_selected = 0;
+                            self.diff_mode.commits_scroll = 0;
+                            self.diff_mode.commits_viewport_manually_scrolled = false;
+                            self.diff_mode.commits_revision =
+                                self.diff_mode.commits_revision.wrapping_add(1);
+                            self.needs_diff_refresh = true;
+                        }
+                        Err(err) => self.show_error("Compare history failed", err),
+                    }
+                }
+            }
+        }
+
+        if finished {
+            self.compare_load_rx = None;
         }
     }
 
@@ -3938,6 +4255,74 @@ impl Gui {
         }
     }
 
+    /// Start the guided pull workflow on the same serialized network lane used
+    /// by fetch/push. The worker fetches and classifies HEAD vs upstream before
+    /// deciding whether integration is safe or needs a UI choice.
+    pub fn start_pull(&mut self) {
+        if self.remote_op_label.is_some() || self.pending_remote_op.is_some() {
+            return;
+        }
+
+        let op: RemoteOpFn = Box::new(|git| Ok(RemoteOpResult::Pull(git.pull()?)));
+        if self.auto_fetch_in_flight {
+            self.pending_remote_op = Some(PendingRemoteOp {
+                kind: RemoteOpKind::Pull,
+                title: "Pull".to_string(),
+                op,
+            });
+            return;
+        }
+
+        self.launch_remote_op(RemoteOpKind::Pull, "Pull", op);
+    }
+
+    fn start_pull_integration(
+        &mut self,
+        upstream: String,
+        strategy: PullStrategy,
+        remember: bool,
+    ) {
+        if self.remote_op_label.is_some() || self.pending_remote_op.is_some() {
+            return;
+        }
+
+        // The divergence popup may have been shown while a fetch-only model
+        // refresh was still streaming. Integration changes HEAD/worktree, so
+        // disconnect that old snapshot before mutating and let the completion
+        // start one authoritative pull refresh.
+        self.git.cancel_worktree_reads();
+        self.initial_load_rx = None;
+        self.initial_load_received = 0;
+        self.refresh_in_progress = false;
+        self.files_refresh_rx = None;
+        self.files_refresh_in_progress = false;
+        self.needs_files_refresh = false;
+
+        let op_upstream = upstream.clone();
+        let op: RemoteOpFn = Box::new(move |git| {
+            if remember {
+                git.remember_pull_strategy(strategy)?;
+            }
+            let conflicted = git.integrate_upstream(&op_upstream, strategy)?;
+            Ok(RemoteOpResult::Pull(PullOutcome::Integrated {
+                upstream: op_upstream,
+                strategy,
+                conflicted,
+            }))
+        });
+
+        if self.auto_fetch_in_flight {
+            self.pending_remote_op = Some(PendingRemoteOp {
+                kind: RemoteOpKind::PullIntegrate,
+                title: "Pull".to_string(),
+                op,
+            });
+            return;
+        }
+
+        self.launch_remote_op(RemoteOpKind::PullIntegrate, "Pull", op);
+    }
+
     /// Run a remote operation (push/pull/fetch) on the single network lane.
     /// If silent auto-fetch is already using the lane, remember the manual
     /// request and launch it as soon as auto-fetch completes.
@@ -3949,7 +4334,10 @@ impl Gui {
             return;
         }
 
-        let op: RemoteOpFn = Box::new(op);
+        let op: RemoteOpFn = Box::new(move |git| {
+            op(git)?;
+            Ok(RemoteOpResult::Done)
+        });
         if self.auto_fetch_in_flight {
             self.pending_remote_op = Some(PendingRemoteOp {
                 kind,
@@ -3994,7 +4382,11 @@ impl Gui {
                 None
             };
 
-            let result = op(&git).map(|()| {
+            let result = op(&git).map(|op_result| {
+                let pull_outcome = match op_result {
+                    RemoteOpResult::Done => None,
+                    RemoteOpResult::Pull(outcome) => Some(outcome),
+                };
                 let head = if is_checkout {
                     // Read on the worker, never on the UI thread. If this read
                     // fails, checkout still succeeded; the refresh is the fallback.
@@ -4002,25 +4394,21 @@ impl Gui {
                 } else {
                     None
                 };
-                let (refs_changed, head_changed) = if let Some(before) = before_refs.as_ref() {
+                let refs_changed = if let Some(before) = before_refs.as_ref() {
                     match git.ref_snapshot() {
-                        Ok(after) => (
-                            Some(after != *before),
-                            matches!(kind, RemoteOpKind::Pull)
-                                .then_some(after.head != before.head),
-                        ),
+                        Ok(after) => Some(after != *before),
                         // Preserve the existing conservative behavior when the
                         // post-operation snapshot cannot be read.
-                        Err(_) => (Some(true), None),
+                        Err(_) => Some(true),
                     }
                 } else {
-                    (None, None)
+                    None
                 };
 
                 RemoteOpCompletion {
                     head,
+                    pull_outcome,
                     refs_changed,
-                    head_changed,
                 }
             });
 
@@ -6543,6 +6931,65 @@ impl Gui {
                     }
                 }
             }
+            PopupState::PullDivergence {
+                upstream,
+                ahead,
+                behind,
+                selected,
+                ..
+            } => {
+                let upstream = upstream.clone();
+                let ahead = *ahead;
+                let behind = *behind;
+                let selected = *selected;
+
+                match key.code {
+                    KeyCode::Esc => {
+                        self.popup = PopupState::None;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if let PopupState::PullDivergence { selected, .. } = &mut self.popup {
+                            *selected = (*selected + 1).min(2);
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if let PopupState::PullDivergence { selected, .. } = &mut self.popup {
+                            *selected = selected.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Enter => match selected {
+                        0 => {
+                            self.popup = PopupState::None;
+                            self.start_pull_integration(upstream, PullStrategy::Rebase, false);
+                        }
+                        1 => {
+                            self.popup = PopupState::None;
+                            self.start_pull_integration(upstream, PullStrategy::Merge, false);
+                        }
+                        _ => self.start_pull_divergence_compare(upstream, ahead, behind),
+                    },
+                    KeyCode::Char('r') => {
+                        self.popup = PopupState::None;
+                        self.start_pull_integration(upstream, PullStrategy::Rebase, false);
+                    }
+                    KeyCode::Char('m') => {
+                        self.popup = PopupState::None;
+                        self.start_pull_integration(upstream, PullStrategy::Merge, false);
+                    }
+                    KeyCode::Char('v') => {
+                        self.start_pull_divergence_compare(upstream, ahead, behind);
+                    }
+                    KeyCode::Char('R') => {
+                        self.popup = PopupState::None;
+                        self.start_pull_integration(upstream, PullStrategy::Rebase, true);
+                    }
+                    KeyCode::Char('M') => {
+                        self.popup = PopupState::None;
+                        self.start_pull_integration(upstream, PullStrategy::Merge, true);
+                    }
+                    _ => {}
+                }
+            }
             PopupState::Menu {
                 items,
                 selected: _,
@@ -6828,10 +7275,15 @@ impl Gui {
                 // Insert a newline in the body only with Shift+Enter. Plain Enter submits
                 // the commit from either field. Ctrl+J is kept as a terminal-compatible
                 // fallback for Shift+Enter; without this branch tui_textarea would interpret
-                // it as its default `delete_line_by_head` binding.
+                // it as its default `delete_line_by_head` binding. Ctrl+M is CR/Enter in
+                // terminal conventions; enhanced keyboard reporting can expose it as a
+                // distinct control character, so route it through the visible newline path
+                // instead of letting tui-textarea create a hidden second summary line.
                 else if (key.code == KeyCode::Enter
                     && key.modifiers.contains(KeyModifiers::SHIFT))
                     || (key.code == KeyCode::Char('j')
+                        && key.modifiers.contains(KeyModifiers::CONTROL))
+                    || (key.code == KeyCode::Char('m')
                         && key.modifiers.contains(KeyModifiers::CONTROL))
                 {
                     let wrap_width = self.commit_body_wrap_width();
@@ -8998,6 +9450,7 @@ impl Gui {
             PopupState::ShellCommand { .. } => return,
             PopupState::PatchPreview { .. } => return,
             PopupState::EmailPatch { .. } => return,
+            PopupState::PullDivergence { .. } => return,
             PopupState::CommandOutput {
                 message, scroll, ..
             } => {
@@ -13351,8 +13804,8 @@ mod terminal_mouse_tests {
                 RemoteOpKind::Push,
                 Ok(RemoteOpCompletion {
                     head: None,
+                    pull_outcome: None,
                     refs_changed: None,
-                    head_changed: None,
                 }),
             ))
             .unwrap();
@@ -13431,8 +13884,8 @@ mod terminal_mouse_tests {
                 RemoteOpKind::Fetch,
                 Ok(RemoteOpCompletion {
                     head: None,
+                    pull_outcome: None,
                     refs_changed: Some(true),
-                    head_changed: None,
                 }),
             ))
             .unwrap();
@@ -13537,8 +13990,11 @@ mod terminal_mouse_tests {
                 RemoteOpKind::Pull,
                 Ok(RemoteOpCompletion {
                     head: None,
+                    pull_outcome: Some(PullOutcome::FastForwarded {
+                        upstream: "origin/main".to_string(),
+                        behind: 2,
+                    }),
                     refs_changed: Some(true),
-                    head_changed: Some(true),
                 }),
             ))
             .unwrap();
@@ -13568,6 +14024,78 @@ mod terminal_mouse_tests {
     }
 
     #[test]
+    fn divergent_pull_opens_strategy_menu_instead_of_git_error() {
+        let repo = TempRepo::new("pull-divergence-menu");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.remote_op_label = Some("Pulling".into());
+        gui.remote_op_tx
+            .send((
+                RemoteOpKind::Pull,
+                Ok(RemoteOpCompletion {
+                    head: None,
+                    pull_outcome: Some(PullOutcome::Diverged {
+                        upstream: "origin/main".to_string(),
+                        ahead: 3,
+                        behind: 17,
+                    }),
+                    refs_changed: Some(false),
+                }),
+            ))
+            .unwrap();
+        gui.receive_remote_op_results();
+
+        let PopupState::PullDivergence {
+            upstream,
+            ahead,
+            behind,
+            selected,
+            ..
+        } = &gui.popup
+        else {
+            panic!("diverged pull should open the guided reconciliation dialog");
+        };
+        assert_eq!(upstream, "origin/main");
+        assert_eq!((*ahead, *behind, *selected), (3, 17, 0));
+        assert!(gui.remote_op_success_at.is_none());
+    }
+
+    #[test]
+    fn view_divergent_commits_starts_compare_loading_off_ui_thread() {
+        let repo = TempRepo::new("pull-divergence-compare-async");
+        let mut gui = checkout_test_gui(&repo);
+        gui.popup = PopupState::PullDivergence {
+            branch: "feature".into(),
+            upstream: "main".into(),
+            ahead: 1,
+            behind: 2,
+            selected: 2,
+        };
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(gui.diff_mode.active);
+        assert_eq!(gui.diff_mode.ref_a, "HEAD");
+        assert_eq!(gui.diff_mode.ref_b, "main");
+        assert_eq!(gui.diff_mode.ahead_behind, Some((1, 2)));
+        assert!(gui.diff_mode.comparison_loading);
+        assert!(gui.compare_load_rx.is_some());
+        assert!(matches!(gui.popup, PopupState::None));
+
+        // Let the tiny test comparison finish before TempRepo removes its directory.
+        for _ in 0..100 {
+            gui.receive_compare_load_results();
+            if gui.compare_load_rx.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(gui.compare_load_rx.is_none());
+        assert!(!gui.diff_mode.comparison_loading);
+    }
+
+    #[test]
     fn pull_with_remote_ref_changes_but_unchanged_head_uses_fetch_refresh() {
         let repo = TempRepo::new("pull-unchanged-head-refresh");
         let mut gui = checkout_test_gui(&repo);
@@ -13578,8 +14106,12 @@ mod terminal_mouse_tests {
                 RemoteOpKind::Pull,
                 Ok(RemoteOpCompletion {
                     head: None,
+                    pull_outcome: Some(PullOutcome::Diverged {
+                        upstream: "origin/main".to_string(),
+                        ahead: 1,
+                        behind: 2,
+                    }),
                     refs_changed: Some(true),
-                    head_changed: Some(false),
                 }),
             ))
             .unwrap();
@@ -13619,8 +14151,8 @@ mod terminal_mouse_tests {
                 RemoteOpKind::Other,
                 Ok(RemoteOpCompletion {
                     head: None,
+                    pull_outcome: None,
                     refs_changed: None,
-                    head_changed: None,
                 }),
             ))
             .unwrap();
@@ -14193,6 +14725,37 @@ mod terminal_mouse_tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn ctrl_m_in_commit_editor_never_creates_hidden_summary_text() {
+        let repo = TempRepo::new("ctrl-m-editor");
+        repo.commit("file", "base");
+        std::fs::write(repo.path().join("file"), "changed").unwrap();
+        repo.git(&["add", "file"]);
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+
+        for c in "subject".chars() {
+            gui.handle_popup_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL))
+            .unwrap();
+        for c in "body".chars() {
+            gui.handle_popup_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        assert!(matches!(&gui.popup, PopupState::CommitInput {
+            summary_textarea, body_state, focus, ..
+        } if summary_textarea.lines().len() == 1
+            && summary_textarea.lines()[0] == "subject"
+            && *focus == popup::CommitInputFocus::Body
+            && body_state.raw().trim() == "body"));
     }
 
     #[test]

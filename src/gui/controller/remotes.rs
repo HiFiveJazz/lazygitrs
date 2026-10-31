@@ -464,20 +464,12 @@ fn show_push_menu(gui: &mut Gui) -> Result<()> {
 }
 
 fn show_pull_menu(gui: &mut Gui) -> Result<()> {
-    // With a single remote there is nothing useful to choose here: the normal
-    // `git pull` already fetches from the current branch's configured upstream.
-    // Keep the menu only when multiple remotes make "fetch all" meaningful.
+    // With a single remote there is nothing useful to choose here: the guided
+    // pull workflow follows the current branch's configured upstream. Keep the
+    // menu only when multiple remotes make "fetch all" meaningful.
     let remote_count = gui.model.lock().unwrap().remotes.len();
     if remote_count == 1 {
-        gui.start_remote_op(
-            RemoteOpKind::Pull,
-            "Pull",
-            "Pulling from upstream...",
-            |git| {
-                git.pull()?;
-                Ok(())
-            },
-        );
+        gui.start_pull();
         return Ok(());
     }
 
@@ -489,15 +481,7 @@ fn show_pull_menu(gui: &mut Gui) -> Result<()> {
                 description: "Pull from upstream".to_string(),
                 key: Some("p".to_string()),
                 action: Some(Box::new(move |gui| {
-                    gui.start_remote_op(
-                        RemoteOpKind::Pull,
-                        "Pull",
-                        "Pulling from upstream...",
-                        |git| {
-                            git.pull()?;
-                            Ok(())
-                        },
-                    );
+                    gui.start_pull();
                     Ok(())
                 })),
             },

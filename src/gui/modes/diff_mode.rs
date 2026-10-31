@@ -550,6 +550,8 @@ pub struct DiffModeState {
     pub ref_b_display: String,
     /// Commits unique to A and B. None when refs aren't both commit-ish.
     pub ahead_behind: Option<(usize, usize)>,
+    /// True while the initial comparison file/commit lists are loading in the background.
+    pub comparison_loading: bool,
     pub commits: Vec<Commit>,
     pub commits_selected: usize,
     pub commits_scroll: usize,
@@ -600,6 +602,7 @@ impl DiffModeState {
             ref_a_display: String::new(),
             ref_b_display: String::new(),
             ahead_behind: None,
+            comparison_loading: false,
             commits: Vec::new(),
             commits_selected: 0,
             commits_scroll: 0,
@@ -637,6 +640,7 @@ impl DiffModeState {
         self.ref_a_display.clear();
         self.ref_b_display.clear();
         self.ahead_behind = None;
+        self.comparison_loading = false;
         self.editing = None;
         self.textarea = None;
         self.search_results.clear();
@@ -667,6 +671,7 @@ impl DiffModeState {
         self.clear_commits();
         self.active = false;
         self.ahead_behind = None;
+        self.comparison_loading = false;
         self.editing = None;
         self.textarea = None;
         self.search_results.clear();
@@ -694,6 +699,7 @@ impl DiffModeState {
         std::mem::swap(&mut self.ref_a, &mut self.ref_b);
         std::mem::swap(&mut self.ref_a_display, &mut self.ref_b_display);
         self.ahead_behind = self.ahead_behind.map(|(ahead, behind)| (behind, ahead));
+        self.comparison_loading = false;
         self.diff_files.clear();
         self.diff_files_selected = 0;
         self.diff_files_scroll = 0;
