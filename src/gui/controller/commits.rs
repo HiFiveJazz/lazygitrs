@@ -20,6 +20,7 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
     if key.code == crossterm::event::KeyCode::Esc {
         if gui.range_select_anchor.is_some() {
             gui.range_select_anchor = None;
+            gui.show_action_toast("Normal");
             return Ok(());
         }
 
@@ -378,8 +379,10 @@ fn cherry_pick_copy(gui: &mut Gui) -> Result<()> {
 fn toggle_range_select(gui: &mut Gui) -> Result<()> {
     if gui.range_select_anchor.is_some() {
         gui.range_select_anchor = None;
+        gui.show_action_toast("Normal");
     } else {
         gui.range_select_anchor = Some(gui.context_mgr.selected_active());
+        gui.show_action_toast("Visual");
     }
     Ok(())
 }
@@ -1163,6 +1166,10 @@ fn show_email_patch_popup_with_values(
     resolving_recipients: bool,
     resolution_request_id: u64,
     focus: EmailPatchFocus,
+    preview_from: String,
+    preview_subject: String,
+    preview_date: String,
+    preview_body: String,
 ) {
     let mut to_recipients = split_email_recipients(&to);
     let mut cc_recipients = split_email_recipients(&cc);
@@ -1179,6 +1186,15 @@ fn show_email_patch_popup_with_values(
         recipient_undo: Vec::new(),
         dry_run,
         reviewing,
+        preview_from,
+        preview_subject,
+        preview_date,
+        preview_body,
+        preview_scroll: 0,
+        preview_scroll_from: 0.0,
+        preview_scroll_target: 0.0,
+        preview_scroll_started_at: None,
+        confirming_send: false,
         resolving_recipients,
         resolution_request_id,
         on_confirm: Box::new(move |gui, to, cc, dry_run| {
@@ -1211,6 +1227,10 @@ fn resolve_send_patch_recipients(
         true,
         request_id,
         EmailPatchFocus::To,
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
     );
 
     let git = Arc::clone(&gui.git);
@@ -1246,6 +1266,10 @@ fn resolve_send_patch_recipients(
                         false,
                         0,
                         EmailPatchFocus::To,
+                        recipients.preview_from,
+                        recipients.preview_subject,
+                        recipients.preview_date,
+                        recipients.preview_body,
                     );
                     gui.show_action_toast("Automatic recipients added");
                 }

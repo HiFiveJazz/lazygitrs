@@ -718,6 +718,60 @@ pub fn join_email_recipients(recipients: &[String]) -> String {
         .join(", ")
 }
 
+/// Build the human-readable outgoing message shown in Email Review mode.
+/// Recipients are taken from the current editable lists, while From/Subject/Date
+/// and the body come from the git-send-email preflight/format-patch result.
+pub fn build_email_patch_preview(
+    from: &str,
+    to: &[String],
+    cc: &[String],
+    subject: &str,
+    date: &str,
+    body: &str,
+) -> String {
+    let mut out = String::new();
+    if !from.trim().is_empty() {
+        out.push_str("From: ");
+        out.push_str(from.trim());
+        out.push('\n');
+    }
+    push_email_preview_recipient_header(&mut out, "To", to);
+    if !cc.is_empty() {
+        push_email_preview_recipient_header(&mut out, "Cc", cc);
+    }
+    if !subject.trim().is_empty() {
+        out.push_str("Subject: ");
+        out.push_str(subject.trim());
+        out.push('\n');
+    }
+    if !date.trim().is_empty() {
+        out.push_str("Date: ");
+        out.push_str(date.trim());
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(body);
+    out
+}
+
+fn push_email_preview_recipient_header(out: &mut String, name: &str, recipients: &[String]) {
+    if recipients.is_empty() {
+        out.push_str(name);
+        out.push_str(": (none)\n");
+        return;
+    }
+
+    out.push_str(name);
+    out.push_str(": ");
+    for (index, recipient) in recipients.iter().enumerate() {
+        if index > 0 {
+            out.push_str(",\n    ");
+        }
+        out.push_str(recipient.trim());
+    }
+    out.push('\n');
+}
+
 impl CommitInputKind {
     pub fn title(self) -> &'static str {
         match self {
@@ -755,8 +809,24 @@ pub enum PopupState {
         recipient_editor: Option<EmailRecipientEditor>,
         recipient_undo: Vec<EmailRecipientUndo>,
         dry_run: bool,
-        /// True while the final, editable recipient list is being reviewed.
+        /// True while the outgoing message preview is being reviewed.
         reviewing: bool,
+        /// Sender resolved by the initial git-send-email dry run.
+        preview_from: String,
+        /// Final subject resolved by the initial git-send-email dry run.
+        preview_subject: String,
+        /// Date header resolved by git-send-email/format-patch.
+        preview_date: String,
+        /// Formatted patch message body shown in Review mode.
+        preview_body: String,
+        /// Vertical scroll offset for the outgoing email preview body.
+        preview_scroll: usize,
+        /// Smooth email-preview scroll animation state.
+        preview_scroll_from: f64,
+        preview_scroll_target: f64,
+        preview_scroll_started_at: Option<Instant>,
+        /// True while the final send-confirmation overlay is visible.
+        confirming_send: bool,
         /// True while the initial dry-run recipient resolution is running in the background.
         resolving_recipients: bool,
         /// Identifies the active async resolution so stale completions are ignored.
@@ -1743,8 +1813,8 @@ mod checklist_free_entry_tests {
 #[cfg(test)]
 mod email_recipient_tests {
     use super::{
-        EmailPatchFocus, dedupe_email_recipients, email_address_key, join_email_recipients,
-        split_email_recipients, validate_email_recipient_candidates,
+        EmailPatchFocus, build_email_patch_preview, dedupe_email_recipients, email_address_key,
+        join_email_recipients, split_email_recipients, validate_email_recipient_candidates,
     };
 
     #[test]
@@ -1827,6 +1897,25 @@ mod email_recipient_tests {
         assert_eq!(cc, vec!["list@example.org"]);
     }
 
+
+    #[test]
+    fn builds_outgoing_email_preview_from_current_recipients() {
+        let preview = build_email_patch_preview(
+            "Jazz <jazz@example.com>",
+            &["linux-kernel@example.org".to_string()],
+            &[
+                "Jens Axboe <axboe@kernel.dk>".to_string(),
+                "reviewer@example.org".to_string(),
+            ],
+            "[PATCH] io_uring: test",
+            "Thu, 30 Oct 2026 10:00:00 -0700",
+            "Commit message\n\n---\n diff --git a/a b/a",
+        );
+        assert!(preview.starts_with("From: Jazz <jazz@example.com>\nTo: linux-kernel@example.org\n"));
+        assert!(preview.contains("Cc: Jens Axboe <axboe@kernel.dk>,\n    reviewer@example.org\n"));
+        assert!(preview.contains("Subject: [PATCH] io_uring: test\n"));
+        assert!(preview.ends_with("Commit message\n\n---\n diff --git a/a b/a"));
+    }
     #[test]
     fn joins_visible_recipients_for_send_email() {
         let recipients = vec![

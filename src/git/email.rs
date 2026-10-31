@@ -51,6 +51,14 @@ impl Drop for TempPatchDir {
 pub struct ResolvedEmailRecipients {
     pub to: String,
     pub cc: String,
+    /// Sender shown by `git send-email --dry-run`.
+    pub preview_from: String,
+    /// Final subject shown by `git send-email --dry-run`.
+    pub preview_subject: String,
+    /// Date header shown by `git send-email --dry-run` (or format-patch fallback).
+    pub preview_date: String,
+    /// Message body/diff produced by format-patch, adjusted for a differing sender.
+    pub preview_body: String,
 }
 
 impl GitCommands {
@@ -174,13 +182,17 @@ impl GitCommands {
         cc: &str,
     ) -> Result<ResolvedEmailRecipients> {
         let (_temp_dir, patch_path) = self.format_commit_email_patch(hash)?;
+        let patch = fs::read_to_string(&patch_path)
+            .with_context(|| format!("Failed to read generated patch {patch_path}"))?;
         let result = self
             .send_email_command(&patch_path, to, cc, true, false)
             .run_expecting_success()?;
 
-        parse_send_email_recipients(&result.stdout).with_context(
+        let mut resolved = parse_send_email_recipients(&result.stdout).with_context(
             || "git send-email --dry-run completed, but its final To/Cc headers could not be read",
-        )
+        )?;
+        populate_send_email_preview(&mut resolved, &result.stdout, &patch);
+        Ok(resolved)
     }
 
     /// Format one commit into a temporary patch and send it with `git send-email`.
@@ -209,7 +221,97 @@ fn parse_send_email_recipients(output: &str) -> Option<ResolvedEmailRecipients> 
         return None;
     }
 
-    Some(ResolvedEmailRecipients { to, cc })
+    Some(ResolvedEmailRecipients {
+        to,
+        cc,
+        preview_from: String::new(),
+        preview_subject: String::new(),
+        preview_date: String::new(),
+        preview_body: String::new(),
+    })
+}
+
+fn populate_send_email_preview(
+    resolved: &mut ResolvedEmailRecipients,
+    send_email_output: &str,
+    patch: &str,
+) {
+    let patch_from = parse_format_patch_header(patch, "From").unwrap_or_default();
+    let patch_subject = parse_format_patch_header(patch, "Subject").unwrap_or_default();
+    let patch_date = parse_format_patch_header(patch, "Date").unwrap_or_default();
+
+    resolved.preview_from = parse_send_email_header(send_email_output, "From")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| patch_from.clone());
+    resolved.preview_subject = parse_send_email_header(send_email_output, "Subject")
+        .filter(|value| !value.is_empty())
+        .unwrap_or(patch_subject);
+    resolved.preview_date = parse_send_email_header(send_email_output, "Date")
+        .filter(|value| !value.is_empty())
+        .unwrap_or(patch_date);
+
+    let mut body = format_patch_body(patch);
+    if !patch_from.is_empty()
+        && mailbox_key(&patch_from) != mailbox_key(&resolved.preview_from)
+        && !body.starts_with("From: ")
+    {
+        body = format!("From: {patch_from}\n\n{body}");
+    }
+    resolved.preview_body = body;
+}
+
+fn parse_format_patch_header(patch: &str, header: &str) -> Option<String> {
+    let normalized = patch.replace("\r\n", "\n");
+    let prefix = format!("{header}:");
+    let mut value: Option<String> = None;
+
+    for (index, line) in normalized.lines().enumerate() {
+        if index == 0 && line.starts_with("From ") {
+            continue;
+        }
+        if line.is_empty() {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix(&prefix) {
+            value = Some(rest.trim().to_string());
+            continue;
+        }
+        if let Some(current) = value.as_mut() {
+            if line.starts_with(' ') || line.starts_with('\t') {
+                let continuation = line.trim();
+                if !continuation.is_empty() {
+                    current.push(' ');
+                    current.push_str(continuation);
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    value.map(|value| decode_rfc2047_words(value.trim()))
+}
+
+fn format_patch_body(patch: &str) -> String {
+    let normalized = patch.replace("\r\n", "\n");
+    let message = normalized
+        .split_once('\n')
+        .map(|(_, rest)| rest)
+        .unwrap_or(&normalized);
+    message
+        .split_once("\n\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default()
+}
+
+fn mailbox_key(value: &str) -> String {
+    let value = value.trim();
+    if let (Some(open), Some(close)) = (value.rfind('<'), value.rfind('>')) {
+        if open < close {
+            return value[open + 1..close].trim().to_ascii_lowercase();
+        }
+    }
+    value.to_ascii_lowercase()
 }
 
 fn parse_send_email_header(output: &str, header: &str) -> Option<String> {
@@ -416,7 +518,10 @@ fn decode_rfc2047_charset(charset: &str, bytes: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TempPatchDir, decode_rfc2047_words, parse_send_email_recipients};
+    use super::{
+        TempPatchDir, decode_rfc2047_words, parse_send_email_recipients,
+        populate_send_email_preview,
+    };
 
     #[test]
     fn temp_patch_dir_is_cleaned_up() {
@@ -429,6 +534,34 @@ mod tests {
         assert!(!path.exists());
     }
 
+
+    #[test]
+    fn builds_preview_with_sender_and_original_author() {
+        let output = r#"Dry-OK. Log says:
+From: Jazz <jazz@example.com>
+To: to@example.com
+Cc: reviewer@example.com
+Subject: [PATCH] io_uring: test
+Date: Thu, 30 Oct 2026 10:00:00 -0700
+
+Result: OK
+"#;
+        let patch = r#"From deadbeef Mon Sep 17 00:00:00 2001
+From: Jens Axboe <axboe@kernel.dk>
+Date: Thu, 30 Oct 2026 09:00:00 -0700
+Subject: [PATCH] io_uring: test
+
+Patch body
+
+---
+ file | 1 +
+"#;
+        let mut resolved = parse_send_email_recipients(output).unwrap();
+        populate_send_email_preview(&mut resolved, output, patch);
+        assert_eq!(resolved.preview_from, "Jazz <jazz@example.com>");
+        assert_eq!(resolved.preview_subject, "[PATCH] io_uring: test");
+        assert!(resolved.preview_body.starts_with("From: Jens Axboe <axboe@kernel.dk>\n\nPatch body"));
+    }
     #[test]
     fn parses_resolved_send_email_recipients() {
         let output = r#"0001-test.patch

@@ -2572,6 +2572,15 @@ fn render_list_with_range_ctx(
     ctx_mgr.set_scroll_offset(ctx, so);
 }
 
+fn visual_range_style(theme: &crate::config::Theme, current: bool) -> Style {
+    let style = Style::default().bg(theme.graph_colors[0]);
+    if current {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_commit_list_ctx(
     frame: &mut Frame,
@@ -2642,10 +2651,12 @@ fn render_commit_list_ctx(
         .enumerate()
         .map(|(i, item)| {
             let idx = offset + i;
-            if is_active && idx == selected {
+            let in_visual_range =
+                is_active && range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi);
+            if in_visual_range {
+                item.style(visual_range_style(theme, idx == selected))
+            } else if is_active && idx == selected {
                 item.style(theme.selected_line)
-            } else if is_active && range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi) {
-                item.style(Style::default().bg(theme.selected_bg))
             } else {
                 item
             }
@@ -2765,10 +2776,12 @@ fn render_list_with_range_raw(
         .enumerate()
         .map(|(i, item)| {
             let idx = i + offset;
-            if is_active && idx == selected {
+            let in_visual_range =
+                is_active && range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi);
+            if in_visual_range {
+                item.style(visual_range_style(theme, idx == selected))
+            } else if is_active && idx == selected {
                 item.style(theme.selected_line)
-            } else if is_active && range.map_or(false, |(lo, hi)| idx >= lo && idx <= hi) {
-                item.style(Style::default().bg(theme.selected_bg))
             } else {
                 item
             }
@@ -3663,52 +3676,249 @@ fn hard_wrap_preserve(line: &str, width: usize) -> Vec<String> {
     out
 }
 
-fn patch_line_style(line: &str, theme: &Theme) -> Style {
-    if line.starts_with("diff --git ") || line.starts_with("index ") {
+fn email_header_label_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.accent_secondary)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn email_header_value_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.text_strong)
+}
+
+fn email_header_label(line: &str) -> Option<&'static str> {
+    ["From:", "To:", "Cc:", "Subject:", "Date:"]
+        .into_iter()
+        .find(|header| line.starts_with(header))
+}
+
+fn is_email_header_line(line: &str) -> bool {
+    email_header_label(line).is_some()
+}
+
+fn styled_email_header_line(line: &str, theme: &Theme) -> Line<'static> {
+    if let Some(label) = email_header_label(line) {
+        let value = &line[label.len()..];
+        Line::from(vec![
+            Span::styled(label.to_string(), email_header_label_style(theme)),
+            Span::styled(value.to_string(), email_header_value_style(theme)),
+        ])
+    } else {
+        Line::from(Span::styled(
+            line.to_string(),
+            email_header_value_style(theme),
+        ))
+    }
+}
+
+fn patch_line_style(line: &str, theme: &Theme, in_diff: bool) -> Style {
+    if in_diff && (line.starts_with("diff --git ") || line.starts_with("index ")) {
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
-    } else if line.starts_with("@@") {
+    } else if in_diff && line.starts_with("@@") {
         Style::default()
             .fg(theme.accent_secondary)
             .add_modifier(Modifier::BOLD)
-    } else if line.starts_with('+') && !line.starts_with("+++") {
+    } else if line.starts_with("-- ") || line.starts_with("From ") {
+        Style::default().fg(theme.text_dimmed)
+    } else if in_diff && line.starts_with("+++ ") {
+        theme.diff_add.add_modifier(Modifier::BOLD)
+    } else if in_diff && line.starts_with("--- ") {
+        theme.diff_remove.add_modifier(Modifier::BOLD)
+    } else if in_diff && line.starts_with('+') {
         theme.diff_add.bg(theme.diff_add_bg)
-    } else if line.starts_with('-') && !line.starts_with("---") {
+    } else if in_diff && line.starts_with('-') {
         theme.diff_remove.bg(theme.diff_remove_bg)
-    } else if line.starts_with("--- ") || line.starts_with("+++ ") {
-        Style::default()
-            .fg(theme.text_strong)
-            .add_modifier(Modifier::BOLD)
-    } else if line.starts_with("From: ")
-        || line.starts_with("Date: ")
-        || line.starts_with("Subject: ")
-    {
-        Style::default().fg(theme.accent_secondary)
-    } else if line == "---" || line.starts_with("-- ") {
+    } else if line == "---" {
         Style::default().fg(theme.text_dimmed)
     } else {
         Style::default().fg(theme.text)
     }
 }
 
+/// Wrap a format-patch body while preserving enough parser state to avoid
+/// coloring commit-message prose as diff content. In particular, kernel prose
+/// often contains identifiers such as `->get_parent()` at the start of a line;
+/// those are only deletions after the first `diff --git` marker.
 fn wrap_patch_preview_lines(message: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let width = width.max(1);
     let mut out = Vec::new();
+    let mut in_diff = false;
+    let mut in_initial_headers = true;
+    let mut previous_was_header = false;
+
     for source in message.lines() {
-        let style = patch_line_style(source, theme);
+        if source.starts_with("diff --git ") {
+            in_diff = true;
+            in_initial_headers = false;
+            previous_was_header = false;
+        }
+
+        let current_is_header = is_email_header_line(source);
+        let header_continuation = in_initial_headers
+            && previous_was_header
+            && (source.starts_with(' ') || source.starts_with('\t'));
+
         if source.is_empty() {
-            out.push(Line::from(Span::styled(String::new(), style)));
+            out.push(Line::from(String::new()));
+            in_initial_headers = false;
+            previous_was_header = false;
             continue;
         }
+
         for part in hard_wrap_preserve(source, width) {
-            out.push(Line::from(Span::styled(part, style)));
+            if current_is_header || header_continuation {
+                out.push(styled_email_header_line(&part, theme));
+            } else {
+                out.push(Line::from(Span::styled(
+                    part.clone(),
+                    patch_line_style(&part, theme, in_diff),
+                )));
+            }
         }
+
+        previous_was_header = current_is_header || header_continuation;
     }
     if out.is_empty() {
         out.push(Line::from(String::new()));
     }
     out
+}
+
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+
+    for word in text.split_whitespace() {
+        let word_width = UnicodeWidthStr::width(word);
+        let separator = usize::from(!current.is_empty());
+        if !current.is_empty() && current_width + separator + word_width > width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+
+        if word_width > width && current.is_empty() {
+            let parts = hard_wrap_preserve(word, width);
+            for (index, part) in parts.into_iter().enumerate() {
+                if index == 0 {
+                    current_width = UnicodeWidthStr::width(part.as_str());
+                    current = part;
+                } else {
+                    lines.push(std::mem::take(&mut current));
+                    current_width = UnicodeWidthStr::width(part.as_str());
+                    current = part;
+                }
+            }
+            continue;
+        }
+
+        if !current.is_empty() {
+            current.push(' ');
+            current_width += 1;
+        }
+        current.push_str(word);
+        current_width += word_width;
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn email_preview_header_lines(
+    from: &str,
+    to: &[String],
+    cc: &[String],
+    subject: &str,
+    date: &str,
+    width: usize,
+) -> Vec<String> {
+    const LABEL_WIDTH: usize = 9;
+    let value_width = width.saturating_sub(LABEL_WIDTH).max(1);
+    let to_value = if to.is_empty() {
+        "(none)".to_string()
+    } else {
+        to.iter().map(|value| value.trim()).collect::<Vec<_>>().join(", ")
+    };
+    let cc_value = if cc.is_empty() {
+        "(none)".to_string()
+    } else {
+        cc.iter().map(|value| value.trim()).collect::<Vec<_>>().join(", ")
+    };
+
+    let values = [
+        ("From:", from.trim(), 2usize),
+        ("To:", to_value.as_str(), 2usize),
+        ("Cc:", cc_value.as_str(), 3usize),
+        ("Subject:", subject.trim(), 2usize),
+        ("Date:", date.trim(), 1usize),
+    ];
+    let mut lines = Vec::new();
+    for (label, value, max_lines) in values {
+        let mut chunks = wrap_words(value, value_width);
+        let truncated = chunks.len() > max_lines;
+        chunks.truncate(max_lines);
+        if truncated {
+            if let Some(last) = chunks.last_mut() {
+                while UnicodeWidthStr::width(last.as_str()) + 1 > value_width && !last.is_empty() {
+                    last.pop();
+                }
+                last.push('…');
+            }
+        }
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            if index == 0 {
+                lines.push(format!("{:<width$}{}", label, chunk, width = LABEL_WIDTH));
+            } else {
+                lines.push(format!("{:<width$}{}", "", chunk, width = LABEL_WIDTH));
+            }
+        }
+    }
+    lines
+}
+
+fn email_preview_body_layout(
+    from: &str,
+    to: &[String],
+    cc: &[String],
+    subject: &str,
+    date: &str,
+    area: Rect,
+) -> Option<(Rect, usize, usize)> {
+    let rect = email_popup_geometry(area)?;
+    let inner = rect.inner(ratatui::layout::Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    if inner.height < 8 {
+        return None;
+    }
+
+    let footer_y = inner.y + inner.height.saturating_sub(1);
+    let status_y = footer_y.saturating_sub(1);
+    let available = status_y.saturating_sub(inner.y);
+    let width = usize::from(inner.width).max(1);
+    let header_lines = email_preview_header_lines(from, to, cc, subject, date, width);
+    // Keep a few rows for the patch even with unusually large recipient lists.
+    let max_header_rows = usize::from(available.saturating_sub(4)).min(12).max(1);
+    let header_rows = header_lines.len().min(max_header_rows);
+    let divider_rows = usize::from(available > header_rows as u16);
+    let body_rows = usize::from(available)
+        .saturating_sub(header_rows)
+        .saturating_sub(divider_rows)
+        .max(1);
+    Some((inner, header_rows, body_rows))
 }
 
 pub(super) fn patch_preview_metrics(message: &str, area: Rect) -> (usize, usize) {
@@ -3809,6 +4019,182 @@ fn email_recipient_row_allocation(to_len: usize, cc_len: usize, budget: usize) -
     }
 
     (to_rows.max(1), cc_rows.max(1))
+}
+
+fn email_popup_geometry(area: Rect) -> Option<Rect> {
+    let width = (area.width.saturating_mul(82) / 100)
+        .min(96)
+        .max(48)
+        .min(area.width);
+    if width < 28 || area.height < 14 {
+        return None;
+    }
+    let desired_height = (area.height.saturating_mul(82) / 100).max(20).min(34);
+    let height = desired_height.min(area.height.saturating_sub(2));
+    if height < 14 {
+        return None;
+    }
+    Some(Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    ))
+}
+
+pub(super) fn email_preview_max_scroll(
+    from: &str,
+    to: &[String],
+    cc: &[String],
+    subject: &str,
+    date: &str,
+    body: &str,
+    area: Rect,
+) -> usize {
+    let Some((inner, _header_rows, body_rows)) =
+        email_preview_body_layout(from, to, cc, subject, date, area)
+    else {
+        return 0;
+    };
+    let width = usize::from(inner.width).max(1);
+    let total = body
+        .lines()
+        .map(|line| hard_wrap_preserve(line, width).len())
+        .sum::<usize>()
+        .max(1);
+    total.saturating_sub(body_rows)
+}
+
+fn render_email_send_confirmation(
+    frame: &mut Frame,
+    parent: Rect,
+    to: &[String],
+    cc: &[String],
+    theme: &Theme,
+) {
+    if parent.width < 36 || parent.height < 14 {
+        return;
+    }
+
+    let width = (parent.width.saturating_mul(62) / 100)
+        .max(42)
+        .min(72)
+        .min(parent.width.saturating_sub(4));
+    let content_width = usize::from(width.saturating_sub(4)).max(1);
+    let to_value = if to.is_empty() {
+        "(none)".to_string()
+    } else {
+        to.iter().map(|value| value.trim()).collect::<Vec<_>>().join(", ")
+    };
+    let cc_value = if cc.is_empty() {
+        "(none)".to_string()
+    } else {
+        cc.iter().map(|value| value.trim()).collect::<Vec<_>>().join(", ")
+    };
+
+    let mut recipient_lines = Vec::new();
+    for (label, value) in [("To:", to_value.as_str()), ("Cc:", cc_value.as_str())] {
+        const LABEL_WIDTH: usize = 5;
+        let value_width = content_width.saturating_sub(LABEL_WIDTH).max(1);
+        let mut chunks = wrap_words(value, value_width);
+        let truncated = chunks.len() > 3;
+        chunks.truncate(3);
+        if truncated {
+            if let Some(last) = chunks.last_mut() {
+                while UnicodeWidthStr::width(last.as_str()) + 1 > value_width && !last.is_empty() {
+                    last.pop();
+                }
+                last.push('…');
+            }
+        }
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            if index == 0 {
+                recipient_lines.push(format!("{:<width$}{}", label, chunk, width = LABEL_WIDTH));
+            } else {
+                recipient_lines.push(format!("{:<width$}{}", "", chunk, width = LABEL_WIDTH));
+            }
+        }
+    }
+
+    let desired_height = (recipient_lines.len() as u16)
+        .saturating_add(7)
+        .max(10)
+        .min(parent.height.saturating_sub(4));
+    let rect = Rect::new(
+        parent.x + parent.width.saturating_sub(width) / 2,
+        parent.y + parent.height.saturating_sub(desired_height) / 2,
+        width,
+        desired_height,
+    );
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Block::default()
+            .title(" Send this patch? ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.accent)),
+        rect,
+    );
+    let inner = rect.inner(ratatui::layout::Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+
+    let prompt_style = Style::default()
+        .fg(theme.text_strong)
+        .add_modifier(Modifier::BOLD);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Confirm the final recipients before sending.",
+            prompt_style,
+        ))),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let recipient_style = email_header_value_style(theme);
+    let mut y = inner.y.saturating_add(2);
+    for line in recipient_lines {
+        if y >= inner.y + inner.height.saturating_sub(2) {
+            break;
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(line, recipient_style))),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        y = y.saturating_add(1);
+    }
+
+    let footer_y = inner.y + inner.height.saturating_sub(1);
+    let send_label = " Enter Send ";
+    let cancel_label = " Esc Cancel ";
+    let gap = 3u16;
+    let send_width = UnicodeWidthStr::width(send_label) as u16;
+    let cancel_width = UnicodeWidthStr::width(cancel_label) as u16;
+    let total = send_width.saturating_add(gap).saturating_add(cancel_width);
+    let start_x = inner.x + inner.width.saturating_sub(total) / 2;
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            send_label,
+            Style::default()
+                .fg(Color::Black)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect::new(start_x, footer_y, send_width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            cancel_label,
+            Style::default()
+                .fg(theme.text)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect::new(
+            start_x.saturating_add(send_width).saturating_add(gap),
+            footer_y,
+            cancel_width,
+            1,
+        ),
+    );
 }
 
 pub fn render_popup(
@@ -4169,31 +4555,18 @@ pub fn render_popup(
             recipient_editor,
             dry_run,
             reviewing,
+            preview_from,
+            preview_subject,
+            preview_date,
+            preview_body,
+            preview_scroll,
+            confirming_send,
             resolving_recipients,
             ..
         } => {
-            let width = (area.width.saturating_mul(82) / 100)
-                .min(96)
-                .max(48)
-                .min(area.width);
-            if width < 28 || area.height < 14 {
+            let Some(rect) = email_popup_geometry(area) else {
                 return;
-            }
-
-            // Keep Compose and Review on the same stable, tall canvas. This
-            // prevents the footer and dialog from jumping around as recipients
-            // are added/removed or the mode changes.
-            let desired_height = (area.height.saturating_mul(82) / 100).max(20).min(34);
-            let height = desired_height.min(area.height.saturating_sub(2));
-            if height < 14 {
-                return;
-            }
-            let rect = Rect::new(
-                area.x + area.width.saturating_sub(width) / 2,
-                area.y + area.height.saturating_sub(height) / 2,
-                width,
-                height,
-            );
+            };
             frame.render_widget(Clear, rect);
 
             let mode_color = if *reviewing {
@@ -4244,11 +4617,13 @@ pub fn render_popup(
                 ])
             } else if *reviewing {
                 Line::from(vec![
-                    Span::styled(" enter ", key_style),
-                    Span::styled(if *dry_run { "check  " } else { "send  " }, desc_style),
+                    Span::styled("j/k ", key_style),
+                    Span::styled("scroll  ", desc_style),
+                    Span::styled("enter ", key_style),
+                    Span::styled(if *dry_run { "check  " } else { "confirm  " }, desc_style),
                     Span::styled("ctrl+d ", key_style),
                     Span::styled("dry-run  ", desc_style),
-                    Span::styled("esc/n ", key_style),
+                    Span::styled("esc ", key_style),
                     Span::styled("back", desc_style),
                 ])
             } else if recipient_editor.is_some() {
@@ -4332,6 +4707,83 @@ pub fn render_popup(
                     .alignment(ratatui::layout::Alignment::Center),
                     dry_rect,
                 );
+            }
+
+            if *reviewing {
+                if let Some((preview_inner, header_rows, body_rows)) = email_preview_body_layout(
+                    preview_from,
+                    to_recipients,
+                    cc_recipients,
+                    preview_subject,
+                    preview_date,
+                    area,
+                ) {
+                    let header_lines = email_preview_header_lines(
+                        preview_from,
+                        to_recipients,
+                        cc_recipients,
+                        preview_subject,
+                        preview_date,
+                        usize::from(preview_inner.width).max(1),
+                    );
+                    for (index, line) in header_lines.iter().take(header_rows).enumerate() {
+                        frame.render_widget(
+                            Paragraph::new(styled_email_header_line(line, theme)),
+                            Rect::new(
+                                preview_inner.x,
+                                preview_inner.y + index as u16,
+                                preview_inner.width,
+                                1,
+                            ),
+                        );
+                    }
+
+                    let wrapped = wrap_patch_preview_lines(
+                        preview_body,
+                        usize::from(preview_inner.width).max(1),
+                        theme,
+                    );
+                    let max_scroll = wrapped.len().saturating_sub(body_rows);
+                    let scroll = (*preview_scroll).min(max_scroll);
+                    let first = if wrapped.is_empty() { 0 } else { scroll + 1 };
+                    let last = (scroll + body_rows).min(wrapped.len());
+
+                    let divider_y = preview_inner.y + header_rows as u16;
+                    let label = format!(" Patch [{first}-{last}/{}] ", wrapped.len().max(1));
+                    let divider_width = usize::from(preview_inner.width);
+                    let left = 2usize.min(divider_width);
+                    let right = divider_width.saturating_sub(left + UnicodeWidthStr::width(label.as_str()));
+                    let divider = format!(
+                        "{}{}{}",
+                        "─".repeat(left),
+                        label,
+                        "─".repeat(right),
+                    );
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            divider,
+                            Style::default().fg(theme.popup_border),
+                        ))),
+                        Rect::new(preview_inner.x, divider_y, preview_inner.width, 1),
+                    );
+
+                    let body_y = divider_y.saturating_add(1);
+                    frame.render_widget(
+                        Paragraph::new(wrapped)
+                            .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+                        Rect::new(
+                            preview_inner.x,
+                            body_y,
+                            preview_inner.width,
+                            body_rows.min(u16::MAX as usize) as u16,
+                        ),
+                    );
+                }
+
+                if *confirming_send {
+                    render_email_send_confirmation(frame, rect, to_recipients, cc_recipients, theme);
+                }
+                return;
             }
 
             let focused_label = Style::default()

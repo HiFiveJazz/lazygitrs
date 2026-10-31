@@ -1844,6 +1844,7 @@ impl Gui {
             self.context_mgr.tick_selection_animations();
             self.diff_view.tick_smooth_scroll();
             self.tick_patch_preview_animation();
+            self.tick_email_preview_animation();
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
@@ -2195,6 +2196,132 @@ impl Gui {
         }
     }
 
+    fn run_email_patch_action(&mut self) {
+        let popup = std::mem::replace(&mut self.popup, PopupState::None);
+        let PopupState::EmailPatch {
+            title,
+            to_recipients,
+            cc_recipients,
+            to_selected,
+            cc_selected,
+            recipient_undo,
+            dry_run,
+            preview_from,
+            preview_subject,
+            preview_date,
+            preview_body,
+            preview_scroll,
+            preview_scroll_from,
+            preview_scroll_target,
+            preview_scroll_started_at,
+            resolution_request_id,
+            on_confirm,
+            ..
+        } = popup
+        else {
+            return;
+        };
+
+        let to = popup::join_email_recipients(&to_recipients);
+        let cc = popup::join_email_recipients(&cc_recipients);
+        if let Err(e) = on_confirm(self, to, cc, dry_run) {
+            self.popup = PopupState::Message {
+                title: "Error".to_string(),
+                message: format!("{}", e),
+                kind: MessageKind::Error,
+            };
+        } else if dry_run {
+            // A dry run is a check, not a navigation event. Keep the exact
+            // reviewed message visible so the user can inspect it, see the
+            // success toast, disable Dry Run, and then confirm the real send.
+            self.popup = PopupState::EmailPatch {
+                title,
+                to_recipients,
+                cc_recipients,
+                focus: popup::EmailPatchFocus::To,
+                to_selected,
+                cc_selected,
+                recipient_editor: None,
+                recipient_undo,
+                dry_run: true,
+                reviewing: true,
+                preview_from,
+                preview_subject,
+                preview_date,
+                preview_body,
+                preview_scroll,
+                preview_scroll_from,
+                preview_scroll_target,
+                preview_scroll_started_at,
+                confirming_send: false,
+                resolving_recipients: false,
+                resolution_request_id,
+                on_confirm,
+            };
+        }
+    }
+
+    fn email_preview_animation_active(&self) -> bool {
+        matches!(
+            self.popup,
+            PopupState::EmailPatch {
+                reviewing: true,
+                preview_scroll_started_at: Some(_),
+                ..
+            }
+        )
+    }
+
+    fn tick_email_preview_animation(&mut self) {
+        let duration = scroll::LIST_SCROLL_DURATION;
+        let PopupState::EmailPatch {
+            reviewing: true,
+            preview_from,
+            to_recipients,
+            cc_recipients,
+            preview_subject,
+            preview_date,
+            preview_body,
+            preview_scroll,
+            preview_scroll_from,
+            preview_scroll_target,
+            preview_scroll_started_at,
+            ..
+        } = &mut self.popup
+        else {
+            return;
+        };
+
+        let area = Rect::new(0, 0, self.layout.width, self.layout.height);
+        let max = views::email_preview_max_scroll(
+            preview_from,
+            to_recipients,
+            cc_recipients,
+            preview_subject,
+            preview_date,
+            preview_body,
+            area,
+        );
+
+        if let Some(started_at) = *preview_scroll_started_at {
+            let t = (started_at.elapsed().as_secs_f64() / duration.as_secs_f64()).min(1.0);
+            let target = preview_scroll_target.min(max as f64);
+            if t >= 1.0 {
+                *preview_scroll = target as usize;
+                *preview_scroll_started_at = None;
+                *preview_scroll_from = target;
+                *preview_scroll_target = target;
+            } else {
+                let value = *preview_scroll_from + (target - *preview_scroll_from) * t;
+                *preview_scroll = if target >= *preview_scroll_from {
+                    value.floor() as usize
+                } else {
+                    value.ceil() as usize
+                };
+            }
+        }
+    }
+
     fn shell_command_ui_active(&self) -> bool {
         self.shell_command_job.is_some()
             || matches!(
@@ -2209,6 +2336,7 @@ impl Gui {
             || self.context_mgr.has_active_selection_animation()
             || self.diff_view.has_active_smooth_scroll()
             || self.patch_preview_animation_active()
+            || self.email_preview_animation_active()
         {
             Duration::from_millis(8)
         } else if self.shell_command_job.is_some()
@@ -5725,7 +5853,14 @@ impl Gui {
 
                 let toggle_dry_run =
                     key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL);
-                if toggle_dry_run {
+                let send_confirmation_open = matches!(
+                    self.popup,
+                    PopupState::EmailPatch {
+                        confirming_send: true,
+                        ..
+                    }
+                );
+                if toggle_dry_run && !send_confirmation_open {
                     if let PopupState::EmailPatch { dry_run, .. } = &mut self.popup {
                         *dry_run = !*dry_run;
                     }
@@ -5733,58 +5868,149 @@ impl Gui {
                 }
 
                 if reviewing {
-                    if key.code == KeyCode::Enter || key.code == KeyCode::Char('y') {
-                        let popup = std::mem::replace(&mut self.popup, PopupState::None);
-                        if let PopupState::EmailPatch {
-                            title,
-                            to_recipients,
-                            cc_recipients,
-                            to_selected,
-                            cc_selected,
-                            recipient_undo,
-                            dry_run,
-                            resolution_request_id,
-                            on_confirm,
+                    let confirming_send = matches!(
+                        self.popup,
+                        PopupState::EmailPatch {
+                            confirming_send: true,
                             ..
-                        } = popup
-                        {
-                            let to = popup::join_email_recipients(&to_recipients);
-                            let cc = popup::join_email_recipients(&cc_recipients);
-                            if let Err(e) = on_confirm(self, to, cc, dry_run) {
-                                self.popup = PopupState::Message {
-                                    title: "Error".to_string(),
-                                    message: format!("{}", e),
-                                    kind: MessageKind::Error,
-                                };
-                            } else if dry_run {
-                                // Keep the reviewed recipients and Dry Run state visible while
-                                // the asynchronous check runs. On success the normal action toast
-                                // confirms the check, and the user can ctrl-d to switch to a real
-                                // send without rebuilding the review screen.
-                                self.popup = PopupState::EmailPatch {
-                                    title,
-                                    to_recipients,
-                                    cc_recipients,
-                                    focus: popup::EmailPatchFocus::To,
-                                    to_selected,
-                                    cc_selected,
-                                    recipient_editor: None,
-                                    recipient_undo,
-                                    dry_run: true,
-                                    reviewing: true,
-                                    resolving_recipients: false,
-                                    resolution_request_id,
-                                    on_confirm,
-                                };
+                        }
+                    );
+
+                    if confirming_send {
+                        match key.code {
+                            KeyCode::Enter | KeyCode::Char('y') => {
+                                self.run_email_patch_action();
                             }
+                            KeyCode::Esc | KeyCode::Char('n') => {
+                                if let PopupState::EmailPatch { confirming_send, .. } = &mut self.popup
+                                {
+                                    *confirming_send = false;
+                                }
+                            }
+                            _ => {}
+                        }
+                        return Ok(());
+                    }
+
+                    if key.code == KeyCode::Enter || key.code == KeyCode::Char('y') {
+                        let dry_run = matches!(
+                            self.popup,
+                            PopupState::EmailPatch { dry_run: true, .. }
+                        );
+                        if dry_run {
+                            self.run_email_patch_action();
+                        } else if let PopupState::EmailPatch { confirming_send, .. } = &mut self.popup
+                        {
+                            *confirming_send = true;
                         }
                     } else if key.code == KeyCode::Esc || key.code == KeyCode::Char('n') {
                         if let PopupState::EmailPatch {
-                            reviewing, focus, ..
+                            reviewing,
+                            focus,
+                            preview_scroll,
+                            preview_scroll_from,
+                            preview_scroll_target,
+                            preview_scroll_started_at,
+                            confirming_send,
+                            ..
                         } = &mut self.popup
                         {
                             *reviewing = false;
                             *focus = popup::EmailPatchFocus::To;
+                            *preview_scroll = 0;
+                            *preview_scroll_from = 0.0;
+                            *preview_scroll_target = 0.0;
+                            *preview_scroll_started_at = None;
+                            *confirming_send = false;
+                        }
+                    } else {
+                        let area = Rect::new(0, 0, self.layout.width, self.layout.height);
+                        let max = if let PopupState::EmailPatch {
+                            preview_from,
+                            to_recipients,
+                            cc_recipients,
+                            preview_subject,
+                            preview_date,
+                            preview_body,
+                            ..
+                        } = &self.popup
+                        {
+                            views::email_preview_max_scroll(
+                                preview_from,
+                                to_recipients,
+                                cc_recipients,
+                                preview_subject,
+                                preview_date,
+                                preview_body,
+                                area,
+                            )
+                        } else {
+                            0
+                        };
+                        let page = (usize::from(self.layout.height) * 4 / 5)
+                            .saturating_sub(8)
+                            .max(1);
+
+                        if let PopupState::EmailPatch {
+                            preview_scroll,
+                            preview_scroll_from,
+                            preview_scroll_target,
+                            preview_scroll_started_at,
+                            ..
+                        } = &mut self.popup
+                        {
+                            let current = (*preview_scroll).min(max);
+                            let pending = if preview_scroll_started_at.is_some() {
+                                preview_scroll_target.round() as usize
+                            } else {
+                                current
+                            }
+                            .min(max);
+                            let target = match (key.modifiers, key.code) {
+                                (m, KeyCode::Char('j')) if m.contains(KeyModifiers::CONTROL) => {
+                                    pending.saturating_add(22).min(max)
+                                }
+                                (m, KeyCode::Char('k')) if m.contains(KeyModifiers::CONTROL) => {
+                                    pending.saturating_sub(22)
+                                }
+                                (_, KeyCode::Char('j') | KeyCode::Down) => {
+                                    pending.saturating_add(1).min(max)
+                                }
+                                (_, KeyCode::Char('k') | KeyCode::Up) => pending.saturating_sub(1),
+                                (_, KeyCode::PageDown) => pending.saturating_add(page).min(max),
+                                (_, KeyCode::PageUp) => pending.saturating_sub(page),
+                                (_, KeyCode::Home | KeyCode::Char('g')) => 0,
+                                (_, KeyCode::End | KeyCode::Char('G')) => max,
+                                _ => pending,
+                            };
+
+                            if target != current || preview_scroll_started_at.is_some() {
+                                let one_line_move = target.abs_diff(pending) == 1
+                                    && matches!(
+                                        key.code,
+                                        KeyCode::Char('j')
+                                            | KeyCode::Char('k')
+                                            | KeyCode::Down
+                                            | KeyCode::Up
+                                    )
+                                    && !key.modifiers.contains(KeyModifiers::CONTROL);
+
+                                if one_line_move {
+                                    // A terminal cannot render a fractional row. Animating a
+                                    // one-line move only delays the visible update, which feels
+                                    // like a stutter. Move single rows immediately and reserve
+                                    // interpolation for multi-row jumps where it has frames to
+                                    // show.
+                                    *preview_scroll = target;
+                                    *preview_scroll_from = target as f64;
+                                    *preview_scroll_target = target as f64;
+                                    *preview_scroll_started_at = None;
+                                } else {
+                                    *preview_scroll_from = current as f64;
+                                    *preview_scroll_target = target as f64;
+                                    *preview_scroll_started_at = Some(Instant::now());
+                                }
+                            }
                         }
                     }
                     return Ok(());
@@ -5921,6 +6147,11 @@ impl Gui {
                         to_recipients,
                         reviewing,
                         focus,
+                        preview_scroll,
+                        preview_scroll_from,
+                        preview_scroll_target,
+                        preview_scroll_started_at,
+                        confirming_send,
                         ..
                     } = &mut self.popup
                     {
@@ -5929,6 +6160,11 @@ impl Gui {
                             true
                         } else {
                             *reviewing = true;
+                            *preview_scroll = 0;
+                            *preview_scroll_from = 0.0;
+                            *preview_scroll_target = 0.0;
+                            *preview_scroll_started_at = None;
+                            *confirming_send = false;
                             false
                         }
                     } else {
