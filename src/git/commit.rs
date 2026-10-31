@@ -4,7 +4,7 @@ use crate::model::{
     commit::{CommitStat, Divergence},
 };
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Default)]
 pub struct CommitFilter {
@@ -31,7 +31,10 @@ fn commit_filter_path_suggestions<'a>(paths: impl Iterator<Item = &'a str>) -> V
 
 #[cfg(test)]
 mod commit_filter_suggestion_tests {
-    use super::{GitCommands, commit_filter_path_suggestions, parse_commit_details_output};
+    use super::{
+        GitCommands, commit_filter_path_suggestions, parse_commit_details_output,
+        parse_commit_stats_output,
+    };
     use crate::git::HeadState;
     use crate::model::commit::{Commit, CommitStatus, Divergence};
 
@@ -186,6 +189,42 @@ mod commit_filter_suggestion_tests {
         assert_eq!(stat.files_changed, 2);
         assert_eq!(stat.insertions, 7);
         assert_eq!(stat.deletions, 3);
+    }
+
+    #[test]
+    fn batched_commit_stats_are_split_by_hash() {
+        let output = concat!(
+            "\x1e1111111111111111111111111111111111111111\n",
+            "\n",
+            " 2 files changed, 7 insertions(+), 3 deletions(-)\n",
+            "\x1e2222222222222222222222222222222222222222\n",
+            "\n",
+            " 1 file changed, 4 deletions(-)\n",
+            "\x1e3333333333333333333333333333333333333333\n",
+        );
+
+        let stats = parse_commit_stats_output(output);
+
+        let first = stats
+            .get("1111111111111111111111111111111111111111")
+            .unwrap();
+        assert_eq!(first.files_changed, 2);
+        assert_eq!(first.insertions, 7);
+        assert_eq!(first.deletions, 3);
+
+        let second = stats
+            .get("2222222222222222222222222222222222222222")
+            .unwrap();
+        assert_eq!(second.files_changed, 1);
+        assert_eq!(second.insertions, 0);
+        assert_eq!(second.deletions, 4);
+
+        let empty = stats
+            .get("3333333333333333333333333333333333333333")
+            .unwrap();
+        assert_eq!(empty.files_changed, 0);
+        assert_eq!(empty.insertions, 0);
+        assert_eq!(empty.deletions, 0);
     }
 }
 
@@ -666,6 +705,36 @@ impl GitCommands {
         }
         Ok(parse_shortstat(&result.stdout))
     }
+
+    /// Fetch shortstats for several commits in one Git process.
+    ///
+    /// `--no-walk=unsorted` treats every supplied hash as an independent
+    /// commit (rather than walking history) and preserves argument order. A
+    /// record-separator marker makes the shortstat belonging to each commit
+    /// unambiguous without asking Git to render patches.
+    pub fn commit_stats(&self, hashes: &[String]) -> Result<HashMap<String, CommitStat>> {
+        if hashes.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut command = self.git().args(&[
+            "log",
+            "--no-walk=unsorted",
+            "--shortstat",
+            "--format=%x1e%H",
+        ]);
+        for hash in hashes {
+            command = command.arg(hash);
+        }
+
+        let result = command.run_expecting_success()?;
+
+        let mut stats = parse_commit_stats_output(&result.stdout);
+        for hash in hashes {
+            stats.entry(hash.clone()).or_default();
+        }
+        Ok(stats)
+    }
 }
 
 fn parse_commit_details_output(output: &str) -> (String, CommitStat) {
@@ -696,6 +765,20 @@ fn parse_shortstat(output: &str) -> CommitStat {
         }
     }
     stat
+}
+
+fn parse_commit_stats_output(output: &str) -> HashMap<String, CommitStat> {
+    let mut stats = HashMap::new();
+    for record in output.split('\x1e').skip(1) {
+        let record = record.trim_start_matches(|c| c == '\r' || c == '\n');
+        let Some(hash) = record.lines().next() else {
+            continue;
+        };
+        if !hash.is_empty() {
+            stats.insert(hash.to_string(), parse_shortstat(record));
+        }
+    }
+    stats
 }
 
 fn extract_tags(decoration: &str) -> Vec<String> {

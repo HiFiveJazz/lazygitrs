@@ -236,6 +236,8 @@ const COMMIT_STAT_PREFETCH_AHEAD: usize = 6;
 const COMMIT_STAT_PREFETCH_BEHIND: usize = 2;
 const COMMIT_STAT_PREFETCH_INFLIGHT_MAX: usize = 4;
 const COMMIT_STAT_PREFETCH_WORKERS: usize = 2;
+const COMMIT_STAT_PREFETCH_BATCH_MAX: usize = 4;
+const COMMIT_STAT_PREFETCH_BATCH_WAIT: Duration = Duration::from_millis(2);
 const FETCH_MODEL_PART_COUNT: usize = 5;
 const PERIODIC_MODEL_PART_COUNT: usize = 2;
 
@@ -391,6 +393,10 @@ struct RemoteOpCompletion {
     /// None means the operation does not use ref-change short-circuiting or
     /// the pre-operation snapshot could not be captured.
     refs_changed: Option<bool>,
+    /// For pull, whether the checked-out commit itself moved. A pull can fetch
+    /// updated remote refs while leaving HEAD unchanged; in that case the
+    /// lighter fetch refresh is sufficient and avoids rescanning the worktree.
+    head_changed: Option<bool>,
 }
 
 struct DiffJob {
@@ -707,7 +713,6 @@ fn spawn_diff_prefetch_workers(
 struct CommitStatPrefetchJob {
     generation: u64,
     hash: String,
-    git: Arc<GitCommands>,
 }
 
 struct CommitStatPrefetchResult {
@@ -719,24 +724,61 @@ struct CommitStatPrefetchResult {
 fn spawn_commit_stat_prefetch_workers(
     rx: mpsc::Receiver<CommitStatPrefetchJob>,
     result_tx: mpsc::Sender<CommitStatPrefetchResult>,
+    git: Arc<GitCommands>,
 ) {
     let rx = Arc::new(Mutex::new(rx));
     for _ in 0..COMMIT_STAT_PREFETCH_WORKERS {
         let rx = Arc::clone(&rx);
         let result_tx = result_tx.clone();
+        let git = Arc::clone(&git);
         std::thread::spawn(move || {
             loop {
-                let job = match rx.lock() {
-                    Ok(guard) => guard.recv(),
+                let jobs = match rx.lock() {
+                    Ok(guard) => {
+                        let Ok(first) = guard.recv() else { return };
+                        let mut jobs = vec![first];
+                        // The UI enqueues neighboring hashes back-to-back. Give
+                        // that burst a tiny coalescing window so a worker that
+                        // wakes on the first send does not immediately launch a
+                        // one-hash Git process before the rest reach the queue.
+                        if jobs.len() < COMMIT_STAT_PREFETCH_BATCH_MAX {
+                            match guard.recv_timeout(COMMIT_STAT_PREFETCH_BATCH_WAIT) {
+                                Ok(job) => jobs.push(job),
+                                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                                Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                            }
+                        }
+                        while jobs.len() < COMMIT_STAT_PREFETCH_BATCH_MAX {
+                            match guard.try_recv() {
+                                Ok(job) => jobs.push(job),
+                                Err(mpsc::TryRecvError::Empty) => break,
+                                Err(mpsc::TryRecvError::Disconnected) => break,
+                            }
+                        }
+                        jobs
+                    }
                     Err(_) => return,
                 };
-                let Ok(job) = job else { return };
-                let result = job.git.commit_stat(&job.hash);
-                let _ = result_tx.send(CommitStatPrefetchResult {
-                    generation: job.generation,
-                    hash: job.hash,
-                    result,
-                });
+
+                let hashes = jobs
+                    .iter()
+                    .map(|job| job.hash.clone())
+                    .collect::<Vec<_>>();
+                let batch = git.commit_stats(&hashes);
+
+                for job in jobs {
+                    let result = match &batch {
+                        Ok(stats) => Ok(stats.get(&job.hash).copied().unwrap_or_default()),
+                        // Preserve the old behavior if the batched command could
+                        // not even be launched/read for some unusual reason.
+                        Err(_) => git.commit_stat(&job.hash),
+                    };
+                    let _ = result_tx.send(CommitStatPrefetchResult {
+                        generation: job.generation,
+                        hash: job.hash,
+                        result,
+                    });
+                }
             }
         });
     }
@@ -1359,6 +1401,7 @@ impl Gui {
         spawn_commit_stat_prefetch_workers(
             commit_stat_prefetch_job_rx,
             commit_stat_prefetch_result_tx,
+            Arc::clone(&git),
         );
         spawn_latest_background_worker(commit_details_job_rx);
         // Compile tree-sitter highlight queries off the critical path so the
@@ -2846,7 +2889,6 @@ impl Gui {
             let job = CommitStatPrefetchJob {
                 generation: self.commit_stat_prefetch_generation,
                 hash: hash.clone(),
-                git: Arc::clone(&self.git),
             };
             if self.commit_stat_prefetch_tx.send(job).is_err() {
                 self.commit_stat_prefetch_inflight.remove(&hash);
@@ -3461,14 +3503,26 @@ impl Gui {
                         }
                         RemoteOpKind::Pull => {
                             // If neither HEAD nor any ref moved, the pull cannot
-                            // have changed the global commit model.
-                            // Avoid the ~O(global graph) --all topo walk entirely.
-                            if completion.refs_changed != Some(false)
-                                && !self.start_background_pull_refresh()
-                            {
-                                // Another model refresh is already in flight. Queue the
-                                // normal refresh rather than risk leaving stale state.
-                                self.needs_refresh = true;
+                            // have changed the global commit model. Avoid the
+                            // ~O(global graph) --all topo walk entirely.
+                            if completion.refs_changed != Some(false) {
+                                // `git pull` fetches before it integrates. It can
+                                // therefore update remote-tracking refs while the
+                                // checked-out commit stays put (for example when
+                                // only another remote branch advanced). In that
+                                // case no worktree/reflog/submodule refresh is
+                                // needed; the existing fetch refresh is enough.
+                                let started = if completion.head_changed == Some(false) {
+                                    self.start_background_fetch_refresh()
+                                } else {
+                                    self.start_background_pull_refresh()
+                                };
+
+                                if !started {
+                                    // Another model refresh is already in flight. Queue the
+                                    // normal refresh rather than risk leaving stale state.
+                                    self.needs_refresh = true;
+                                }
                             }
                         }
                         RemoteOpKind::Fetch => {
@@ -3895,13 +3949,26 @@ impl Gui {
                 } else {
                     None
                 };
-                let refs_changed = before_refs.as_ref().map(|before| {
-                    git.ref_snapshot()
-                        .map(|after| after != *before)
-                        .unwrap_or(true)
-                });
+                let (refs_changed, head_changed) = if let Some(before) = before_refs.as_ref() {
+                    match git.ref_snapshot() {
+                        Ok(after) => (
+                            Some(after != *before),
+                            matches!(kind, RemoteOpKind::Pull)
+                                .then_some(after.head != before.head),
+                        ),
+                        // Preserve the existing conservative behavior when the
+                        // post-operation snapshot cannot be read.
+                        Err(_) => (Some(true), None),
+                    }
+                } else {
+                    (None, None)
+                };
 
-                RemoteOpCompletion { head, refs_changed }
+                RemoteOpCompletion {
+                    head,
+                    refs_changed,
+                    head_changed,
+                }
             });
 
             let _ = tx.send((kind, result));
@@ -11684,13 +11751,12 @@ mod terminal_mouse_tests {
         let git = Arc::new(crate::git::GitCommands::new(repo.path()).unwrap());
         let (job_tx, job_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
-        spawn_commit_stat_prefetch_workers(job_rx, result_tx);
+        spawn_commit_stat_prefetch_workers(job_rx, result_tx, Arc::clone(&git));
 
         job_tx
             .send(CommitStatPrefetchJob {
                 generation: 7,
                 hash: hash.clone(),
-                git,
             })
             .unwrap();
 
@@ -13088,6 +13154,7 @@ mod terminal_mouse_tests {
                 Ok(RemoteOpCompletion {
                     head: None,
                     refs_changed: Some(true),
+                    head_changed: None,
                 }),
             ))
             .unwrap();
@@ -13193,6 +13260,7 @@ mod terminal_mouse_tests {
                 Ok(RemoteOpCompletion {
                     head: None,
                     refs_changed: Some(true),
+                    head_changed: Some(true),
                 }),
             ))
             .unwrap();
@@ -13222,6 +13290,46 @@ mod terminal_mouse_tests {
     }
 
     #[test]
+    fn pull_with_remote_ref_changes_but_unchanged_head_uses_fetch_refresh() {
+        let repo = TempRepo::new("pull-unchanged-head-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.remote_op_label = Some("Pulling".into());
+        gui.remote_op_tx
+            .send((
+                RemoteOpKind::Pull,
+                Ok(RemoteOpCompletion {
+                    head: None,
+                    refs_changed: Some(true),
+                    head_changed: Some(false),
+                }),
+            ))
+            .unwrap();
+        gui.receive_remote_op_results();
+
+        assert!(!gui.needs_refresh);
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, FETCH_MODEL_PART_COUNT);
+
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+
+        assert_eq!(parts.len(), FETCH_MODEL_PART_COUNT);
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Files(_))));
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::DiffStats { .. }))
+        );
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Reflog(_))));
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Submodules(_)))
+        );
+    }
+
+    #[test]
     fn successful_checkout_without_head_metadata_still_refreshes() {
         let repo = TempRepo::new("checkout-metadata-fallback");
         let mut gui = checkout_test_gui(&repo);
@@ -13234,6 +13342,7 @@ mod terminal_mouse_tests {
                 Ok(RemoteOpCompletion {
                     head: None,
                     refs_changed: None,
+                    head_changed: None,
                 }),
             ))
             .unwrap();

@@ -19,8 +19,9 @@
 //! 3. On exit, restore Helix as foreground and `SIGCONT` it — and do **not**
 //!    leave the alt-screen / disable raw mode / drop mouse: Helix still owns
 //!    those for the rest of the session.
-//! 4. Build with crossterm `use-dev-tty` so input is readable from `/dev/tty`
-//!    under Helix's redirected stdio.
+//! 4. On macOS, build with crossterm `use-dev-tty` so input is readable from
+//!    `/dev/tty` under Helix's redirected stdio. Linux keeps crossterm's mio
+//!    backend; it does not need this workaround.
 
 use std::fmt;
 use std::io::{self, IsTerminal, Write};

@@ -487,8 +487,9 @@ impl GitCommands {
                 return;
             }
 
+            let mut diff_totals = None;
             if include_file_stats && has_tracked_changes {
-                git.populate_file_diff_stats(&mut files);
+                diff_totals = git.populate_file_diff_stats(&mut files);
                 if tx.send(ModelPart::FileStats(files)).is_err() {
                     trim_if_abandoned();
                     return;
@@ -521,7 +522,15 @@ impl GitCommands {
                 return;
             }
 
-            if let Ok((added, deleted)) = git.diff_shortstat()
+            // A full file-stat load already ran `git diff --numstat`; sum those
+            // exact results rather than launching another full-tree
+            // `git diff HEAD --shortstat`. Status-only refresh paths still use
+            // shortstat because they intentionally skipped numstat enrichment.
+            if let Some((added, deleted)) = diff_totals {
+                if tx.send(ModelPart::DiffStats { added, deleted }).is_err() {
+                    trim_if_abandoned();
+                }
+            } else if let Ok((added, deleted)) = git.diff_shortstat()
                 && tx.send(ModelPart::DiffStats { added, deleted }).is_err()
             {
                 trim_if_abandoned();

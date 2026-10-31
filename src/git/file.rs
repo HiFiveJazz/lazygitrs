@@ -14,7 +14,7 @@ impl GitCommands {
         // worktree has nothing to enrich. Avoid two full-tree `git diff`
         // subprocesses in both cases.
         if files.iter().any(|file| file.tracked) {
-            self.populate_file_diff_stats(&mut files);
+            let _ = self.populate_file_diff_stats(&mut files);
         }
         Ok(files)
     }
@@ -89,7 +89,12 @@ impl GitCommands {
     /// Populate final working-tree stats relative to HEAD. Failures are
     /// intentionally non-fatal: status remains useful even when a diff cannot
     /// be produced (for example, during unusual index states).
-    pub(super) fn populate_file_diff_stats(&self, files: &mut [File]) {
+    ///
+    /// When the numstat query succeeds, also return its aggregate
+    /// insertions/deletions. This is exactly the information a separate
+    /// `git diff --shortstat` would compute, so callers doing a full file load
+    /// can reuse the work instead of walking the worktree twice.
+    pub(super) fn populate_file_diff_stats(&self, files: &mut [File]) -> Option<(usize, usize)> {
         let diff_base = if self.head_state().is_ok() {
             vec!["--literal-pathspecs".to_string(), "diff".to_string(), "HEAD".to_string()]
         } else {
@@ -137,8 +142,16 @@ impl GitCommands {
         };
 
         let line_stats = run(&["--numstat", "-z", "--find-renames", "--no-color"])
-            .map(|output| parse_numstat_z(&output))
-            .unwrap_or_default();
+            .map(|output| parse_numstat_z(&output));
+        let totals = line_stats.as_ref().map(|stats| {
+            stats
+                .values()
+                .copied()
+                .fold((0usize, 0usize), |(added, deleted), (a, d)| {
+                    (added + a, deleted + d)
+                })
+        });
+        let line_stats = line_stats.unwrap_or_default();
         let hunk_counts = run(&["--unified=0", "--find-renames", "--no-color", "--no-prefix"])
             .map(|output| parse_hunk_counts(&output))
             .unwrap_or_default();
@@ -157,6 +170,8 @@ impl GitCommands {
             }
             file.hunk_count = hunk_counts.get(&path).copied().unwrap_or(0);
         }
+
+        totals
     }
 
     pub fn stage_file(&self, path: &str) -> Result<()> {

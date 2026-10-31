@@ -201,7 +201,14 @@ impl GitCommands {
     }
 
     pub fn pull(&self) -> Result<()> {
-        self.git().args(&["pull"]).run_expecting_success()?;
+        // Successful pull output is not shown by the TUI. Suppress the merge
+        // diffstat so large fast-forwards (notably the Linux kernel) do not
+        // spend time walking and formatting thousands of changed paths only
+        // for CmdBuilder to capture and discard that output. Error output is
+        // unchanged, so failed pulls still surface useful diagnostics.
+        self.git()
+            .args(&["pull", "--no-stat"])
+            .run_expecting_success()?;
         Ok(())
     }
 

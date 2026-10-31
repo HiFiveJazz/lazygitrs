@@ -11,10 +11,6 @@ license = "MIT"
 anyhow = "1.0.104"
 gix = { version = "0.90.0", default-features = false, features = ["anyhow", "parallel", "revision", "sha1", "sha256"] }
 clap = { version = "4.6.7", features = ["derive"] }
-# `use-dev-tty` switches crossterm off mio/kqueue onto filedescriptor's
-# select()-based reader. Required on macOS under Helix `:insert-output`,
-# where stdin is /dev/null so events come from /dev/tty (mio returns POLLNVAL).
-crossterm = { version = "0.29.0", features = ["use-dev-tty"] }
 dirs = "7.0.0"
 ratatui = {
     version = "0.30.2",
@@ -52,6 +48,16 @@ tui-textarea = {
 textwrap = { version = "0.16.4", default-features = false, features = ["unicode-width"] }
 libc = "0.2.191"
 strip-ansi-escapes = "0.2.1"
+
+# Keep crossterm's normal mio backend everywhere except macOS. `use-dev-tty`
+# switches to filedescriptor's select()-based reader and is only needed there
+# for Helix `:insert-output`, where stdin is /dev/null and mio/kqueue reports
+# POLLNVAL for /dev/tty.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+crossterm = "0.29.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { version = "0.29.0", features = ["use-dev-tty"] }
 
 [profile.release]
 codegen-units = 1
