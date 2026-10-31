@@ -21,17 +21,6 @@ pub(crate) struct RefSnapshot {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct BranchRead {
-    pub name: String,
-    pub hash: String,
-    pub commit_time: i64,
-    pub ahead: usize,
-    pub behind: usize,
-    pub upstream: Option<String>,
-    pub head: bool,
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct RemoteBranchRead {
     pub name: String,
     pub remote_name: String,
@@ -374,57 +363,6 @@ impl ReadRepository {
         Ok(RefSnapshot { head, refs })
     }
 
-    pub fn branches(&self) -> Result<Vec<BranchRead>> {
-        let repo = self.open_for_read()?;
-        let head_name = repo
-            .head()?
-            .referent_name()
-            .map(|name| name.shorten().to_string());
-        let mut branches = Vec::new();
-
-        for reference in repo.references()?.local_branches()?.peeled()? {
-            let mut reference = reference?;
-            let name = reference.name().shorten().to_string();
-            let commit = reference.peel_to_commit()?;
-            let local_id = commit.id;
-            let commit_time = commit.time()?.seconds;
-
-            let mut upstream = None;
-            let mut ahead = 0usize;
-            let mut behind = 0usize;
-            if let Some(upstream_name) = reference
-                .remote_tracking_ref_name(gix::remote::Direction::Fetch)
-                .transpose()?
-            {
-                upstream = Some(upstream_name.shorten().to_string());
-                if let Some(mut upstream_ref) = repo.try_find_reference(upstream_name.as_ref())? {
-                    if let Ok(upstream_commit) = upstream_ref.peel_to_commit() {
-                        let upstream_id = upstream_commit.id;
-                        ahead = rev_walk_count(&repo, local_id, Some(upstream_id))?;
-                        behind = rev_walk_count(&repo, upstream_id, Some(local_id))?;
-                    }
-                }
-            }
-
-            branches.push(BranchRead {
-                name: name.clone(),
-                hash: commit.short_id()?.to_string(),
-                commit_time,
-                ahead,
-                behind,
-                upstream,
-                head: head_name.as_deref() == Some(name.as_str()),
-            });
-        }
-
-        branches.sort_by(|a, b| b.commit_time.cmp(&a.commit_time));
-        if let Some(index) = branches.iter().position(|branch| branch.head) {
-            let head = branches.remove(index);
-            branches.insert(0, head);
-        }
-        Ok(branches)
-    }
-
     pub fn unpushed_commit_hashes(&self) -> Result<Vec<String>> {
         let repo = self.open_for_read()?;
         let mut head_ref = match repo.head_ref()? {
@@ -631,22 +569,4 @@ impl ReadRepository {
         }
         Ok(out)
     }
-}
-
-fn rev_walk_count(
-    repo: &gix::Repository,
-    tip: gix::ObjectId,
-    hidden: Option<gix::ObjectId>,
-) -> Result<usize> {
-    let platform = repo.rev_walk([tip]);
-    let walk = match hidden {
-        Some(hidden) => platform.with_hidden([hidden]).all()?,
-        None => platform.all()?,
-    };
-    let mut count = 0usize;
-    for item in walk {
-        item?;
-        count += 1;
-    }
-    Ok(count)
 }

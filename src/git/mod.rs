@@ -34,6 +34,9 @@ pub enum ModelPart {
     Files(Vec<model::File>),
     Branches(Vec<model::Branch>),
     Commits(Vec<model::Commit>),
+    /// Commit hashes currently ahead of the configured upstream. Commit rows are
+    /// streamed first; this follow-up only decorates them as pushed/unpushed.
+    UnpushedCommitHashes(Vec<String>),
     Stash(Vec<model::StashEntry>),
     Remotes(Vec<model::Remote>),
     Tags(Vec<model::Tag>),
@@ -68,7 +71,7 @@ pub enum ModelPart {
 pub const DEFAULT_COMMIT_LIMIT: usize = 300;
 
 /// Total number of `ModelPart` variants that `load_model_streaming` sends.
-pub const MODEL_PART_COUNT: usize = 14;
+pub const MODEL_PART_COUNT: usize = 15;
 
 /// Confirmed HEAD identity, read after a successful checkout.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,6 +297,40 @@ impl GitCommands {
         CmdBuilder::git().cwd_path(&self.repo_path)
     }
 
+    /// Stream commit rows before computing their pushed/unpushed decoration.
+    ///
+    /// On large repositories the upstream-only revision walk can take hundreds
+    /// of milliseconds. It must not sit in front of the main commit-log query,
+    /// because the UI can render useful commit rows immediately and apply the
+    /// status decoration afterward. Sending both parts from the same worker
+    /// preserves their order on the channel.
+    fn stream_commits_then_unpushed(
+        self: &Arc<Self>,
+        tx: &mpsc::Sender<ModelPart>,
+        commit_filter: Option<crate::git::commit::CommitFilter>,
+    ) {
+        let tx = tx.clone();
+        let git = Arc::clone(self);
+        std::thread::spawn(move || {
+            let commits = match commit_filter {
+                Some(filter) => {
+                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
+                }
+                None => git.load_commits_page(DEFAULT_COMMIT_LIMIT, 0),
+            };
+
+            let Ok(commits) = commits else {
+                return;
+            };
+            if tx.send(ModelPart::Commits(commits)).is_err() {
+                return;
+            }
+
+            let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
+            let _ = tx.send(ModelPart::UnpushedCommitHashes(unpushed));
+        });
+    }
+
     /// Load all model data from the repository.
     ///
     /// Git commands are run in parallel using scoped threads since they are
@@ -449,22 +486,7 @@ impl GitCommands {
         // shortstat against the same status/diff work.
         self.stream_files_then_diff_stats(tx, true, false);
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
-        if let Some(filter) = commit_filter {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-            std::thread::spawn(move || {
-                let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
-                if let Ok(mut commits) =
-                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
-                {
-                    Self::apply_unpushed_status(&mut commits, &unpushed);
-                    let _ = tx.send(ModelPart::Commits(commits));
-                }
-            });
-        } else {
-            spawn_part!(tx, self, Commits, |g: &GitCommands| g
-                .load_commits(DEFAULT_COMMIT_LIMIT));
-        }
+        self.stream_commits_then_unpushed(tx, commit_filter);
         spawn_part!(tx, self, Stash, |g: &GitCommands| g.load_stash());
         spawn_part!(tx, self, Remotes, |g: &GitCommands| g.load_remotes());
         spawn_part!(tx, self, Tags, |g: &GitCommands| g.load_tags());
@@ -566,23 +588,7 @@ impl GitCommands {
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
 
         // The commits panel walks all refs, so newly fetched history must appear.
-        if let Some(filter) = commit_filter {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-            std::thread::spawn(move || {
-                let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
-                if let Ok(mut commits) =
-                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
-                {
-                    Self::apply_unpushed_status(&mut commits, &unpushed);
-                    let _ = tx.send(ModelPart::Commits(commits));
-                }
-            });
-        } else {
-            spawn_part!(tx, self, Commits, |g: &GitCommands| {
-                g.load_commits(DEFAULT_COMMIT_LIMIT)
-            });
-        }
+        self.stream_commits_then_unpushed(tx, commit_filter);
 
         // Remote-tracking branches can change.
         spawn_part!(tx, self, Remotes, |g: &GitCommands| g.load_remotes());
@@ -632,23 +638,7 @@ impl GitCommands {
 
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
 
-        if let Some(filter) = commit_filter {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-            std::thread::spawn(move || {
-                let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
-                if let Ok(mut commits) =
-                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
-                {
-                    Self::apply_unpushed_status(&mut commits, &unpushed);
-                    let _ = tx.send(ModelPart::Commits(commits));
-                }
-            });
-        } else {
-            spawn_part!(tx, self, Commits, |g: &GitCommands| {
-                g.load_commits(DEFAULT_COMMIT_LIMIT)
-            });
-        }
+        self.stream_commits_then_unpushed(tx, commit_filter);
 
         spawn_part!(tx, self, Remotes, |g: &GitCommands| g.load_remotes());
 
@@ -764,9 +754,9 @@ impl GitCommands {
                 });
             }
 
-            let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
-            GitCommands::apply_unpushed_status(&mut commits, &unpushed);
             send_or_abandon!(ModelPart::Commits(commits));
+            let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
+            send_or_abandon!(ModelPart::UnpushedCommitHashes(unpushed));
 
             if let Ok(worktrees) = git
                 .load_worktrees()
@@ -827,25 +817,7 @@ impl GitCommands {
 
         // Unlike checkout, commits/rewords/amends/rebases actually change the
         // commit graph, so reload the current commit page.
-        if let Some(filter) = commit_filter {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-
-            std::thread::spawn(move || {
-                let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
-
-                if let Ok(mut commits) =
-                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
-                {
-                    Self::apply_unpushed_status(&mut commits, &unpushed);
-                    let _ = tx.send(ModelPart::Commits(commits));
-                }
-            });
-        } else {
-            spawn_part!(tx, self, Commits, |g: &GitCommands| {
-                g.load_commits(DEFAULT_COMMIT_LIMIT)
-            });
-        }
+        self.stream_commits_then_unpushed(tx, commit_filter);
 
         spawn_part!(tx, self, Worktrees, |g: &GitCommands| {
             g.load_worktrees()

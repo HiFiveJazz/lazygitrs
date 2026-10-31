@@ -218,7 +218,7 @@ const COMMIT_STAT_PREFETCH_AHEAD: usize = 6;
 const COMMIT_STAT_PREFETCH_BEHIND: usize = 2;
 const COMMIT_STAT_PREFETCH_INFLIGHT_MAX: usize = 4;
 const COMMIT_STAT_PREFETCH_WORKERS: usize = 2;
-const FETCH_MODEL_PART_COUNT: usize = 4;
+const FETCH_MODEL_PART_COUNT: usize = 5;
 const PERIODIC_MODEL_PART_COUNT: usize = 2;
 
 fn plain_char_key(key: KeyEvent, expected: char) -> bool {
@@ -1681,6 +1681,10 @@ impl Gui {
                             // (`load_model_streaming(commit_filter)`), so always take it.
                             self.commit_history_complete = v.len() < DEFAULT_COMMIT_LIMIT;
                             model.set_commits(v);
+                        }
+                        ModelPart::UnpushedCommitHashes(hashes) => {
+                            GitCommands::apply_unpushed_status(&mut model.commits, &hashes);
+                            model.commits_revision = model.commits_revision.wrapping_add(1);
                         }
                         ModelPart::Stash(v) => model.stash_entries = v,
                         ModelPart::Remotes(v) => model.remotes = v,

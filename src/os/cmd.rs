@@ -1,8 +1,63 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
+
+static GIT_PROGRAM: OnceLock<String> = OnceLock::new();
+
+fn git_program() -> &'static str {
+    GIT_PROGRAM.get_or_init(resolve_git_program).as_str()
+}
+
+fn resolve_git_program() -> String {
+    let Some(path) = std::env::var_os("PATH") else {
+        return "git".to_string();
+    };
+
+    for dir in std::env::split_paths(&path) {
+        let candidate = git_candidate(&dir);
+        if is_executable_file(&candidate) {
+            return candidate
+                .canonicalize()
+                .unwrap_or(candidate)
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+
+    "git".to_string()
+}
+
+#[cfg(windows)]
+fn git_candidate(dir: &Path) -> PathBuf {
+    dir.join("git.exe")
+}
+
+#[cfg(not(windows))]
+fn git_candidate(dir: &Path) -> PathBuf {
+    dir.join("git")
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
 
 /// Detach a child from the controlling terminal and keep it non-interactive.
 ///
@@ -120,7 +175,7 @@ impl CmdBuilder {
     }
 
     pub fn git() -> Self {
-        Self::new("git")
+        Self::new(git_program())
     }
 
     pub fn git_no_optional_locks() -> Self {
@@ -215,6 +270,11 @@ impl CmdBuilder {
     }
 
     pub fn description(&self) -> String {
-        format!("{} {}", self.program, self.args.join(" "))
+        let program = if self.program == git_program() {
+            "git"
+        } else {
+            self.program.as_str()
+        };
+        format!("{} {}", program, self.args.join(" "))
     }
 }
