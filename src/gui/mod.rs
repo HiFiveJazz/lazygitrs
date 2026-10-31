@@ -503,6 +503,17 @@ impl DiffPreviewCache {
         self.entries.clear();
         self.estimated_bytes = 0;
     }
+
+    /// Drop cached previews whose keys share a mutable-source prefix.
+    ///
+    /// Files previews are keyed by path for fast revisits, but their contents
+    /// can change without the path changing (stage/unstage, hunk edits, etc.).
+    /// Removing them when an authoritative file-status snapshot arrives keeps
+    /// an old working-tree preview from being restored after the index changed.
+    fn remove_prefix(&mut self, prefix: &str) {
+        self.entries.retain(|entry| !entry.key.starts_with(prefix));
+        self.estimated_bytes = self.entries.iter().map(|entry| entry.estimated_bytes).sum();
+    }
 }
 
 fn estimate_diff_view_bytes(view: &DiffViewState) -> usize {
@@ -1868,11 +1879,17 @@ impl Gui {
                 {
                     self.sync_rebase_progress_view();
                 }
-                // Rebuild file tree if files arrived this frame.
-                if got_files && self.show_file_tree {
-                    let model = self.model.lock().unwrap();
-                    self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
-                    self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
+                // Rebuild file tree if files arrived this frame. Any new
+                // authoritative Files snapshot also invalidates path-keyed
+                // working-tree previews: staging can change a diff without
+                // changing its filename.
+                if got_files {
+                    self.invalidate_files_diff_previews();
+                    if self.show_file_tree {
+                        let model = self.model.lock().unwrap();
+                        self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
+                        self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
+                    }
                 }
                 // Only invalidate the preview when the model data that backs the
                 // active diff actually changed. FileStats, DiffStats, branch/tag
@@ -2798,6 +2815,19 @@ impl Gui {
     pub(crate) fn clear_diff_view(&mut self) {
         self.stash_displayed_diff();
         self.diff_view.reset_keep_prefs();
+    }
+
+    /// Invalidate cached previews backed by the mutable Files/index state.
+    ///
+    /// Keep the current pixels visible until the replacement arrives, but clear
+    /// their cache identity so `apply_diff_payload()` cannot stash that stale
+    /// view after a stage/unstage refresh. This prevents an old `Unstaged`
+    /// preview from being resurrected when revisiting a staged file.
+    fn invalidate_files_diff_previews(&mut self) {
+        self.diff_preview_cache.remove_prefix("Files:");
+        if self.displayed_diff_key.starts_with("Files:") {
+            self.displayed_diff_key.clear();
+        }
     }
 
     /// Speculatively warm the preview cache with diffs the user is likely to
@@ -4103,6 +4133,7 @@ impl Gui {
                         self.context_mgr.files_list_len_override = None;
                     }
                     drop(model);
+                    self.invalidate_files_diff_previews();
                     self.needs_diff_refresh = true;
                 }
                 Ok(_) => {}
@@ -4142,6 +4173,7 @@ impl Gui {
                         self.context_mgr.files_list_len_override = None;
                     }
                 }
+                self.invalidate_files_diff_previews();
                 // If more stage ops landed while we were refreshing, do another.
                 if self.needs_files_refresh {
                     self.start_files_refresh_async();
@@ -13087,6 +13119,44 @@ mod terminal_mouse_tests {
         assert!(!cache.contains("Files:file:a.rs"));
         let expected: usize = cache.entries.iter().map(|e| e.estimated_bytes).sum();
         assert_eq!(cache.estimated_bytes, expected);
+    }
+
+    #[test]
+    fn file_status_refresh_invalidates_stale_files_previews() {
+        let repo = TempRepo::new("files-preview-invalidation");
+        let mut gui = tree_test_gui(&repo);
+
+        let mut stale_file = DiffViewState::new();
+        stale_file.load("src/deep/a.txt", "base\n", "changed\n");
+        gui.diff_preview_cache
+            .insert("Files:file:src/deep/a.txt".into(), stale_file);
+
+        let mut stale_dir = DiffViewState::new();
+        stale_dir.load("src", "base\n", "changed\n");
+        gui.diff_preview_cache
+            .insert("Files:dir:src".into(), stale_dir);
+
+        let mut immutable_commit = DiffViewState::new();
+        immutable_commit.load("commit.txt", "old\n", "new\n");
+        gui.diff_preview_cache
+            .insert("Commits:deadbeef".into(), immutable_commit);
+
+        // Simulate the stale Files preview that is still visible while the
+        // newly-selected file is loading. Once status refreshes, it must not
+        // be stashed back into the revisit cache under its old identity.
+        gui.displayed_diff_key = "Files:file:src/deep/b.txt".into();
+        gui.diff_view.load("src/deep/b.txt", "base\n", "changed\n");
+
+        gui.invalidate_files_diff_previews();
+
+        assert!(!gui.diff_preview_cache.contains("Files:file:src/deep/a.txt"));
+        assert!(!gui.diff_preview_cache.contains("Files:dir:src"));
+        assert!(gui.diff_preview_cache.contains("Commits:deadbeef"));
+        assert!(gui.displayed_diff_key.is_empty());
+        assert!(!gui.diff_view.is_empty());
+
+        gui.stash_displayed_diff();
+        assert!(!gui.diff_preview_cache.contains("Files:file:src/deep/b.txt"));
     }
 
     #[test]
