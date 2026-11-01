@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::config::theme::mix_colors;
 use crate::config::{AppConfig, KeybindingConfig, Theme};
 use crate::model::Model;
 use crate::model::commit::{Commit, CommitStat};
@@ -4240,6 +4241,166 @@ fn render_email_send_confirmation(
     );
 }
 
+fn commit_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn commit_body_viewport_top(
+    textarea: &tui_textarea::TextArea<'static>,
+    requested_top: usize,
+    visible_rows: usize,
+) -> usize {
+    let visible_rows = visible_rows.max(1);
+    let line_count = textarea.lines().len().max(1);
+    let max_top = line_count.saturating_sub(visible_rows);
+    let cursor_row = textarea.cursor().0.min(line_count.saturating_sub(1));
+    let mut top = requested_top.min(max_top);
+
+    // Ordinary Vim motions are allowed to pull the viewport back to the cursor.
+    // Neoscroll updates `requested_top` and the cursor together, so while an
+    // animation is running this simply preserves the explicitly tracked view.
+    if cursor_row < top {
+        top = cursor_row;
+    } else if cursor_row >= top.saturating_add(visible_rows) {
+        top = cursor_row
+            .saturating_add(1)
+            .saturating_sub(visible_rows)
+            .min(max_top);
+    }
+    top
+}
+
+/// Build a display-only textarea starting at an explicitly tracked visual row.
+///
+/// The source textarea remains the editor state; this clone owns no persistent
+/// viewport state. That makes smooth scrolling deterministic instead of relying
+/// on tui-textarea's internal cursor-following scroll offset.
+fn commit_body_viewport(
+    textarea: &tui_textarea::TextArea<'static>,
+    top: usize,
+) -> tui_textarea::TextArea<'static> {
+    let lines = textarea.lines();
+    let top = top.min(lines.len().saturating_sub(1));
+    let (cursor_row, cursor_col) = textarea.cursor();
+    let relative_cursor = (cursor_row.saturating_sub(top), cursor_col);
+
+    let mut view = textarea.clone();
+    view.set_lines(lines[top..].to_vec(), relative_cursor);
+
+    // `set_lines` intentionally clears content-local state. Recreate a visual
+    // selection in viewport-relative coordinates so explicit scrolling does not
+    // break Vim characterwise/linewise highlighting.
+    if let Some((start, end)) = textarea.selection_range() {
+        let translate = |(row, col): (usize, usize)| {
+            if row < top {
+                (0usize, 0usize)
+            } else {
+                (row - top, col)
+            }
+        };
+        let cursor_is_start = textarea.cursor() == start;
+        let start = translate(start);
+        let end = translate(end);
+        view.cancel_selection();
+        if cursor_is_start {
+            view.move_cursor(tui_textarea::CursorMove::Jump(end.0 as u16, end.1 as u16));
+            view.start_selection();
+            view.move_cursor(tui_textarea::CursorMove::Jump(start.0 as u16, start.1 as u16));
+        } else {
+            view.move_cursor(tui_textarea::CursorMove::Jump(start.0 as u16, start.1 as u16));
+            view.start_selection();
+            view.move_cursor(tui_textarea::CursorMove::Jump(end.0 as u16, end.1 as u16));
+        }
+    }
+    view
+}
+
+/// Paint a subtle Illuminate-style background behind every visible occurrence
+/// of the word under the Normal-mode cursor. This is applied directly to the
+/// rendered buffer so it composes with the active-line background without
+/// disturbing TextArea selections or Eyeliner's temporary foreground colors.
+fn highlight_commit_word_occurrences(
+    frame: &mut Frame,
+    textarea: &tui_textarea::TextArea<'static>,
+    area: Rect,
+    background: Color,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (cursor_row, cursor_col) = textarea.cursor();
+    let Some(cursor_line) = textarea.lines().get(cursor_row) else {
+        return;
+    };
+    let chars: Vec<char> = cursor_line.chars().collect();
+    if cursor_col >= chars.len() || !commit_word_char(chars[cursor_col]) {
+        return;
+    }
+
+    let mut word_start = cursor_col;
+    while word_start > 0 && commit_word_char(chars[word_start - 1]) {
+        word_start -= 1;
+    }
+    let mut word_end = cursor_col + 1;
+    while word_end < chars.len() && commit_word_char(chars[word_end]) {
+        word_end += 1;
+    }
+    let word: String = chars[word_start..word_end].iter().collect();
+    if word.is_empty() {
+        return;
+    }
+
+    let Some(rendered_cursor) = textarea.rendered_cursor_position() else {
+        return;
+    };
+    let viewport_top = cursor_row.saturating_sub(
+        rendered_cursor
+            .y
+            .saturating_sub(area.y) as usize,
+    );
+
+    for visible_row in 0..area.height as usize {
+        let row = viewport_top + visible_row;
+        let Some(line) = textarea.lines().get(row) else {
+            break;
+        };
+        let line_chars: Vec<char> = line.chars().collect();
+        let mut i = 0usize;
+        while i < line_chars.len() {
+            if !commit_word_char(line_chars[i]) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < line_chars.len() && commit_word_char(line_chars[i]) {
+                i += 1;
+            }
+            let candidate: String = line_chars[start..i].iter().collect();
+            if candidate != word {
+                continue;
+            }
+
+            let prefix: String = line_chars[..start].iter().collect();
+            let matched: String = line_chars[start..i].iter().collect();
+            let x_offset = UnicodeWidthStr::width(prefix.as_str()) as u16;
+            let match_width = UnicodeWidthStr::width(matched.as_str()) as u16;
+            if x_offset >= area.width || match_width == 0 {
+                continue;
+            }
+            let width = match_width.min(area.width.saturating_sub(x_offset));
+            frame.buffer_mut().set_style(
+                Rect::new(
+                    area.x + x_offset,
+                    area.y + visible_row as u16,
+                    width,
+                    1,
+                ),
+                Style::default().bg(background),
+            );
+        }
+    }
+}
+
 pub fn render_popup(
     frame: &mut Frame,
     popup: &PopupState,
@@ -4667,7 +4828,9 @@ pub fn render_popup(
                     Span::styled("ctrl+d ", key_style),
                     Span::styled("dry-run  ", desc_style),
                     Span::styled("esc ", key_style),
-                    Span::styled("back", desc_style),
+                    Span::styled("back  ", desc_style),
+                    Span::styled("q ", key_style),
+                    Span::styled("quit", desc_style),
                 ])
             } else if recipient_editor.is_some() {
                 // The editor has its own floating footer; keep the base footer
@@ -4688,7 +4851,9 @@ pub fn render_popup(
                     Span::styled("tab ", key_style),
                     Span::styled("To/Cc  ", desc_style),
                     Span::styled("enter ", key_style),
-                    Span::styled("review", desc_style),
+                    Span::styled("review  ", desc_style),
+                    Span::styled("q ", key_style),
+                    Span::styled("quit", desc_style),
                 ])
             };
             let footer_width = inner.width.saturating_sub(mode_width.saturating_add(1));
@@ -4963,6 +5128,7 @@ pub fn render_popup(
             body_textarea,
             focus,
             mode,
+            pending_command,
             body_scroll_top,
             ..
         } => {
@@ -5053,18 +5219,37 @@ pub fn render_popup(
                     inner.width.saturating_sub(gutter_width),
                     body_height,
                 );
-                frame.render_widget(body_textarea, body_area);
+                // The commit editor owns its viewport explicitly. Rendering a
+                // fresh display-only clone from `body_scroll_top` avoids fighting
+                // tui-textarea's private cursor-following scroll state and makes
+                // Ctrl-J/K neoscroll deterministic in both directions.
+                let viewport_top = commit_body_viewport_top(
+                    body_textarea,
+                    *body_scroll_top,
+                    body_height as usize,
+                );
+                let mut body_view = commit_body_viewport(body_textarea, viewport_top);
+                if let super::popup::CommitPendingCommand::FindForward(_) = pending_command {
+                    super::popup::apply_eyeliner_highlights(
+                        &mut body_view,
+                        true,
+                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(Color::Rgb(255, 165, 0)),
+                    );
+                } else if let super::popup::CommitPendingCommand::FindBackward(_) = pending_command {
+                    super::popup::apply_eyeliner_highlights(
+                        &mut body_view,
+                        false,
+                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(Color::Rgb(255, 165, 0)),
+                    );
+                }
+                frame.render_widget(&body_view, body_area);
+                let body_for_render = &body_view;
+                let body_cursor_position = body_view.rendered_cursor_position();
 
                 if body_height > 0 && gutter_width > 0 {
                     let cursor_row = body_textarea.cursor().0;
-                    let viewport_top = body_textarea
-                        .rendered_cursor_position()
-                        .map(|position| {
-                            cursor_row.saturating_sub(
-                                position.y.saturating_sub(body_area.y) as usize,
-                            )
-                        })
-                        .unwrap_or(*body_scroll_top);
                     let line_count = body_textarea.lines().len();
                     let number_width = gutter_width.saturating_sub(1) as usize;
                     let mut numbers = Vec::with_capacity(body_height as usize);
@@ -5094,7 +5279,7 @@ pub fn render_popup(
                 // background rather than bolding its text. `set_style` patches only
                 // the background here, preserving text/selection/Eyeliner foregrounds.
                 if *focus == CommitInputFocus::Body && !mode.is_visual() {
-                    if let Some(position) = body_textarea.rendered_cursor_position() {
+                    if let Some(position) = body_cursor_position {
                         if position.y >= body_area.y
                             && position.y < body_area.y.saturating_add(body_area.height)
                         {
@@ -5103,6 +5288,36 @@ pub fn render_popup(
                                 Style::default().bg(theme.selected_bg),
                             );
                         }
+                    }
+                }
+
+                // Neovim Illuminate-style word-under-cursor background. Apply it
+                // after the active-row background so matching words remain visible
+                // on the selected line as well as elsewhere in the visible field.
+                let eyeliner_pending = matches!(
+                    pending_command,
+                    super::popup::CommitPendingCommand::FindForward(_)
+                        | super::popup::CommitPendingCommand::FindBackward(_)
+                );
+                if *mode == CommitInputMode::Normal && !eyeliner_pending {
+                    // vim-illuminate is commonly themed as a subdued grey
+                    // current-word background (for example Gruvbox Material's
+                    // `grey background` mode). Derive ours from the active theme
+                    // instead of reusing the orange diff-search highlight.
+                    let illuminate_bg = mix_colors(theme.selected_bg, theme.text_dimmed, 72);
+                    match focus {
+                        CommitInputFocus::Summary => highlight_commit_word_occurrences(
+                            frame,
+                            summary_textarea,
+                            summary_area,
+                            illuminate_bg,
+                        ),
+                        CommitInputFocus::Body => highlight_commit_word_occurrences(
+                            frame,
+                            body_for_render,
+                            body_area,
+                            illuminate_bg,
+                        ),
                     }
                 }
 
@@ -5136,7 +5351,7 @@ pub fn render_popup(
                 // visibility, so every other screen remains cursor-hidden.
                 let cursor_position = match focus {
                     CommitInputFocus::Summary => summary_textarea.rendered_cursor_position(),
-                    CommitInputFocus::Body => body_textarea.rendered_cursor_position(),
+                    CommitInputFocus::Body => body_cursor_position,
                 };
                 if let Some(position) = cursor_position {
                     frame.set_cursor_position((position.x, position.y));
@@ -5607,7 +5822,19 @@ pub fn render_popup(
                 }
             }
 
-            let key_col_width = 14usize;
+            // Keep the description column aligned even when a context adds
+            // longer Vim-style key labels (for example `h / l / backspace`).
+            // The old fixed width of 14 let those entries spill into the
+            // description column while shorter keys remained right-aligned.
+            let max_key_width = display
+                .iter()
+                .filter(|(is_header, _, _, _)| !*is_header)
+                .map(|(_, key, _, _)| UnicodeWidthStr::width(key.as_str()))
+                .max()
+                .unwrap_or(14);
+            let key_col_width = max_key_width
+                .max(14)
+                .min((inner.width as usize).saturating_sub(12).max(14));
 
             let mut list_items: Vec<ListItem> = Vec::new();
             for (is_header, key_or_title, desc, executable) in visible_display {

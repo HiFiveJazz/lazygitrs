@@ -3225,6 +3225,7 @@ impl Gui {
                             focus: popup::CommitInputFocus::Summary,
                             mode: popup::CommitInputMode::Normal,
                             pending_command: Default::default(),
+                            visual_line_anchor: None,
                             undo_stack: Vec::new(),
                             show_help: false,
                             body_scroll_remaining: 0,
@@ -6569,6 +6570,27 @@ impl Gui {
                 let reviewing = *reviewing;
                 let resolving_recipients = *resolving_recipients;
 
+                // Match the commit editor's Vim-style close key. `q` closes the
+                // patch-email workflow whenever a recipient text editor is not
+                // actively accepting literal input; Esc keeps its existing
+                // review/back/cancel semantics.
+                let recipient_editor_active = matches!(
+                    &self.popup,
+                    PopupState::EmailPatch {
+                        recipient_editor: Some(_),
+                        ..
+                    }
+                );
+                if key.code == KeyCode::Char('q')
+                    && key.modifiers.is_empty()
+                    && !recipient_editor_active
+                {
+                    let popup = std::mem::replace(&mut self.popup, PopupState::None);
+                    drop(popup);
+                    trim_process_heap();
+                    return Ok(());
+                }
+
                 if resolving_recipients {
                     if key.code == KeyCode::Esc {
                         let popup = std::mem::replace(&mut self.popup, PopupState::None);
@@ -7575,8 +7597,10 @@ impl Gui {
                         );
                         *pending_command = popup::CommitPendingCommand::None;
                     }
+                    let visible_rows = self.commit_body_visible_rows() as isize;
+                    let amount = (visible_rows / 2).max(1);
                     let direction = if key.code == KeyCode::Char('k') { -1 } else { 1 };
-                    self.queue_commit_input_scroll(direction * 22);
+                    self.queue_commit_input_scroll(direction * amount);
                 } else if key.code == KeyCode::Tab {
                     // Tab is the explicit cross-field motion in every mode. In
                     // Visual mode the selection is local to each field, so a
@@ -8021,12 +8045,14 @@ impl Gui {
                                     summary_textarea,
                                     body_textarea,
                                     pending_command,
+                                    visual_line_anchor,
                                     ..
                                 } = &mut self.popup
                                 {
                                     summary_textarea.cancel_selection();
                                     body_textarea.cancel_selection();
                                     *pending_command = popup::CommitPendingCommand::None;
+                                    *visual_line_anchor = None;
                                     *mode = popup::CommitInputMode::Normal;
                                 }
                             } else if key.code == KeyCode::Char('i')
@@ -8047,6 +8073,7 @@ impl Gui {
                                     body_textarea,
                                     body_state,
                                     pending_command,
+                                    visual_line_anchor,
                                     undo_stack,
                                     ..
                                 } = &mut self.popup
@@ -8071,15 +8098,23 @@ impl Gui {
                                             summary_textarea.cancel_selection();
                                         }
                                         popup::CommitInputFocus::Body => {
-                                            let deleted = body_textarea
-                                                .selection_range()
-                                                .is_some_and(|(start, end)| {
-                                                    body_state.delete_visual_selection(
-                                                        start,
-                                                        end,
-                                                        wrap_width,
-                                                    )
-                                                });
+                                            let deleted = if *mode == popup::CommitInputMode::VisualLine {
+                                                visual_line_anchor
+                                                    .as_ref()
+                                                    .is_some_and(|anchor| {
+                                                        body_state.delete_logical_line_selection(*anchor)
+                                                    })
+                                            } else {
+                                                body_textarea
+                                                    .selection_range()
+                                                    .is_some_and(|(start, end)| {
+                                                        body_state.delete_visual_selection(
+                                                            start,
+                                                            end,
+                                                            wrap_width,
+                                                        )
+                                                    })
+                                            };
                                             if !deleted {
                                                 body_state.delete();
                                             }
@@ -8092,6 +8127,7 @@ impl Gui {
                                     } else {
                                         popup::CommitInputMode::Normal
                                     };
+                                    *visual_line_anchor = None;
                                 }
                             } else if key.code == KeyCode::Char('y') {
                                 let wrap_width = self.commit_body_wrap_width();
@@ -8102,6 +8138,7 @@ impl Gui {
                                     summary_textarea,
                                     body_textarea,
                                     body_state,
+                                    visual_line_anchor,
                                     ..
                                 } = &mut self.popup
                                 {
@@ -8120,7 +8157,11 @@ impl Gui {
                                             }
                                         }
                                         popup::CommitInputFocus::Body => {
-                                            if let Some((start, end)) = body_textarea.selection_range() {
+                                            if *mode == popup::CommitInputMode::VisualLine {
+                                                if let Some(anchor) = *visual_line_anchor {
+                                                    selected = body_state.selected_logical_lines_text(anchor);
+                                                }
+                                            } else if let Some((start, end)) = body_textarea.selection_range() {
                                                 selected = body_state.selected_visual_text(
                                                     start,
                                                     end,
@@ -8131,6 +8172,7 @@ impl Gui {
                                     }
                                     summary_textarea.cancel_selection();
                                     body_textarea.cancel_selection();
+                                    *visual_line_anchor = None;
                                     *mode = popup::CommitInputMode::Normal;
                                 }
                                 if !selected.is_empty() {
@@ -8140,10 +8182,12 @@ impl Gui {
                             } else {
                                 let wrap_width = self.commit_body_wrap_width();
                                 if let PopupState::CommitInput {
+                                    mode,
                                     focus,
                                     summary_textarea,
                                     body_textarea,
                                     body_state,
+                                    visual_line_anchor,
                                     ..
                                 } = &mut self.popup
                                 {
@@ -8170,28 +8214,56 @@ impl Gui {
                                             _ => {}
                                         },
                                         popup::CommitInputFocus::Body => {
-                                            let mut moved = true;
-                                            match key.code {
-                                                KeyCode::Char('h') | KeyCode::Left => body_state.move_left(),
-                                                KeyCode::Char('l') | KeyCode::Right => body_state.move_visual_right_normal(wrap_width),
-                                                KeyCode::Char('H') | KeyCode::Home | KeyCode::Char('0') => {
-                                                    body_state.move_visual_line_start(wrap_width)
+                                            if *mode == popup::CommitInputMode::VisualLine
+                                                && matches!(
+                                                    key.code,
+                                                    KeyCode::Char('j')
+                                                        | KeyCode::Down
+                                                        | KeyCode::Char('k')
+                                                        | KeyCode::Up
+                                                )
+                                            {
+                                                let direction = if matches!(
+                                                    key.code,
+                                                    KeyCode::Char('j') | KeyCode::Down
+                                                ) {
+                                                    1
+                                                } else {
+                                                    -1
+                                                };
+                                                if body_state.move_logical_line(direction) {
+                                                    if let Some(anchor) = *visual_line_anchor {
+                                                        body_state.select_logical_line_range(
+                                                            body_textarea,
+                                                            wrap_width,
+                                                            anchor,
+                                                        );
+                                                    }
                                                 }
-                                                KeyCode::Char('L') | KeyCode::End | KeyCode::Char('$') => {
-                                                    body_state.move_visual_line_last_char(wrap_width)
+                                            } else {
+                                                let mut moved = true;
+                                                match key.code {
+                                                    KeyCode::Char('h') | KeyCode::Left => body_state.move_left(),
+                                                    KeyCode::Char('l') | KeyCode::Right => body_state.move_visual_right_normal(wrap_width),
+                                                    KeyCode::Char('H') | KeyCode::Home | KeyCode::Char('0') => {
+                                                        body_state.move_visual_line_start(wrap_width)
+                                                    }
+                                                    KeyCode::Char('L') | KeyCode::End | KeyCode::Char('$') => {
+                                                        body_state.move_visual_line_last_char(wrap_width)
+                                                    }
+                                                    KeyCode::Char('w') => body_state.move_word_right_vim(),
+                                                    KeyCode::Char('b') => body_state.move_word_left(),
+                                                    KeyCode::Char('j') | KeyCode::Down => {
+                                                        body_state.move_visual_down_normal(wrap_width)
+                                                    }
+                                                    KeyCode::Char('k') | KeyCode::Up => {
+                                                        body_state.move_visual_up_normal(wrap_width)
+                                                    }
+                                                    _ => moved = false,
                                                 }
-                                                KeyCode::Char('w') => body_state.move_word_right_vim(),
-                                                KeyCode::Char('b') => body_state.move_word_left(),
-                                                KeyCode::Char('j') | KeyCode::Down => {
-                                                    body_state.move_visual_down_normal(wrap_width)
+                                                if moved {
+                                                    body_state.apply_cursor_into(body_textarea, wrap_width);
                                                 }
-                                                KeyCode::Char('k') | KeyCode::Up => {
-                                                    body_state.move_visual_up_normal(wrap_width)
-                                                }
-                                                _ => moved = false,
-                                            }
-                                            if moved {
-                                                body_state.apply_cursor_into(body_textarea, wrap_width);
                                             }
                                         }
                                     }
@@ -8353,10 +8425,12 @@ impl Gui {
                                     summary_textarea,
                                     body_textarea,
                                     pending_command,
+                                    visual_line_anchor,
                                     ..
                                 } = &mut self.popup
                                 {
                                     *pending_command = popup::CommitPendingCommand::None;
+                                    *visual_line_anchor = None;
                                     match *focus {
                                         popup::CommitInputFocus::Summary => summary_textarea.start_selection(),
                                         popup::CommitInputFocus::Body => body_textarea.start_selection(),
@@ -8372,6 +8446,7 @@ impl Gui {
                                     body_textarea,
                                     body_state,
                                     pending_command,
+                                    visual_line_anchor,
                                     ..
                                 } = &mut self.popup
                                 {
@@ -8379,11 +8454,14 @@ impl Gui {
                                     match *focus {
                                         popup::CommitInputFocus::Summary => {
                                             popup::select_summary_line(summary_textarea);
+                                            *visual_line_anchor = None;
                                         }
                                         popup::CommitInputFocus::Body => {
-                                            body_state.select_current_logical_line(
-                                                body_textarea,
-                                                wrap_width,
+                                            *visual_line_anchor = Some(
+                                                body_state.select_current_logical_line(
+                                                    body_textarea,
+                                                    wrap_width,
+                                                ),
                                             );
                                         }
                                     }
@@ -10003,7 +10081,7 @@ impl Gui {
             CommandSection {
                 title: "Commit actions".into(),
                 entries: vec![
-                    CommandEntry::keybinding("ctrl+j / ctrl+k".into(), "Smooth jump 22 description rows down / up".into()),
+                    CommandEntry::keybinding("ctrl+j / ctrl+k".into(), "Smooth scroll half-page down / up".into()),
                     CommandEntry::keybinding(kb.sign_off.clone(), "Toggle Signed-off-by".into()),
                     CommandEntry::keybinding(kb.commit_menu.clone(), "Open commit menu".into()),
                     CommandEntry::keybinding(kb.ai_generate.clone(), "Generate commit message with AI".into()),
@@ -13018,6 +13096,27 @@ impl Gui {
             .max(1) as usize
     }
 
+    fn commit_body_effective_scroll_top(
+        body_textarea: &tui_textarea::TextArea<'static>,
+        requested_top: usize,
+        visible_rows: usize,
+    ) -> usize {
+        let visible_rows = visible_rows.max(1);
+        let line_count = body_textarea.lines().len().max(1);
+        let max_top = line_count.saturating_sub(visible_rows);
+        let cursor_row = body_textarea.cursor().0.min(line_count.saturating_sub(1));
+        let mut top = requested_top.min(max_top);
+        if cursor_row < top {
+            top = cursor_row;
+        } else if cursor_row >= top.saturating_add(visible_rows) {
+            top = cursor_row
+                .saturating_add(1)
+                .saturating_sub(visible_rows)
+                .min(max_top);
+        }
+        top
+    }
+
     fn queue_commit_input_scroll(&mut self, rows: isize) {
         if rows == 0 {
             return;
@@ -13026,20 +13125,28 @@ impl Gui {
         let PopupState::CommitInput {
             body_textarea,
             body_scroll_remaining,
+            body_scroll_top,
             ..
         } = &mut self.popup
         else {
             return;
         };
 
-        // There is nothing to scroll if every projected body row already fits.
-        // This is the guard that prevents Ctrl-J/K from making short messages
-        // disappear off the top of the editor.
-        if body_textarea.lines().len() <= visible_rows {
+        let line_count = body_textarea.lines().len();
+        let max_top = line_count.saturating_sub(visible_rows);
+        if max_top == 0 {
             *body_scroll_remaining = 0;
+            *body_scroll_top = 0;
             return;
         }
 
+        // Resynchronize the explicit viewport with any ordinary Vim cursor
+        // motion that happened since the last smooth scroll.
+        *body_scroll_top = Self::commit_body_effective_scroll_top(
+            body_textarea,
+            *body_scroll_top,
+            visible_rows,
+        );
         *body_scroll_remaining = rows.clamp(-999, 999);
     }
 
@@ -13061,33 +13168,43 @@ impl Gui {
             return;
         }
 
-        // Move the actual visual cursor one row per animation tick. TextArea
-        // deliberately keeps its cursor visible, so moving only its internal
-        // viewport gets reconciled away and appears to do nothing. Driving the
-        // BodySoftWrap cursor gives the viewport a real target to follow and
-        // produces the same visible smooth motion as the patch preview.
-        let step: isize = if *body_scroll_remaining > 0 { 1 } else { -1 };
-        let before = body_state.visual_cursor(wrap_width);
-        if step > 0 {
-            if *mode == popup::CommitInputMode::Insert {
-                body_state.move_visual_down(wrap_width);
-            } else {
-                body_state.move_visual_down_normal(wrap_width);
-            }
-        } else if *mode == popup::CommitInputMode::Insert {
-            body_state.move_visual_up(wrap_width);
-        } else {
-            body_state.move_visual_up_normal(wrap_width);
+        let line_count = body_textarea.lines().len();
+        let max_top = line_count.saturating_sub(visible_rows);
+        if max_top == 0 {
+            *body_scroll_remaining = 0;
+            *body_scroll_top = 0;
+            return;
         }
-        let after = body_state.visual_cursor(wrap_width);
-        if after == before {
+
+        let step: isize = if *body_scroll_remaining > 0 { 1 } else { -1 };
+        let next_top = if step > 0 {
+            (*body_scroll_top).saturating_add(1).min(max_top)
+        } else {
+            (*body_scroll_top).saturating_sub(1)
+        };
+        if next_top == *body_scroll_top {
             *body_scroll_remaining = 0;
             return;
         }
-        body_state.apply_cursor_into(body_textarea, wrap_width);
-        *body_scroll_top = after
-            .0
-            .saturating_sub(visible_rows.saturating_sub(1));
+        *body_scroll_top = next_top;
+
+        // Keep the real editing cursor inside the explicitly-owned viewport,
+        // matching textarea/neovim scrolling semantics. The text moves every
+        // animation frame; the cursor only moves when the viewport would
+        // otherwise scroll past it.
+        let (cursor_row, cursor_col) = body_textarea.cursor();
+        let viewport_last = next_top
+            .saturating_add(visible_rows.saturating_sub(1))
+            .min(line_count.saturating_sub(1));
+        let target_row = cursor_row.clamp(next_top, viewport_last);
+        if target_row != cursor_row {
+            body_state.set_cursor_from_visual(target_row, cursor_col, wrap_width);
+            if *mode != popup::CommitInputMode::Insert {
+                body_state.normalize_normal_cursor(wrap_width);
+            }
+            body_state.apply_cursor_into(body_textarea, wrap_width);
+        }
+
         *body_scroll_remaining -= step;
     }
 
@@ -16310,10 +16427,17 @@ mod terminal_mouse_tests {
 
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT))
             .unwrap();
-        assert!(matches!(&gui.popup, PopupState::CommitInput { mode, body_textarea, body_state, .. }
-            if *mode == popup::CommitInputMode::VisualLine
-                && body_textarea.selection_range().is_some_and(|(start, end)|
-                    body_state.selected_visual_text(start, end, wrap_width) == "zero\n")));
+        assert!(matches!(&gui.popup, PopupState::CommitInput {
+            mode, body_state, visual_line_anchor: Some(anchor), ..
+        } if *mode == popup::CommitInputMode::VisualLine
+            && body_state.selected_logical_lines_text(*anchor) == "zero\n"));
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput {
+            mode, body_state, visual_line_anchor: Some(anchor), ..
+        } if *mode == popup::CommitInputMode::VisualLine
+            && body_state.selected_logical_lines_text(*anchor) == "zero\none\n"));
     }
 
     #[test]
@@ -16407,7 +16531,7 @@ mod terminal_mouse_tests {
     }
 
     #[test]
-    fn commit_editor_ctrl_j_k_animate_visual_cursor_and_short_text_is_fixed() {
+    fn commit_editor_ctrl_j_k_animate_explicit_viewport_and_short_text_is_fixed() {
         let repo = TempRepo::new("commit-vim-scroll");
         repo.commit("file", "base");
         std::fs::write(repo.path().join("file"), "changed").unwrap();
@@ -16450,12 +16574,12 @@ mod terminal_mouse_tests {
             PopupState::CommitInput { body_scroll_remaining, .. } => *body_scroll_remaining,
             _ => 0,
         };
-        assert_eq!(queued, 22);
+        assert_eq!(queued, 10);
         gui.tick_commit_input_scroll_animation();
         assert!(matches!(&gui.popup, PopupState::CommitInput {
             body_scroll_remaining, body_scroll_top, body_state, body_textarea, ..
-        } if *body_scroll_remaining == 21
-            && *body_scroll_top == 0
+        } if *body_scroll_remaining == 9
+            && *body_scroll_top == 1
             && body_state.visual_cursor(wrap_width) == (1, 0)
             && body_state.visual_cursor(wrap_width) == body_textarea.cursor()));
 
@@ -16463,13 +16587,13 @@ mod terminal_mouse_tests {
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
             .unwrap();
         assert!(matches!(&gui.popup, PopupState::CommitInput { body_scroll_remaining, .. }
-            if *body_scroll_remaining == -22));
+            if *body_scroll_remaining == -10));
         gui.tick_commit_input_scroll_animation();
         assert!(matches!(&gui.popup, PopupState::CommitInput {
             body_scroll_remaining, body_scroll_top, body_state, body_textarea, ..
-        } if *body_scroll_remaining == -21
+        } if *body_scroll_remaining == -9
             && *body_scroll_top == 0
-            && body_state.visual_cursor(wrap_width) == (0, 0)
+            && body_state.visual_cursor(wrap_width) == (1, 0)
             && body_state.visual_cursor(wrap_width) == body_textarea.cursor()));
 
         // If every description row fits, Ctrl-J/K must not create a scroll target.
@@ -16506,6 +16630,42 @@ mod terminal_mouse_tests {
             .unwrap();
         assert!(matches!(&gui.popup, PopupState::None));
         assert!(matches!(&gui.saved_commit_popup, Some(PopupState::CommitInput { .. })));
+    }
+
+    #[test]
+    fn q_quits_patch_email_outside_recipient_editor() {
+        let repo = TempRepo::new("patch-email-q");
+        repo.commit("file", "base");
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        gui.popup = PopupState::EmailPatch {
+            title: "Email patch test".to_string(),
+            to_recipients: vec!["to@example.com".to_string()],
+            cc_recipients: Vec::new(),
+            focus: popup::EmailPatchFocus::To,
+            to_selected: 0,
+            cc_selected: 0,
+            recipient_editor: None,
+            recipient_undo: Vec::new(),
+            dry_run: false,
+            reviewing: true,
+            preview_from: String::new(),
+            preview_subject: String::new(),
+            preview_date: String::new(),
+            preview_body: "patch".to_string(),
+            preview_scroll: 0,
+            preview_scroll_from: 0.0,
+            preview_scroll_target: 0.0,
+            preview_scroll_started_at: None,
+            confirming_send: false,
+            resolving_recipients: false,
+            resolution_request_id: 1,
+            on_confirm: Box::new(|_, _, _, _| Ok(())),
+        };
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(gui.popup, PopupState::None));
     }
 
     #[test]

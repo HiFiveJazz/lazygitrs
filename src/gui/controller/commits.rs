@@ -212,6 +212,7 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
             focus: CommitInputFocus::Summary,
             mode: CommitInputMode::Normal,
             pending_command: Default::default(),
+                        visual_line_anchor: None,
             undo_stack: Vec::new(),
             show_help: false,
             body_scroll_remaining: 0,
