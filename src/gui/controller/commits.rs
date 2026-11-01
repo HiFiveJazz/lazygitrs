@@ -211,7 +211,11 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
             body_state,
             focus: CommitInputFocus::Summary,
             mode: CommitInputMode::Normal,
+            pending_command: Default::default(),
+            undo_stack: Vec::new(),
+            show_help: false,
             body_scroll_remaining: 0,
+            body_scroll_top: 0,
             on_confirm: Box::new(move |gui, message| {
                 if !message.is_empty() {
                     let message = message.to_string();

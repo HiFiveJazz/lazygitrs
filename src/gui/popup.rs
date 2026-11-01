@@ -12,6 +12,66 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+fn delimiter_pair(delimiter: char) -> Option<(char, char)> {
+    match delimiter {
+        '"' | '\'' | '`' => Some((delimiter, delimiter)),
+        '(' | ')' => Some(('(', ')')),
+        '[' | ']' => Some(('[', ']')),
+        '{' | '}' => Some(('{', '}')),
+        '<' | '>' => Some(('<', '>')),
+        _ => None,
+    }
+}
+
+fn inside_delimiter_range(text: &str, cursor: usize, delimiter: char) -> Option<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let (open, close) = delimiter_pair(delimiter)?;
+
+    if open == close {
+        // Symmetric delimiters form adjacent pairs. Accept the insertion point
+        // on either delimiter or immediately after the closing delimiter, but
+        // do not accidentally bridge two separate quoted strings.
+        let positions: Vec<usize> = chars
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, ch)| (*ch == open).then_some(idx))
+            .collect();
+        for pair in positions.chunks_exact(2) {
+            let left = pair[0];
+            let right = pair[1];
+            if left <= cursor && cursor <= right + 1 {
+                return Some((left + 1, right));
+            }
+        }
+        return None;
+    }
+
+    // Paired delimiters can nest. Walk the whole line with a stack and keep
+    // the tightest completed pair that surrounds the insertion-point cursor.
+    let mut stack = Vec::new();
+    let mut best: Option<(usize, usize)> = None;
+    for (idx, ch) in chars.iter().copied().enumerate() {
+        if ch == open {
+            stack.push(idx);
+        } else if ch == close {
+            let Some(left) = stack.pop() else {
+                continue;
+            };
+            if left <= cursor && cursor <= idx + 1 {
+                let candidate = (left + 1, idx);
+                if best
+                    .map(|(start, end)| candidate.1 - candidate.0 < end - start)
+                    .unwrap_or(true)
+                {
+                    best = Some(candidate);
+                }
+            }
+        }
+    }
+    best
+}
+
 /// Synchronize a free-entry row and keep it selected. Used where the typed
 /// value is valid on its own and suggestions are optional completions.
 ///
@@ -352,6 +412,33 @@ impl BodySoftWrap {
         self.raw.chars().count()
     }
 
+    pub fn cursor_index(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn set_cursor_index(&mut self, cursor: usize) {
+        self.cursor = cursor.min(self.char_count());
+    }
+
+    fn replace_char_range(&mut self, start: usize, end: usize, replacement: &str) {
+        let start = start.min(self.char_count());
+        let end = end.min(self.char_count()).max(start);
+        let start_byte = self
+            .raw
+            .char_indices()
+            .nth(start)
+            .map(|(b, _)| b)
+            .unwrap_or(self.raw.len());
+        let end_byte = self
+            .raw
+            .char_indices()
+            .nth(end)
+            .map(|(b, _)| b)
+            .unwrap_or(self.raw.len());
+        self.raw.replace_range(start_byte..end_byte, replacement);
+        self.cursor = start + replacement.chars().count();
+    }
+
     pub fn set_text(&mut self, text: impl Into<String>) {
         let raw = text.into();
         self.cursor = raw.chars().count();
@@ -456,6 +543,101 @@ impl BodySoftWrap {
         self.cursor = (self.cursor + 1).min(self.char_count());
     }
 
+    /// Vim `a`: move one character to the right only when that stays on the
+    /// current visual line. At an end-of-line insertion point, remain there
+    /// instead of crossing the newline/soft-wrap boundary.
+    pub fn move_append(&mut self, wrap_width: usize) {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (row, _) = layout.cursor_to_visual(self.cursor);
+        let line = &layout.lines[row];
+        let line_end = line.raw_start + line.char_len;
+        if self.cursor < line_end {
+            self.cursor += 1;
+        }
+    }
+
+    /// Vim-style `dw`: delete from the cursor through the current word and
+    /// following horizontal whitespace, stopping before a hard newline.
+    pub fn delete_word_forward(&mut self) -> bool {
+        let chars: Vec<char> = self.raw.chars().collect();
+        if self.cursor >= chars.len() || chars[self.cursor] == '\n' {
+            return false;
+        }
+        let start = self.cursor;
+        let mut end = start;
+
+        if is_word_char(chars[end]) {
+            while end < chars.len() && is_word_char(chars[end]) {
+                end += 1;
+            }
+        } else {
+            while end < chars.len()
+                && chars[end] != '\n'
+                && !is_word_char(chars[end])
+                && !chars[end].is_whitespace()
+            {
+                end += 1;
+            }
+        }
+        while end < chars.len() && chars[end] != '\n' && chars[end].is_whitespace() {
+            end += 1;
+        }
+        if end == start {
+            return false;
+        }
+        self.replace_char_range(start, end, "");
+        true
+    }
+
+    /// Vim-style `dd`: delete the current *logical* line. Soft-wrap rows are
+    /// display-only and therefore do not count as separate lines.
+    pub fn delete_current_line(&mut self) -> bool {
+        if self.raw.is_empty() {
+            return false;
+        }
+        let chars: Vec<char> = self.raw.chars().collect();
+        let mut start = self.cursor.min(chars.len());
+        while start > 0 && chars[start - 1] != '\n' {
+            start -= 1;
+        }
+        let mut end = self.cursor.min(chars.len());
+        while end < chars.len() && chars[end] != '\n' {
+            end += 1;
+        }
+
+        if end < chars.len() {
+            // Include the newline after this line.
+            self.replace_char_range(start, end + 1, "");
+            self.cursor = start.min(self.char_count());
+        } else if start > 0 {
+            // Last line: consume the preceding newline so we do not leave a
+            // dangling blank logical line behind.
+            self.replace_char_range(start - 1, end, "");
+            self.cursor = (start - 1).min(self.char_count());
+        } else {
+            self.raw.clear();
+            self.cursor = 0;
+        }
+        true
+    }
+
+    /// Vim `o`: create an empty logical line immediately below the current
+    /// one and leave the cursor at the start of the new line.
+    pub fn open_line_below(&mut self) {
+        let chars: Vec<char> = self.raw.chars().collect();
+        let mut end = self.cursor.min(chars.len());
+        while end < chars.len() && chars[end] != '\n' {
+            end += 1;
+        }
+        if end < chars.len() {
+            self.replace_char_range(end + 1, end + 1, "\n");
+            self.cursor = end + 1;
+        } else {
+            self.replace_char_range(end, end, "\n");
+            self.cursor = end + 1;
+        }
+    }
+
     /// Move cursor to the start of the previous word (emacs/readline-style:
     /// skip preceding non-word chars, then skip word chars).
     pub fn move_word_left(&mut self) {
@@ -470,7 +652,8 @@ impl BodySoftWrap {
         self.cursor = i;
     }
 
-    /// Move cursor past the end of the next word.
+    /// Move cursor past the end of the next word for Insert-mode/readline
+    /// bindings such as Alt+Right / Alt+F.
     pub fn move_word_right(&mut self) {
         let chars: Vec<char> = self.raw.chars().collect();
         let n = chars.len();
@@ -482,6 +665,43 @@ impl BodySoftWrap {
             i += 1;
         }
         self.cursor = i;
+    }
+
+    /// Vim-style `w`: move to the first character of the next word/token,
+    /// never to the whitespace after the current word.
+    pub fn move_word_right_vim(&mut self) {
+        let chars: Vec<char> = self.raw.chars().collect();
+        let n = chars.len();
+        if n == 0 {
+            return;
+        }
+        if self.cursor >= n {
+            self.cursor = n - 1;
+            return;
+        }
+
+        let mut i = self.cursor;
+        let class = |c: char| {
+            if is_word_char(c) {
+                0u8
+            } else if c.is_whitespace() {
+                1u8
+            } else {
+                2u8
+            }
+        };
+        let current_class = class(chars[i]);
+        if current_class != 1 {
+            while i < n && class(chars[i]) == current_class {
+                i += 1;
+            }
+        }
+        while i < n && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i < n {
+            self.cursor = i;
+        }
     }
 
     /// Delete from cursor back to the start of the previous word.
@@ -515,12 +735,137 @@ impl BodySoftWrap {
         self.cursor = layout.lines[row].raw_start;
     }
 
-    /// Cmd+Right equivalent: jump to the end of the current visual row.
+    /// Cmd+Right / Insert-mode `A`: jump to the insertion point at the end
+    /// of the current visual row.
     pub fn move_visual_line_end(&mut self, wrap_width: usize) {
         let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
         let (row, _) = layout.cursor_to_visual(self.cursor);
         let line = &layout.lines[row];
         self.cursor = line.raw_start + line.char_len;
+    }
+
+    /// Vim Normal/Visual-mode end-of-line motion: land on the final character
+    /// rather than the insertion cell after it.
+    pub fn move_visual_line_last_char(&mut self, wrap_width: usize) {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (row, _) = layout.cursor_to_visual(self.cursor);
+        let line = &layout.lines[row];
+        self.cursor = if line.char_len == 0 {
+            line.raw_start
+        } else {
+            line.raw_start + line.char_len - 1
+        };
+    }
+
+    /// Leave Insert mode with the cursor on a character, as Vim does. At the
+    /// start of a visual row there is no character to the left, so stay put.
+    pub fn leave_insert_mode(&mut self, wrap_width: usize) {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (_, col) = layout.cursor_to_visual(self.cursor);
+        if col > 0 {
+            self.cursor = self.cursor.saturating_sub(1);
+        }
+    }
+
+    /// Vim Normal-mode `l`: move right without stepping into the insertion
+    /// cell after the last character of the visual row.
+    pub fn move_visual_right_normal(&mut self, wrap_width: usize) {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (row, col) = layout.cursor_to_visual(self.cursor);
+        let line = &layout.lines[row];
+        if line.char_len == 0 {
+            self.cursor = line.raw_start;
+        } else if col >= line.char_len {
+            self.cursor = line.raw_start + line.char_len - 1;
+        } else if col + 1 < line.char_len {
+            self.cursor += 1;
+        }
+    }
+
+    /// Ensure a Normal/Visual-mode cursor is sitting on a character rather
+    /// than the insertion cell immediately after a visual row.
+    pub fn normalize_normal_cursor(&mut self, wrap_width: usize) {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (row, col) = layout.cursor_to_visual(self.cursor);
+        let line = &layout.lines[row];
+        if line.char_len > 0 && col >= line.char_len {
+            self.cursor = line.raw_start + line.char_len - 1;
+        }
+    }
+
+    pub fn move_visual_up_normal(&mut self, wrap_width: usize) {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (row, col) = layout.cursor_to_visual(self.cursor);
+        if row == 0 {
+            self.normalize_normal_cursor(wrap_width);
+            return;
+        }
+        let target = &layout.lines[row - 1];
+        let target_col = if target.char_len == 0 {
+            0
+        } else {
+            col.min(target.char_len - 1)
+        };
+        self.cursor = target.raw_start + target_col;
+    }
+
+    pub fn move_visual_down_normal(&mut self, wrap_width: usize) {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (row, col) = layout.cursor_to_visual(self.cursor);
+        if row + 1 >= layout.line_count() {
+            self.normalize_normal_cursor(wrap_width);
+            return;
+        }
+        let target = &layout.lines[row + 1];
+        let target_col = if target.char_len == 0 {
+            0
+        } else {
+            col.min(target.char_len - 1)
+        };
+        self.cursor = target.raw_start + target_col;
+    }
+
+    /// Vim `f` / `F` on the current visual row. `count` selects the Nth
+    /// occurrence in the requested direction.
+    pub fn find_char_on_visual_line(
+        &mut self,
+        wrap_width: usize,
+        target: char,
+        forward: bool,
+        count: usize,
+    ) -> bool {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (row, _) = layout.cursor_to_visual(self.cursor);
+        let line = &layout.lines[row];
+        let chars: Vec<char> = self.raw.chars().collect();
+        let mut remaining = count.max(1);
+
+        if forward {
+            let start = self.cursor.saturating_add(1).max(line.raw_start);
+            let end = line.raw_start + line.char_len;
+            for idx in start..end {
+                if chars.get(idx).copied() == Some(target) {
+                    remaining -= 1;
+                    if remaining == 0 {
+                        self.cursor = idx;
+                        return true;
+                    }
+                }
+            }
+        } else {
+            let start = line.raw_start;
+            let end = self.cursor.min(line.raw_start + line.char_len);
+            for idx in (start..end).rev() {
+                if chars.get(idx).copied() == Some(target) {
+                    remaining -= 1;
+                    if remaining == 0 {
+                        self.cursor = idx;
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Cmd+Backspace equivalent: delete from cursor back to the start of the
@@ -598,6 +943,69 @@ impl BodySoftWrap {
     pub fn set_cursor_from_visual(&mut self, row: usize, col: usize, wrap_width: usize) {
         let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
         self.cursor = layout.visual_to_cursor(row, col);
+    }
+
+    /// Select the text inside the nearest surrounding delimiter pair, matching
+    /// Vim text objects such as `vi"`, `vi'`, `vi(` / `vi)`, `vi[` and `vi{`.
+    pub fn select_inside_delimiter(
+        &mut self,
+        textarea: &mut TextArea<'static>,
+        wrap_width: usize,
+        delimiter: char,
+    ) -> bool {
+        let Some((start, end)) = inside_delimiter_range(&self.raw, self.cursor, delimiter) else {
+            return false;
+        };
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let start_visual = layout.cursor_to_visual(start);
+        let end_visual = layout.cursor_to_visual(end);
+        self.cursor = start;
+        textarea.cancel_selection();
+        textarea.move_cursor(CursorMove::Jump(
+            start_visual.0 as u16,
+            start_visual.1 as u16,
+        ));
+        textarea.start_selection();
+        self.cursor = end;
+        textarea.move_cursor(CursorMove::Jump(end_visual.0 as u16, end_visual.1 as u16));
+        true
+    }
+
+    /// Select the entire current logical line for Vim `V`. The terminating
+    /// newline is included when one exists so linewise delete/change behaves
+    /// like Vim rather than leaving an empty line behind.
+    pub fn select_current_logical_line(
+        &mut self,
+        textarea: &mut TextArea<'static>,
+        wrap_width: usize,
+    ) -> bool {
+        let chars: Vec<char> = self.raw.chars().collect();
+        let cursor = self.cursor.min(chars.len());
+        let mut start = cursor;
+        while start > 0 && chars[start - 1] != '\n' {
+            start -= 1;
+        }
+        let mut end = cursor;
+        while end < chars.len() && chars[end] != '\n' {
+            end += 1;
+        }
+        if end < chars.len() {
+            end += 1;
+        }
+
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let start_visual = layout.cursor_to_visual(start);
+        let end_visual = layout.cursor_to_visual(end);
+        self.cursor = start;
+        textarea.cancel_selection();
+        textarea.move_cursor(CursorMove::Jump(
+            start_visual.0 as u16,
+            start_visual.1 as u16,
+        ));
+        textarea.start_selection();
+        self.cursor = end;
+        textarea.move_cursor(CursorMove::Jump(end_visual.0 as u16, end_visual.1 as u16));
+        true
     }
 
     /// Return the raw text covered by a selection in the soft-wrapped display.
@@ -720,6 +1128,7 @@ pub enum CommitInputMode {
     Normal,
     Insert,
     Visual,
+    VisualLine,
 }
 
 impl CommitInputMode {
@@ -727,9 +1136,248 @@ impl CommitInputMode {
         match self {
             Self::Normal => "NORMAL",
             Self::Insert => "INSERT",
-            Self::Visual => "VISUAL",
+            Self::Visual | Self::VisualLine => "VISUAL",
         }
     }
+
+    pub fn is_visual(self) -> bool {
+        matches!(self, Self::Visual | Self::VisualLine)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CommitPendingCommand {
+    #[default]
+    None,
+    Delete,
+    VisualInner,
+    Count(u16),
+    FindForward(u16),
+    FindBackward(u16),
+}
+
+impl CommitPendingCommand {
+    pub fn count(self) -> usize {
+        match self {
+            Self::Count(count) | Self::FindForward(count) | Self::FindBackward(count) => {
+                count.max(1) as usize
+            }
+            _ => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitEditSnapshot {
+    summary: String,
+    summary_cursor: (usize, usize),
+    body: String,
+    body_cursor: usize,
+    focus: CommitInputFocus,
+}
+
+impl CommitEditSnapshot {
+    pub fn capture(
+        summary_textarea: &TextArea<'static>,
+        body_state: &BodySoftWrap,
+        focus: CommitInputFocus,
+    ) -> Self {
+        Self {
+            summary: summary_textarea.lines().join(""),
+            summary_cursor: summary_textarea.cursor(),
+            body: body_state.raw().to_string(),
+            body_cursor: body_state.cursor_index(),
+            focus,
+        }
+    }
+
+    pub fn restore(
+        self,
+        summary_textarea: &mut TextArea<'static>,
+        body_textarea: &mut TextArea<'static>,
+        body_state: &mut BodySoftWrap,
+        focus: &mut CommitInputFocus,
+        wrap_width: usize,
+    ) {
+        set_commit_summary_text(summary_textarea, &self.summary);
+        summary_textarea.move_cursor(CursorMove::Jump(
+            self.summary_cursor.0 as u16,
+            self.summary_cursor.1 as u16,
+        ));
+        body_state.set_text(self.body);
+        body_state.set_cursor_index(self.body_cursor);
+        body_state.render_into(body_textarea, wrap_width.max(1));
+        set_commit_input_focus(
+            focus,
+            summary_textarea,
+            body_textarea,
+            self.focus,
+        );
+    }
+}
+
+pub fn push_commit_undo_snapshot(
+    undo_stack: &mut Vec<CommitEditSnapshot>,
+    summary_textarea: &TextArea<'static>,
+    body_state: &BodySoftWrap,
+    focus: CommitInputFocus,
+) {
+    undo_stack.push(CommitEditSnapshot::capture(
+        summary_textarea,
+        body_state,
+        focus,
+    ));
+    if undo_stack.len() > 100 {
+        undo_stack.remove(0);
+    }
+}
+
+pub fn delete_summary_word_forward(textarea: &mut TextArea<'static>) -> bool {
+    let text = textarea.lines().join("");
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = textarea.cursor().1.min(chars.len());
+    if cursor >= chars.len() {
+        return false;
+    }
+    let mut end = cursor;
+    if is_word_char(chars[end]) {
+        while end < chars.len() && is_word_char(chars[end]) {
+            end += 1;
+        }
+    } else {
+        while end < chars.len()
+            && !is_word_char(chars[end])
+            && !chars[end].is_whitespace()
+        {
+            end += 1;
+        }
+    }
+    while end < chars.len() && chars[end].is_whitespace() {
+        end += 1;
+    }
+    if end == cursor {
+        return false;
+    }
+    let new_text: String = chars[..cursor]
+        .iter()
+        .chain(chars[end..].iter())
+        .copied()
+        .collect();
+    set_commit_summary_text(textarea, &new_text);
+    textarea.move_cursor(CursorMove::Jump(0, cursor as u16));
+    true
+}
+
+pub fn leave_summary_insert_mode(textarea: &mut TextArea<'static>) {
+    if textarea.cursor().1 > 0 {
+        textarea.move_cursor(CursorMove::Back);
+    }
+}
+
+pub fn move_summary_word_forward_vim(textarea: &mut TextArea<'static>) {
+    let text = textarea.lines().join("");
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let cursor = textarea.cursor().1.min(n);
+    if n == 0 || cursor >= n {
+        return;
+    }
+    let class = |c: char| {
+        if is_word_char(c) {
+            0u8
+        } else if c.is_whitespace() {
+            1u8
+        } else {
+            2u8
+        }
+    };
+    let mut i = cursor;
+    let current_class = class(chars[i]);
+    if current_class != 1 {
+        while i < n && class(chars[i]) == current_class {
+            i += 1;
+        }
+    }
+    while i < n && chars[i].is_whitespace() {
+        i += 1;
+    }
+    if i < n {
+        textarea.move_cursor(CursorMove::Jump(0, i as u16));
+    }
+}
+
+pub fn move_summary_line_last_char(textarea: &mut TextArea<'static>) {
+    let len = textarea.lines().join("").chars().count();
+    let col = len.saturating_sub(1);
+    textarea.move_cursor(CursorMove::Jump(0, col as u16));
+}
+
+pub fn move_summary_right_normal(textarea: &mut TextArea<'static>) {
+    let len = textarea.lines().join("").chars().count();
+    if len == 0 {
+        textarea.move_cursor(CursorMove::Jump(0, 0));
+        return;
+    }
+    let col = textarea.cursor().1.min(len - 1);
+    textarea.move_cursor(CursorMove::Jump(0, (col + 1).min(len - 1) as u16));
+}
+
+pub fn find_summary_char(
+    textarea: &mut TextArea<'static>,
+    target: char,
+    forward: bool,
+    count: usize,
+) -> bool {
+    let text = textarea.lines().join("");
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = textarea.cursor().1.min(chars.len());
+    let mut remaining = count.max(1);
+    if forward {
+        for idx in cursor.saturating_add(1)..chars.len() {
+            if chars[idx] == target {
+                remaining -= 1;
+                if remaining == 0 {
+                    textarea.move_cursor(CursorMove::Jump(0, idx as u16));
+                    return true;
+                }
+            }
+        }
+    } else {
+        for idx in (0..cursor).rev() {
+            if chars[idx] == target {
+                remaining -= 1;
+                if remaining == 0 {
+                    textarea.move_cursor(CursorMove::Jump(0, idx as u16));
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+pub fn select_summary_line(textarea: &mut TextArea<'static>) {
+    let end = textarea.lines().join("").chars().count();
+    textarea.cancel_selection();
+    textarea.move_cursor(CursorMove::Jump(0, 0));
+    textarea.start_selection();
+    textarea.move_cursor(CursorMove::Jump(0, end as u16));
+}
+
+pub fn select_summary_inside_delimiter(
+    textarea: &mut TextArea<'static>,
+    delimiter: char,
+) -> bool {
+    let text = textarea.lines().join("");
+    let cursor = textarea.cursor().1;
+    let Some((start, end)) = inside_delimiter_range(&text, cursor, delimiter) else {
+        return false;
+    };
+    textarea.cancel_selection();
+    textarea.move_cursor(CursorMove::Jump(0, start as u16));
+    textarea.start_selection();
+    textarea.move_cursor(CursorMove::Jump(0, end as u16));
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1095,8 +1743,18 @@ pub enum PopupState {
         body_state: BodySoftWrap,
         focus: CommitInputFocus,
         mode: CommitInputMode,
+        /// Multi-key Vim command currently waiting for its second key (`d…`, `vi…`).
+        pending_command: CommitPendingCommand,
+        /// Commit-editor-local undo history. Each insert session or normal-mode
+        /// mutation records one snapshot, so `u` never collides with Git undo.
+        undo_stack: Vec<CommitEditSnapshot>,
+        /// Whether the in-editor Vim/commit keybinding reference is visible.
+        show_help: bool,
         /// Remaining rows for the neoscroll-style animated body viewport.
         body_scroll_remaining: isize,
+        /// Tracked top visual row while the viewport is being scrolled independently
+        /// of the editing cursor. This keeps smooth scrolling clamped and reversible.
+        body_scroll_top: usize,
         on_confirm: InputAction,
     },
     Menu {
@@ -1257,7 +1915,11 @@ pub fn make_textarea(placeholder: &str) -> TextArea<'static> {
 }
 
 pub fn make_commit_summary_textarea() -> TextArea<'static> {
-    make_textarea("Required")
+    let mut ta = make_textarea("Required");
+    ta.set_cursor_line_style(
+        ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+    );
+    ta
 }
 
 /// Replace the summary textarea contents with `text`, cursor at end.
@@ -1294,15 +1956,21 @@ pub fn set_commit_input_focus(
     let visible = ratatui::style::Style::default()
         .add_modifier(ratatui::style::Modifier::REVERSED);
     let hidden = ratatui::style::Style::default();
+    let current_line = ratatui::style::Style::default()
+        .add_modifier(ratatui::style::Modifier::BOLD);
     *focus = new_focus;
     match new_focus {
         CommitInputFocus::Summary => {
             summary_textarea.set_cursor_style(visible);
+            summary_textarea.set_cursor_line_style(current_line);
             body_textarea.set_cursor_style(hidden);
+            body_textarea.set_cursor_line_style(hidden);
         }
         CommitInputFocus::Body => {
             summary_textarea.set_cursor_style(hidden);
+            summary_textarea.set_cursor_line_style(hidden);
             body_textarea.set_cursor_style(visible);
+            body_textarea.set_cursor_line_style(current_line);
         }
     }
 }
@@ -1317,7 +1985,10 @@ pub fn reset_commit_input_view(popup: &mut PopupState, wrap_width: usize) {
         body_state,
         focus,
         mode,
+        pending_command,
+        show_help,
         body_scroll_remaining,
+        body_scroll_top,
         ..
     } = popup
     else {
@@ -1341,7 +2012,10 @@ pub fn reset_commit_input_view(popup: &mut PopupState, wrap_width: usize) {
     body_textarea.set_cursor_style(hidden);
     *focus = CommitInputFocus::Summary;
     *mode = CommitInputMode::Normal;
+    *pending_command = CommitPendingCommand::None;
+    *show_help = false;
     *body_scroll_remaining = 0;
+    *body_scroll_top = 0;
 }
 
 pub fn make_command_palette_search_textarea() -> TextArea<'static> {
@@ -1426,6 +2100,25 @@ mod commit_body_wrap_tests {
     use super::{BodySoftWrap, WrapLayout, hard_wrap_commit_body, unwrap_commit_body};
 
     #[test]
+    fn vim_word_end_and_find_motions_land_on_characters() {
+        let mut body = BodySoftWrap::from_text("alpha   beta gamma");
+        body.set_cursor_index(0);
+        body.move_word_right_vim();
+        assert_eq!(body.cursor_index(), 8);
+
+        body.move_visual_line_last_char(80);
+        assert_eq!(body.cursor_index(), 17);
+
+        body.set_cursor_index(0);
+        assert!(body.find_char_on_visual_line(80, 'a', true, 1));
+        assert_eq!(body.cursor_index(), 4);
+        assert!(body.find_char_on_visual_line(80, 'a', true, 2));
+        assert_eq!(body.cursor_index(), 14);
+        assert!(body.find_char_on_visual_line(80, 'a', false, 1));
+        assert_eq!(body.cursor_index(), 11);
+    }
+
+    #[test]
     fn unwrap_preserves_newlines_and_bullets() {
         let raw = "- something\n- something 2\n\nparagraph\n";
         assert_eq!(
@@ -1474,6 +2167,59 @@ mod commit_body_wrap_tests {
         assert!(state.delete_visual_selection((0, 0), (1, 4), 6));
         assert_eq!(state.raw(), " gamma");
         assert_eq!(state.cursor, 0);
+    }
+
+    #[test]
+    fn vim_append_stays_on_current_visual_line_at_eol() {
+        let mut state = BodySoftWrap::from_text("abc\ndef");
+        state.set_cursor_index(3);
+        state.move_append(80);
+        assert_eq!(state.cursor_index(), 3);
+
+        state.set_cursor_index(1);
+        state.move_append(80);
+        assert_eq!(state.cursor_index(), 2);
+    }
+
+    #[test]
+    fn vim_delete_word_and_line_operate_on_raw_logical_text() {
+        let mut state = BodySoftWrap::from_text("alpha beta\nsecond line\nthird");
+        state.move_to_start();
+        assert!(state.delete_word_forward());
+        assert_eq!(state.raw(), "beta\nsecond line\nthird");
+
+        state.set_cursor_index(7);
+        assert!(state.delete_current_line());
+        assert_eq!(state.raw(), "beta\nthird");
+    }
+
+    #[test]
+    fn vim_open_line_below_creates_a_real_newline() {
+        let mut state = BodySoftWrap::from_text("one\ntwo");
+        state.set_cursor_index(1);
+        state.open_line_below();
+        assert_eq!(state.raw(), "one\n\ntwo");
+        assert_eq!(state.cursor_index(), 4);
+    }
+
+    #[test]
+    fn vim_inner_delimiter_selection_excludes_delimiters() {
+        for (text, cursor, delimiter, expected) in [
+            ("say \"hello world\" now", 8, '"', "hello world"),
+            ("say 'hello world' now", 8, '\'', "hello world"),
+            ("call(foo bar) now", 7, '(', "foo bar"),
+            ("call(foo bar) now", 7, ')', "foo bar"),
+            ("list[foo bar] now", 7, '[', "foo bar"),
+            ("map{foo bar} now", 6, '}', "foo bar"),
+        ] {
+            let mut state = BodySoftWrap::from_text(text);
+            state.set_cursor_index(cursor);
+            let mut textarea = super::make_commit_body_textarea();
+            state.render_into(&mut textarea, 80);
+            assert!(state.select_inside_delimiter(&mut textarea, 80, delimiter));
+            let (start, end) = textarea.selection_range().expect("selection");
+            assert_eq!(state.selected_visual_text(start, end, 80), expected);
+        }
     }
 
     #[test]

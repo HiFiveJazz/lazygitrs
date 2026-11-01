@@ -335,7 +335,11 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                         body_state: crate::gui::popup::BodySoftWrap::new(),
                         focus: CommitInputFocus::Summary,
                         mode: CommitInputMode::Normal,
+                        pending_command: Default::default(),
+                        undo_stack: Vec::new(),
+                        show_help: false,
                         body_scroll_remaining: 0,
+                        body_scroll_top: 0,
                         on_confirm: Box::new(|gui, message| {
                             if !message.is_empty() {
                                 let message = message.to_string();
@@ -377,7 +381,11 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                         body_state: crate::gui::popup::BodySoftWrap::new(),
                         focus: CommitInputFocus::Summary,
                         mode: CommitInputMode::Normal,
+                        pending_command: Default::default(),
+                        undo_stack: Vec::new(),
+                        show_help: false,
                         body_scroll_remaining: 0,
+                        body_scroll_top: 0,
                         on_confirm: Box::new(|gui, message| {
                             if !message.is_empty() {
                                 let message = message.to_string();
@@ -414,7 +422,11 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
         body_state: crate::gui::popup::BodySoftWrap::new(),
         focus: CommitInputFocus::Summary,
         mode: CommitInputMode::Normal,
+        pending_command: Default::default(),
+        undo_stack: Vec::new(),
+        show_help: false,
         body_scroll_remaining: 0,
+        body_scroll_top: 0,
         on_confirm: Box::new(|gui, message| {
             if !message.is_empty() {
                 let message = message.to_string();
@@ -467,7 +479,11 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
                     body_state: crate::gui::popup::BodySoftWrap::new(),
                     focus: CommitInputFocus::Summary,
                     mode: CommitInputMode::Normal,
+                    pending_command: Default::default(),
+                    undo_stack: Vec::new(),
+                    show_help: false,
                     body_scroll_remaining: 0,
+                    body_scroll_top: 0,
                     on_confirm: Box::new(|gui, message| {
                         if !message.is_empty() {
                             let message = message.to_string();
@@ -498,7 +514,11 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
         body_state: crate::gui::popup::BodySoftWrap::new(),
         focus: CommitInputFocus::Summary,
         mode: CommitInputMode::Normal,
+        pending_command: Default::default(),
+        undo_stack: Vec::new(),
+        show_help: false,
         body_scroll_remaining: 0,
+        body_scroll_top: 0,
         on_confirm: Box::new(|gui, message| {
             if !message.is_empty() {
                 let message = message.to_string();

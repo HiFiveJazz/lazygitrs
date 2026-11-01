@@ -3495,7 +3495,9 @@ pub fn commit_ai_button_geometry(popup: &PopupState, area: Rect) -> Option<Rect>
     }
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let ta_height: u16 = match popup {
-        PopupState::CommitInput { .. } => commit_popup_height(area.height),
+        PopupState::CommitInput {
+            show_help: false, ..
+        } => commit_popup_height(area.height),
         _ => return None,
     };
     if ta_height < 7 {
@@ -3535,11 +3537,11 @@ pub fn commit_description_textarea_geometry(popup: &PopupState, area: Rect) -> O
         vertical: 1,
     });
 
-    if inner.height <= 7 {
+    if inner.height <= 5 {
         return None;
     }
 
-    let body_height = inner.height.saturating_sub(7);
+    let body_height = inner.height.saturating_sub(5);
     let gutter_width = COMMIT_BODY_GUTTER_WIDTH.min(inner.width.saturating_sub(1));
     (body_height > 0).then(|| {
         Rect::new(
@@ -4961,6 +4963,8 @@ pub fn render_popup(
             body_textarea,
             focus,
             mode,
+            show_help,
+            body_scroll_top,
             ..
         } => {
             // Two-field commit editor: summary (1 line) + body (multi-line)
@@ -4980,7 +4984,7 @@ pub fn render_popup(
                 CommitInputFocus::Body => theme.popup_border,
             };
             let outer = Block::default()
-                .title(format!(" {} — {} ", kind.title(), mode.label()))
+                .title(format!(" {} ", kind.title()))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color));
             frame.render_widget(outer, ta_rect);
@@ -5027,7 +5031,8 @@ pub fn render_popup(
                 // Body textarea with a Vim-style relative-number gutter. The body
                 // itself remains a TextArea so its cursor/selection rendering and
                 // viewport behavior stay intact.
-                let body_height = inner.height.saturating_sub(7);
+                // Reserve only the final row for the compact mode badge / help hint.
+                let body_height = inner.height.saturating_sub(5);
                 let gutter_width = COMMIT_BODY_GUTTER_WIDTH.min(inner.width.saturating_sub(1));
                 let gutter_area = Rect::new(inner.x, inner.y + 4, gutter_width, body_height);
                 let body_area = Rect::new(
@@ -5047,7 +5052,7 @@ pub fn render_popup(
                                 position.y.saturating_sub(body_area.y) as usize,
                             )
                         })
-                        .unwrap_or(0);
+                        .unwrap_or(*body_scroll_top);
                     let line_count = body_textarea.lines().len();
                     let number_width = gutter_width.saturating_sub(1) as usize;
                     let mut numbers = Vec::with_capacity(body_height as usize);
@@ -5063,87 +5068,118 @@ pub fn render_popup(
                         } else {
                             Style::default().fg(theme.text_dimmed)
                         };
+                        let number = if relative == 0 { row + 1 } else { relative };
                         numbers.push(Line::from(Span::styled(
-                            format!("{:>width$} ", relative, width = number_width),
+                            format!("{:>width$} ", number, width = number_width),
                             style,
                         )));
                     }
                     frame.render_widget(Paragraph::new(numbers), gutter_area);
                 }
 
-                let key_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
-                let desc_style = Style::default().fg(theme.text_dimmed);
-                let hint_y = inner.y + inner.height.saturating_sub(2);
-                let (hint_one, hint_two) = match mode {
-                    CommitInputMode::Normal => (
-                        Line::from(vec![
-                            Span::styled(" i/a ", key_style),
-                            Span::styled("insert  ", desc_style),
-                            Span::styled("v ", key_style),
-                            Span::styled("visual  ", desc_style),
-                            Span::styled("j/k ", key_style),
-                            Span::styled("move  ", desc_style),
-                            Span::styled("H/L ", key_style),
-                            Span::styled("line start/end  ", desc_style),
-                            Span::styled("enter ", key_style),
-                            Span::styled("commit", desc_style),
-                        ]),
-                        Line::from(vec![
-                            Span::styled(" ctrl+u/d/b/f ", key_style),
-                            Span::styled("smooth scroll  ", desc_style),
-                            Span::styled("alt+s ", key_style),
-                            Span::styled("sign-off  ", desc_style),
-                            Span::styled("ctrl+o ", key_style),
-                            Span::styled("menu  ", desc_style),
-                            Span::styled("esc ", key_style),
-                            Span::styled("save draft", desc_style),
-                        ]),
-                    ),
-                    CommitInputMode::Insert => (
-                        Line::from(vec![
-                            Span::styled(" esc ", key_style),
-                            Span::styled("normal  ", desc_style),
-                            Span::styled("enter ", key_style),
-                            Span::styled("newline/body  ", desc_style),
-                            Span::styled("tab ", key_style),
-                            Span::styled("switch field", desc_style),
-                        ]),
-                        Line::from(vec![
-                            Span::styled(" ctrl+enter ", key_style),
-                            Span::styled("commit  ", desc_style),
-                            Span::styled("alt+s ", key_style),
-                            Span::styled("sign-off  ", desc_style),
-                            Span::styled("ctrl+o ", key_style),
-                            Span::styled("menu", desc_style),
-                        ]),
-                    ),
-                    CommitInputMode::Visual => (
-                        Line::from(vec![
-                            Span::styled(" h/l j/k H/L ", key_style),
-                            Span::styled("select  ", desc_style),
-                            Span::styled("d/x ", key_style),
-                            Span::styled("delete  ", desc_style),
-                            Span::styled("c ", key_style),
-                            Span::styled("change  ", desc_style),
-                            Span::styled("y ", key_style),
-                            Span::styled("copy", desc_style),
-                        ]),
-                        Line::from(vec![
-                            Span::styled(" esc/v ", key_style),
-                            Span::styled("normal  ", desc_style),
-                            Span::styled("tab ", key_style),
-                            Span::styled("switch field", desc_style),
-                        ]),
-                    ),
+                let footer_y = inner.y + inner.height.saturating_sub(1);
+                let mode_label = format!(" {} ", mode.label());
+                let mode_width = UnicodeWidthStr::width(mode_label.as_str()) as u16;
+                let mode_width = mode_width.min(inner.width);
+                let mode_rect = Rect::new(
+                    inner.x + inner.width.saturating_sub(mode_width),
+                    footer_y,
+                    mode_width,
+                    1,
+                );
+                let (mode_color, mode_text_color) = match mode {
+                    CommitInputMode::Normal => (Color::Blue, Color::Black),
+                    CommitInputMode::Insert => (Color::LightGreen, Color::Black),
+                    CommitInputMode::Visual | CommitInputMode::VisualLine => {
+                        (Color::Rgb(170, 110, 255), Color::Black)
+                    }
                 };
+
+                // Keep the editor chrome quiet. Normal mode exposes only `? help`;
+                // the actual Vim and commit-specific bindings live in the overlay.
+                if *mode == CommitInputMode::Normal {
+                    let footer_width = inner.width.saturating_sub(mode_width.saturating_add(1));
+                    if footer_width > 0 {
+                        frame.render_widget(
+                            Paragraph::new(Line::from(vec![
+                                Span::styled(
+                                    " ? ",
+                                    Style::default()
+                                        .fg(theme.text)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled("help", Style::default().fg(theme.text_dimmed)),
+                            ])),
+                            Rect::new(inner.x, footer_y, footer_width, 1),
+                        );
+                    }
+                }
+
                 frame.render_widget(
-                    Paragraph::new(hint_one),
-                    Rect::new(inner.x, hint_y, inner.width, 1),
+                    Block::default().style(Style::default().bg(mode_color)),
+                    mode_rect,
                 );
                 frame.render_widget(
-                    Paragraph::new(hint_two),
-                    Rect::new(inner.x, hint_y + 1, inner.width, 1),
+                    Paragraph::new(Line::from(Span::styled(
+                        mode_label,
+                        Style::default().fg(mode_text_color),
+                    )))
+                    .alignment(ratatui::layout::Alignment::Center),
+                    mode_rect,
                 );
+
+                if *show_help {
+                    let help_width = ta_rect.width.saturating_sub(6).min(72).max(1);
+                    let help_height = ta_rect.height.saturating_sub(2).min(24).max(1);
+                    let help_rect = Rect::new(
+                        ta_rect.x + ta_rect.width.saturating_sub(help_width) / 2,
+                        ta_rect.y + ta_rect.height.saturating_sub(help_height) / 2,
+                        help_width,
+                        help_height,
+                    );
+                    frame.render_widget(Clear, help_rect);
+                    frame.render_widget(
+                        Block::default()
+                            .title(" Commit editor keys ")
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::Blue)),
+                        help_rect,
+                    );
+                    let help_inner = help_rect.inner(ratatui::layout::Margin {
+                        horizontal: 2,
+                        vertical: 1,
+                    });
+                    let key = Style::default().fg(theme.accent_secondary).add_modifier(Modifier::BOLD);
+                    let text = Style::default().fg(theme.text);
+                    let dim = Style::default().fg(theme.text_dimmed);
+                    let section = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
+                    let help_lines = vec![
+                        Line::from(Span::styled("NORMAL", section)),
+                        Line::from(vec![Span::styled("h/l  j/k  w/b  H/L", key), Span::styled("   move / words / line ends", dim)]),
+                        Line::from(vec![Span::styled("f{char} / F{char}", key), Span::styled("   find forward / backward on line", dim)]),
+                        Line::from(vec![Span::styled("2j / 2k / …", key), Span::styled("   count-prefix motions", dim), Span::styled("   backspace", key), Span::styled("   move left", text)]),
+                        Line::from(vec![Span::styled("i/a  I/A", key), Span::styled("   insert/append; I/A at line bounds", dim)]),
+                        Line::from(vec![Span::styled("o", key), Span::styled("   open line below", text), Span::styled("     u", key), Span::styled("   undo", text)]),
+                        Line::from(vec![Span::styled("x", key), Span::styled("   delete char", text), Span::styled("   dw", key), Span::styled("   delete word", text), Span::styled("   dd", key), Span::styled("   delete line", text)]),
+                        Line::from(vec![Span::styled("v / V", key), Span::styled("   visual / whole line", text), Span::styled("   vi{delim}", key), Span::styled("   select inside quotes/brackets", text)]),
+                        Line::from(""),
+                        Line::from(Span::styled("INSERT", section)),
+                        Line::from(vec![Span::styled("esc", key), Span::styled(" normal   ", text), Span::styled("enter", key), Span::styled(" newline / enter description", text)]),
+                        Line::from(vec![Span::styled("ctrl+enter", key), Span::styled(" commit   ", text), Span::styled("tab", key), Span::styled(" switch field", text)]),
+                        Line::from(""),
+                        Line::from(Span::styled("VISUAL", section)),
+                        Line::from(vec![Span::styled("h/j/k/l  w/b  H/L", key), Span::styled("   extend selection", dim)]),
+                        Line::from(vec![Span::styled("d/x", key), Span::styled(" delete   ", text), Span::styled("c", key), Span::styled(" change   ", text), Span::styled("y", key), Span::styled(" yank   ", text), Span::styled("esc/v", key), Span::styled(" normal", text)]),
+                        Line::from(""),
+                        Line::from(Span::styled("COMMIT", section)),
+                        Line::from(vec![Span::styled("ctrl+j / ctrl+k", key), Span::styled("   smooth scroll description", dim)]),
+                        Line::from(vec![Span::styled("tab", key), Span::styled(" switch field   ", text), Span::styled("enter", key), Span::styled(" commit   ", text), Span::styled("esc", key), Span::styled(" save draft", text)]),
+                        Line::from(vec![Span::styled("alt+s", key), Span::styled(" sign-off   ", text), Span::styled("ctrl+o", key), Span::styled(" menu   ", text), Span::styled("ctrl+g", key), Span::styled(" AI message", text)]),
+                        Line::from(""),
+                        Line::from(vec![Span::styled("? / esc", key), Span::styled("   close this help", dim)]),
+                    ];
+                    frame.render_widget(Paragraph::new(help_lines), help_inner);
+                }
             } else {
                 // Fallback: just render summary
                 frame.render_widget(summary_textarea, inner);
