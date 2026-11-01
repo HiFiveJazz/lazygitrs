@@ -1988,6 +1988,19 @@ impl Gui {
             // Render
             let theme = self.active_theme();
             crate::pager::image_preview::flush_cleanup(terminal.backend_mut());
+            // The commit editor uses the real terminal cursor so it can mirror
+            // Vim's shape: a thin bar in Insert and a block in Normal/Visual.
+            // Frame::set_cursor_position (in views.rs) owns visibility/position;
+            // this only selects the terminal cursor shape.
+            if let PopupState::CommitInput { mode, .. } = &self.popup {
+                let cursor_style = match mode {
+                    popup::CommitInputMode::Insert => cursor::SetCursorStyle::SteadyBar,
+                    popup::CommitInputMode::Normal
+                    | popup::CommitInputMode::Visual
+                    | popup::CommitInputMode::VisualLine => cursor::SetCursorStyle::SteadyBlock,
+                };
+                execute!(terminal.backend_mut(), cursor_style)?;
+            }
             self.diff_view.image_preview_hidden = self.popup != PopupState::None
                 || (self.show_command_log
                     && self
@@ -7406,7 +7419,6 @@ impl Gui {
                 focus,
                 mode,
                 pending_command,
-                show_help,
                 ..
             } => {
                 use crossterm::event::KeyModifiers;
@@ -7415,36 +7427,36 @@ impl Gui {
                 let focus = *focus;
                 let mode = *mode;
                 let pending_command = *pending_command;
-                let help_visible = *show_help;
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                 let alt = key.modifiers.contains(KeyModifiers::ALT);
                 let cmd = has_command_modifier(key.modifiers);
 
-                // The commit help is an overlay on top of the editor rather
-                // than a replacement popup, so the draft/undo state remains
-                // untouched while it is visible.
-                if help_visible {
-                    if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
-                        if let PopupState::CommitInput { show_help, .. } = &mut self.popup {
-                            *show_help = false;
-                        }
-                    }
-                    return Ok(());
-                }
+                // Use the same searchable Command Palette as Files/Branches/Commits
+                // instead of maintaining a one-off commit-editor help overlay.
                 if mode == popup::CommitInputMode::Normal
                     && key.code == KeyCode::Char('?')
-                    && key.modifiers.is_empty()
+                    && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
                 {
+                    self.show_commit_command_palette();
+                    return Ok(());
+                }
+
+                // Eyeliner hints exist only between f/F and the target key.
+                // Clearing here also handles Tab, commit actions, Esc, etc.
+                if matches!(
+                    pending_command,
+                    popup::CommitPendingCommand::FindForward(_)
+                        | popup::CommitPendingCommand::FindBackward(_)
+                ) {
                     if let PopupState::CommitInput {
-                        show_help,
-                        pending_command,
+                        summary_textarea,
+                        body_textarea,
                         ..
                     } = &mut self.popup
                     {
-                        *show_help = true;
-                        *pending_command = popup::CommitPendingCommand::None;
+                        popup::clear_eyeliner_highlights(summary_textarea);
+                        popup::clear_eyeliner_highlights(body_textarea);
                     }
-                    return Ok(());
                 }
 
                 // Any direct key input interrupts an in-flight smooth scroll;
@@ -7540,21 +7552,31 @@ impl Gui {
                         .ai_generate,
                 ) {
                     self.trigger_ai_commit_generation_from_editor();
-                } else if focus == popup::CommitInputFocus::Body
-                    && ctrl
+                } else if ctrl
                     && matches!(key.code, KeyCode::Char('j') | KeyCode::Char('k'))
+                    && !mode.is_visual()
                 {
-                    let area = Rect::new(0, 0, self.layout.width, self.layout.height);
-                    let visible_rows = views::commit_description_textarea_geometry(&self.popup, area)
-                        .map(|rect| rect.height as isize)
-                        .unwrap_or(1)
-                        .max(1);
-                    let amount = (visible_rows / 2).max(1);
-                    let direction = if key.code == KeyCode::Char('k') { -1 } else { 1 };
-                    self.queue_commit_input_scroll(direction * amount);
-                    if let PopupState::CommitInput { pending_command, .. } = &mut self.popup {
+                    // Match lazygitrs' existing patch-preview/list neoscroll: Ctrl-J/K
+                    // animates the active visual row by 22 lines and the textarea
+                    // viewport follows only when the cursor reaches an edge.
+                    if let PopupState::CommitInput {
+                        focus,
+                        summary_textarea,
+                        body_textarea,
+                        pending_command,
+                        ..
+                    } = &mut self.popup
+                    {
+                        popup::set_commit_input_focus(
+                            focus,
+                            summary_textarea,
+                            body_textarea,
+                            popup::CommitInputFocus::Body,
+                        );
                         *pending_command = popup::CommitPendingCommand::None;
                     }
+                    let direction = if key.code == KeyCode::Char('k') { -1 } else { 1 };
+                    self.queue_commit_input_scroll(direction * 22);
                 } else if key.code == KeyCode::Tab {
                     // Tab is the explicit cross-field motion in every mode. In
                     // Visual mode the selection is local to each field, so a
@@ -7632,12 +7654,16 @@ impl Gui {
                         ..
                     } = &mut self.popup
                     {
+                        let forward = matches!(
+                            *pending_command,
+                            popup::CommitPendingCommand::FindForward(_)
+                        );
+                        let count = (*pending_command).count();
+                        // Eyeliner hints are transient: clear them as soon as the
+                        // target key (or Esc/anything else) resolves the pending f/F.
+                        popup::clear_eyeliner_highlights(summary_textarea);
+                        popup::clear_eyeliner_highlights(body_textarea);
                         if let KeyCode::Char(target) = key.code {
-                            let forward = matches!(
-                                *pending_command,
-                                popup::CommitPendingCommand::FindForward(_)
-                            );
-                            let count = (*pending_command).count();
                             match *focus {
                                 popup::CommitInputFocus::Summary => {
                                     popup::find_summary_char(
@@ -7668,13 +7694,41 @@ impl Gui {
                     && !cmd
                     && matches!(key.code, KeyCode::Char('f') | KeyCode::Char('F'))
                 {
-                    if let PopupState::CommitInput { pending_command, .. } = &mut self.popup {
+                    let dimmed = ratatui::style::Style::default()
+                        .fg(ratatui::style::Color::DarkGray);
+                    let target = ratatui::style::Style::default()
+                        .fg(ratatui::style::Color::Rgb(255, 165, 0));
+                    if let PopupState::CommitInput {
+                        focus,
+                        summary_textarea,
+                        body_textarea,
+                        pending_command,
+                        ..
+                    } = &mut self.popup
+                    {
                         let count = (*pending_command).count().min(u16::MAX as usize) as u16;
-                        *pending_command = if key.code == KeyCode::Char('f') {
+                        let forward = key.code == KeyCode::Char('f');
+                        *pending_command = if forward {
                             popup::CommitPendingCommand::FindForward(count)
                         } else {
                             popup::CommitPendingCommand::FindBackward(count)
                         };
+                        popup::clear_eyeliner_highlights(summary_textarea);
+                        popup::clear_eyeliner_highlights(body_textarea);
+                        match *focus {
+                            popup::CommitInputFocus::Summary => popup::apply_eyeliner_highlights(
+                                summary_textarea,
+                                forward,
+                                dimmed,
+                                target,
+                            ),
+                            popup::CommitInputFocus::Body => popup::apply_eyeliner_highlights(
+                                body_textarea,
+                                forward,
+                                dimmed,
+                                target,
+                            ),
+                        }
                     }
                     return Ok(());
                 } else if mode == popup::CommitInputMode::Normal
@@ -7773,6 +7827,30 @@ impl Gui {
                 } else {
                     match mode {
                         popup::CommitInputMode::Insert => {
+                            // Fresh commit prompts open directly in Insert mode, so
+                            // there is no preceding `i/a` keypress to seed the local
+                            // undo stack. Capture the pre-edit state on the first
+                            // Insert-mode action; subsequent insert sessions already
+                            // push their snapshot when Normal mode enters Insert.
+                            if key.code != KeyCode::Esc {
+                                if let PopupState::CommitInput {
+                                    focus,
+                                    summary_textarea,
+                                    body_state,
+                                    undo_stack,
+                                    ..
+                                } = &mut self.popup
+                                {
+                                    if undo_stack.is_empty() {
+                                        popup::push_commit_undo_snapshot(
+                                            undo_stack,
+                                            summary_textarea,
+                                            body_state,
+                                            *focus,
+                                        );
+                                    }
+                                }
+                            }
                             if key.code == KeyCode::Esc {
                                 let wrap_width = self.commit_body_wrap_width();
                                 if let PopupState::CommitInput {
@@ -8121,11 +8199,18 @@ impl Gui {
                             }
                         }
                         popup::CommitInputMode::Normal => {
-                            if key.code == KeyCode::Esc {
+                            if key.code == KeyCode::Char('q') && key.modifiers.is_empty() {
                                 let stashed =
                                     std::mem::replace(&mut self.popup, PopupState::None);
                                 self.saved_commit_popup = Some(stashed);
                                 self.commit_history_idx = None;
+                            } else if key.code == KeyCode::Esc {
+                                // Escape is a mode/cancel key in Vim, not a quit key.
+                                // With no pending operator/text object there is simply
+                                // nothing to cancel, so remain in Normal mode.
+                                if let PopupState::CommitInput { pending_command, .. } = &mut self.popup {
+                                    *pending_command = popup::CommitPendingCommand::None;
+                                }
                             } else if key.code == KeyCode::Enter {
                                 self.submit_commit_input();
                             } else if key.code == KeyCode::Char('u')
@@ -8724,7 +8809,7 @@ impl Gui {
                 KeyCode::Esc | KeyCode::Char('?')
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                 {
-                    self.popup = PopupState::None;
+                    self.popup = self.pending_commit_popup.take().unwrap_or(PopupState::None);
                     return Ok(());
                 }
                 KeyCode::Enter => {
@@ -8789,10 +8874,17 @@ impl Gui {
         if let Some(action) = selected_action {
             match action {
                 CommandAction::Dispatch(key) => {
-                    self.popup = PopupState::None;
+                    // A commit-editor palette temporarily stashes the editor in
+                    // pending_commit_popup. Restore it before dispatch so selecting
+                    // a palette command behaves exactly like typing that key in the
+                    // editor; normal palettes still dispatch against PopupState::None.
+                    self.popup = self.pending_commit_popup.take().unwrap_or(PopupState::None);
                     self.handle_key(key)?;
                 }
                 CommandAction::OpenThemePicker => {
+                    if let Some(stashed) = self.pending_commit_popup.take() {
+                        self.saved_commit_popup = Some(stashed);
+                    }
                     self.popup = PopupState::None;
                     self.show_theme_picker();
                 }
@@ -9860,6 +9952,75 @@ impl Gui {
             loading_index: None,
         };
         Ok(())
+    }
+
+    /// Show the commit editor's key reference using the same searchable
+    /// Command Palette used by Files, Branches, Commits, and the diff viewer.
+    fn show_commit_command_palette(&mut self) {
+        let kb = &self.config.user_config.keybinding.commit_message;
+        let sections = vec![
+            CommandSection {
+                title: "Commit editor — NORMAL".into(),
+                entries: vec![
+                    CommandEntry::keybinding("h / l / backspace".into(), "Move left / right".into()),
+                    CommandEntry::keybinding("j / k".into(), "Move down / up; cross Summary/Description".into()),
+                    CommandEntry::keybinding("2j / 2k / …".into(), "Count-prefix motions".into()),
+                    CommandEntry::keybinding("w / b".into(), "Next / previous word".into()),
+                    CommandEntry::keybinding("H / L".into(), "Start / last character of line".into()),
+                    CommandEntry::keybinding("f{char} / F{char}".into(), "Eyeliner find forward / backward".into()),
+                    CommandEntry::keybinding("i / a / I / A".into(), "Enter Insert mode".into()),
+                    CommandEntry::keybinding("o".into(), "Open line below and insert".into()),
+                    CommandEntry::keybinding("x".into(), "Delete character".into()),
+                    CommandEntry::keybinding("dw".into(), "Delete word".into()),
+                    CommandEntry::keybinding("dd".into(), "Delete line".into()),
+                    CommandEntry::keybinding("u".into(), "Undo editor change".into()),
+                    CommandEntry::keybinding("v / V".into(), "Visual / Visual Line mode".into()),
+                    CommandEntry::keybinding("vi{delim}".into(), "Select inside quotes or brackets".into()),
+                    CommandEntry::keybinding("enter".into(), "Create commit".into()),
+                    CommandEntry::keybinding("q".into(), "Save draft and close".into()),
+                ],
+            },
+            CommandSection {
+                title: "Commit editor — INSERT".into(),
+                entries: vec![
+                    CommandEntry::keybinding("esc".into(), "Return to Normal mode".into()),
+                    CommandEntry::keybinding("enter".into(), "Description newline / move from Summary".into()),
+                    CommandEntry::keybinding("tab".into(), "Switch Summary / Description".into()),
+                    CommandEntry::keybinding("ctrl+enter".into(), "Create commit".into()),
+                ],
+            },
+            CommandSection {
+                title: "Commit editor — VISUAL".into(),
+                entries: vec![
+                    CommandEntry::keybinding("h / j / k / l".into(), "Extend selection".into()),
+                    CommandEntry::keybinding("w / b / H / L".into(), "Extend by word / line bound".into()),
+                    CommandEntry::keybinding("d / x".into(), "Delete selection".into()),
+                    CommandEntry::keybinding("c".into(), "Change selection".into()),
+                    CommandEntry::keybinding("y".into(), "Yank selection".into()),
+                    CommandEntry::keybinding("esc / v".into(), "Return to Normal mode".into()),
+                ],
+            },
+            CommandSection {
+                title: "Commit actions".into(),
+                entries: vec![
+                    CommandEntry::keybinding("ctrl+j / ctrl+k".into(), "Smooth jump 22 description rows down / up".into()),
+                    CommandEntry::keybinding(kb.sign_off.clone(), "Toggle Signed-off-by".into()),
+                    CommandEntry::keybinding(kb.commit_menu.clone(), "Open commit menu".into()),
+                    CommandEntry::keybinding(kb.ai_generate.clone(), "Generate commit message with AI".into()),
+                    CommandEntry::keybinding("tab".into(), "Switch Summary / Description".into()),
+                    CommandEntry::keybinding("? / esc".into(), "Close command palette".into()),
+                ],
+            },
+        ];
+
+        let stashed = std::mem::replace(&mut self.popup, PopupState::None);
+        self.pending_commit_popup = Some(stashed);
+        self.popup = PopupState::CommandPalette {
+            sections,
+            selected: 0,
+            search_textarea: popup::make_command_palette_search_textarea(),
+            scroll_offset: 0,
+        };
     }
 
     /// Show the commit menu from within the commit message editor (<c-o>).
@@ -12850,70 +13011,47 @@ impl Gui {
         )
     }
 
+    fn commit_body_visible_rows(&self) -> usize {
+        // views.rs: popup border (2 rows) + Summary/Description chrome (5 rows).
+        popup::commit_popup_height(self.layout.height)
+            .saturating_sub(7)
+            .max(1) as usize
+    }
+
     fn queue_commit_input_scroll(&mut self, rows: isize) {
         if rows == 0 {
             return;
         }
-        let area = Rect::new(0, 0, self.layout.width, self.layout.height);
-        let Some(body_rect) = views::commit_description_textarea_geometry(&self.popup, area) else {
-            return;
-        };
-        let visible_rows = body_rect.height.max(1) as usize;
-
+        let visible_rows = self.commit_body_visible_rows();
         let PopupState::CommitInput {
             body_textarea,
             body_scroll_remaining,
-            body_scroll_top,
             ..
         } = &mut self.popup
         else {
             return;
         };
 
-        let line_count = body_textarea.lines().len();
-        let max_top = line_count.saturating_sub(visible_rows);
-        if max_top == 0 {
+        // There is nothing to scroll if every projected body row already fits.
+        // This is the guard that prevents Ctrl-J/K from making short messages
+        // disappear off the top of the editor.
+        if body_textarea.lines().len() <= visible_rows {
             *body_scroll_remaining = 0;
-            *body_scroll_top = 0;
             return;
         }
 
-        // Resync from the actual rendered textarea whenever the cursor is
-        // visible. Once smooth scrolling carries the viewport away from the
-        // cursor, `rendered_cursor_position()` becomes None and the tracked
-        // top row remains our source of truth.
-        if let Some(position) = body_textarea.rendered_cursor_position() {
-            let cursor_row = body_textarea.cursor().0;
-            let visible_cursor_row = position.y.saturating_sub(body_rect.y) as usize;
-            *body_scroll_top = cursor_row.saturating_sub(visible_cursor_row).min(max_top);
-        } else {
-            *body_scroll_top = (*body_scroll_top).min(max_top);
-        }
-
-        let amount = rows.unsigned_abs();
-        let allowed = if rows > 0 {
-            amount.min(max_top.saturating_sub(*body_scroll_top))
-        } else {
-            amount.min(*body_scroll_top)
-        };
-        *body_scroll_remaining = if rows > 0 {
-            allowed as isize
-        } else {
-            -(allowed as isize)
-        };
+        *body_scroll_remaining = rows.clamp(-999, 999);
     }
 
     fn tick_commit_input_scroll_animation(&mut self) {
-        let area = Rect::new(0, 0, self.layout.width, self.layout.height);
-        let visible_rows = views::commit_description_textarea_geometry(&self.popup, area)
-            .map(|rect| rect.height as usize)
-            .unwrap_or(1)
-            .max(1);
-
+        let wrap_width = self.commit_body_wrap_width();
+        let visible_rows = self.commit_body_visible_rows();
         let PopupState::CommitInput {
             body_textarea,
+            body_state,
             body_scroll_remaining,
             body_scroll_top,
+            mode,
             ..
         } = &mut self.popup
         else {
@@ -12923,34 +13061,33 @@ impl Gui {
             return;
         }
 
-        let max_top = body_textarea.lines().len().saturating_sub(visible_rows);
-        if max_top == 0 {
-            *body_scroll_remaining = 0;
-            *body_scroll_top = 0;
-            return;
-        }
-        *body_scroll_top = (*body_scroll_top).min(max_top);
-
+        // Move the actual visual cursor one row per animation tick. TextArea
+        // deliberately keeps its cursor visible, so moving only its internal
+        // viewport gets reconciled away and appears to do nothing. Driving the
+        // BodySoftWrap cursor gives the viewport a real target to follow and
+        // produces the same visible smooth motion as the patch preview.
         let step: isize = if *body_scroll_remaining > 0 { 1 } else { -1 };
-        let can_scroll = if step > 0 {
-            *body_scroll_top < max_top
+        let before = body_state.visual_cursor(wrap_width);
+        if step > 0 {
+            if *mode == popup::CommitInputMode::Insert {
+                body_state.move_visual_down(wrap_width);
+            } else {
+                body_state.move_visual_down_normal(wrap_width);
+            }
+        } else if *mode == popup::CommitInputMode::Insert {
+            body_state.move_visual_up(wrap_width);
         } else {
-            *body_scroll_top > 0
-        };
-        if !can_scroll {
+            body_state.move_visual_up_normal(wrap_width);
+        }
+        let after = body_state.visual_cursor(wrap_width);
+        if after == before {
             *body_scroll_remaining = 0;
             return;
         }
-
-        // Scroll the viewport itself one row per animation tick. This is the
-        // neoscroll behavior we want: the editing cursor stays where it is
-        // while the description glides underneath it.
-        body_textarea.scroll((step as i16, 0));
-        if step > 0 {
-            *body_scroll_top += 1;
-        } else {
-            *body_scroll_top = (*body_scroll_top).saturating_sub(1);
-        }
+        body_state.apply_cursor_into(body_textarea, wrap_width);
+        *body_scroll_top = after
+            .0
+            .saturating_sub(visible_rows.saturating_sub(1));
         *body_scroll_remaining -= step;
     }
 
@@ -15977,11 +16114,9 @@ mod terminal_mouse_tests {
             .unwrap();
 
         assert!(matches!(&gui.popup, PopupState::CommitInput { mode, focus, .. }
-            if *mode == popup::CommitInputMode::Normal
+            if *mode == popup::CommitInputMode::Insert
                 && *focus == popup::CommitInputFocus::Summary));
 
-        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
-            .unwrap();
         for c in "subject".chars() {
             gui.handle_popup_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
                 .unwrap();
@@ -16037,9 +16172,8 @@ mod terminal_mouse_tests {
         gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
             .unwrap();
 
-        // One Normal-mode `u` reverts a whole Insert session.
-        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
-            .unwrap();
+        // A fresh commit starts in Insert; one Normal-mode `u` reverts
+        // that whole first Insert session.
         for c in "subject".chars() {
             gui.handle_popup_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
                 .unwrap();
@@ -16135,9 +16269,11 @@ mod terminal_mouse_tests {
             summary_textarea,
             body_textarea,
             body_state,
+            mode,
             ..
         } = &mut gui.popup
         {
+            *mode = popup::CommitInputMode::Normal;
             body_state.set_text("zero\none\ntwo\nthree");
             body_state.move_to_start();
             body_state.render_into(body_textarea, wrap_width);
@@ -16198,9 +16334,11 @@ mod terminal_mouse_tests {
             summary_textarea,
             body_textarea,
             body_state,
+            mode,
             ..
         } = &mut gui.popup
         {
+            *mode = popup::CommitInputMode::Normal;
             body_state.set_text("alpha   beta alpha");
             body_state.move_to_start();
             body_state.render_into(body_textarea, wrap_width);
@@ -16240,7 +16378,7 @@ mod terminal_mouse_tests {
     }
 
     #[test]
-    fn commit_editor_question_mark_toggles_local_help() {
+    fn commit_editor_question_mark_uses_command_palette_and_restores_editor() {
         let repo = TempRepo::new("commit-vim-help");
         repo.commit("file", "base");
         std::fs::write(repo.path().join("file"), "changed").unwrap();
@@ -16251,16 +16389,25 @@ mod terminal_mouse_tests {
         gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
             .unwrap();
 
-        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
-            .unwrap();
-        assert!(matches!(&gui.popup, PopupState::CommitInput { show_help, .. } if *show_help));
+        // `?` is a Normal-mode command, and opens the same searchable
+        // CommandPalette state used by the rest of lazygitrs.
         gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
-        assert!(matches!(&gui.popup, PopupState::CommitInput { show_help, .. } if !*show_help));
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommandPalette { sections, .. }
+            if sections.iter().any(|section| section.title.contains("NORMAL"))));
+        assert!(matches!(&gui.pending_commit_popup, Some(PopupState::CommitInput { .. })));
+
+        gui.handle_command_palette_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput { mode, .. }
+            if *mode == popup::CommitInputMode::Normal));
+        assert!(gui.pending_commit_popup.is_none());
     }
 
     #[test]
-    fn commit_editor_ctrl_j_queues_smooth_body_scroll() {
+    fn commit_editor_ctrl_j_k_animate_visual_cursor_and_short_text_is_fixed() {
         let repo = TempRepo::new("commit-vim-scroll");
         repo.commit("file", "base");
         std::fs::write(repo.path().join("file"), "changed").unwrap();
@@ -16300,29 +16447,32 @@ mod terminal_mouse_tests {
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
             .unwrap();
         let queued = match &gui.popup {
-            PopupState::CommitInput {
-                body_scroll_remaining,
-                ..
-            } => *body_scroll_remaining,
+            PopupState::CommitInput { body_scroll_remaining, .. } => *body_scroll_remaining,
             _ => 0,
         };
-        assert!(queued > 0);
+        assert_eq!(queued, 22);
         gui.tick_commit_input_scroll_animation();
         assert!(matches!(&gui.popup, PopupState::CommitInput {
-            body_scroll_remaining, body_scroll_top, body_state, ..
-        } if *body_scroll_remaining == queued - 1
-            && *body_scroll_top == 1
-            && body_state.visual_cursor(wrap_width).0 == 0));
+            body_scroll_remaining, body_scroll_top, body_state, body_textarea, ..
+        } if *body_scroll_remaining == 21
+            && *body_scroll_top == 0
+            && body_state.visual_cursor(wrap_width) == (1, 0)
+            && body_state.visual_cursor(wrap_width) == body_textarea.cursor()));
 
+        // A new opposite-direction command cancels the old target and scrolls up.
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
             .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput { body_scroll_remaining, .. }
+            if *body_scroll_remaining == -22));
         gui.tick_commit_input_scroll_animation();
         assert!(matches!(&gui.popup, PopupState::CommitInput {
-            body_scroll_top, body_state, ..
-        } if *body_scroll_top == 0 && body_state.visual_cursor(wrap_width).0 == 0));
+            body_scroll_remaining, body_scroll_top, body_state, body_textarea, ..
+        } if *body_scroll_remaining == -21
+            && *body_scroll_top == 0
+            && body_state.visual_cursor(wrap_width) == (0, 0)
+            && body_state.visual_cursor(wrap_width) == body_textarea.cursor()));
 
-        // If all description rows fit, neoscroll must not move either the
-        // cursor or viewport off the top of otherwise-visible text.
+        // If every description row fits, Ctrl-J/K must not create a scroll target.
         if let PopupState::CommitInput { body_state, body_textarea, .. } = &mut gui.popup {
             body_state.set_text("one\ntwo\nthree");
             body_state.move_to_start();
@@ -16330,10 +16480,32 @@ mod terminal_mouse_tests {
         }
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
             .unwrap();
-        gui.tick_commit_input_scroll_animation();
-        assert!(matches!(&gui.popup, PopupState::CommitInput {
-            body_scroll_remaining, body_state, ..
-        } if *body_scroll_remaining == 0 && body_state.cursor_index() == 0));
+        assert!(matches!(&gui.popup, PopupState::CommitInput { body_scroll_remaining, .. }
+            if *body_scroll_remaining == 0));
+    }
+
+    #[test]
+    fn commit_editor_normal_escape_stays_open_and_q_saves_draft() {
+        let repo = TempRepo::new("commit-vim-q");
+        repo.commit("file", "base");
+        std::fs::write(repo.path().join("file"), "changed").unwrap();
+        repo.git(&["add", "file"]);
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput { mode, .. }
+            if *mode == popup::CommitInputMode::Normal));
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::None));
+        assert!(matches!(&gui.saved_commit_popup, Some(PopupState::CommitInput { .. })));
     }
 
     #[test]
@@ -16346,8 +16518,6 @@ mod terminal_mouse_tests {
         let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
         *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
         gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
-            .unwrap();
-        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
             .unwrap();
 
         for c in "subject".chars() {
@@ -16362,7 +16532,8 @@ mod terminal_mouse_tests {
         }
         gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
-        gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        // Escape only returns to Normal; `q` is the explicit draft/quit key.
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
             .unwrap();
         gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
             .unwrap();
@@ -16385,8 +16556,6 @@ mod terminal_mouse_tests {
         let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
         *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
         gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
-            .unwrap();
-        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
             .unwrap();
 
         for c in "subject".chars() {
@@ -16708,7 +16877,11 @@ fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> 
     if nested {
         // Hide our cursor leftovers, pop the kitty flags we pushed, then put
         // Helix's progressive flags back (DISAMBIGUATE | REPORT_ALTERNATE_KEYS).
-        execute!(terminal.backend_mut(), cursor::Show)?;
+        execute!(
+            terminal.backend_mut(),
+            cursor::SetCursorStyle::DefaultUserShape,
+            cursor::Show
+        )?;
         if keyboard_enhanced {
             execute!(
                 terminal.backend_mut(),
@@ -16736,6 +16909,7 @@ fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> 
             crossterm::event::DisableFocusChange,
             crossterm::event::PopKeyboardEnhancementFlags,
             crossterm::event::DisableBracketedPaste,
+            cursor::SetCursorStyle::DefaultUserShape,
             cursor::Show,
             LeaveAlternateScreen
         )?;
@@ -16745,6 +16919,7 @@ fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> 
             crossterm::event::DisableMouseCapture,
             crossterm::event::DisableFocusChange,
             crossterm::event::DisableBracketedPaste,
+            cursor::SetCursorStyle::DefaultUserShape,
             cursor::Show,
             LeaveAlternateScreen
         )?;

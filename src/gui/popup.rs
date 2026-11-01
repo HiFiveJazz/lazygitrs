@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use anyhow::Result;
 use crossterm::event::KeyEvent;
+use ratatui::style::Style;
 use tui_textarea::{CursorMove, TextArea};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -701,6 +702,10 @@ impl BodySoftWrap {
         }
         if i < n {
             self.cursor = i;
+        } else if let Some(last) = chars.iter().rposition(|c| !c.is_whitespace()) {
+            // No next token: behave like Neovim at the end of the buffer and
+            // settle on the final real character of the final word/token.
+            self.cursor = last;
         }
     }
 
@@ -1303,7 +1308,116 @@ pub fn move_summary_word_forward_vim(textarea: &mut TextArea<'static>) {
     }
     if i < n {
         textarea.move_cursor(CursorMove::Jump(0, i as u16));
+    } else if let Some(last) = chars.iter().rposition(|c| !c.is_whitespace()) {
+        // Neovim-like terminal behavior: once `w` has no next token, pin the
+        // Normal-mode cursor to the final real character instead of leaving it
+        // somewhere in trailing whitespace or at an insertion cell.
+        textarea.move_cursor(CursorMove::Jump(0, last as u16));
     }
+}
+
+/// Eyeliner-style candidate positions for the current visual line.
+///
+/// A primary candidate is a word character that occurs only once on the
+/// searched side of the cursor, so `f{char}` / `F{char}` can jump to that word
+/// directly. Words without such a character still get a secondary hint on
+/// their first (forward) or last (backward) character.
+fn eyeliner_targets(line: &str, cursor: usize, forward: bool) -> Vec<(usize, bool)> {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    let cursor = cursor.min(chars.len().saturating_sub(1));
+    let in_direction = |idx: usize| {
+        if forward {
+            idx > cursor
+        } else {
+            idx < cursor
+        }
+    };
+
+    let mut frequency = HashMap::<char, usize>::new();
+    for (idx, ch) in chars.iter().copied().enumerate() {
+        if in_direction(idx) && is_word_char(ch) {
+            *frequency.entry(ch).or_default() += 1;
+        }
+    }
+
+    let mut words = Vec::<(usize, usize)>::new();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        if !is_word_char(chars[idx]) {
+            idx += 1;
+            continue;
+        }
+        let start = idx;
+        while idx < chars.len() && is_word_char(chars[idx]) {
+            idx += 1;
+        }
+        let end = idx;
+        if (start..end).any(|idx| in_direction(idx)) {
+            words.push((start, end));
+        }
+    }
+    if !forward {
+        words.reverse();
+    }
+
+    words
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let directional: Vec<usize> = if forward {
+                (start..end).filter(|idx| in_direction(*idx)).collect()
+            } else {
+                (start..end).rev().filter(|idx| in_direction(*idx)).collect()
+            };
+            if directional.is_empty() {
+                return None;
+            }
+            if let Some(idx) = directional
+                .iter()
+                .copied()
+                .find(|idx| frequency.get(&chars[*idx]).copied() == Some(1))
+            {
+                Some((idx, true))
+            } else {
+                Some((directional[0], false))
+            }
+        })
+        .collect()
+}
+
+/// Highlight Eyeliner-style `f` / `F` targets on the textarea's current row.
+pub fn apply_eyeliner_highlights(
+    textarea: &mut TextArea<'static>,
+    forward: bool,
+    dim_style: Style,
+    target_style: Style,
+) {
+    textarea.clear_custom_highlight();
+    let (row, col) = textarea.cursor();
+    let Some(line) = textarea.lines().get(row).cloned() else {
+        return;
+    };
+    let line_len = line.chars().count();
+
+    // Eyeliner dims the whole current line while find is pending, then paints
+    // just the jump labels back in a high-contrast orange. No bold/underline:
+    // the color contrast itself is the cue, matching the Neovim plugin feel.
+    if line_len > 0 {
+        textarea.custom_highlight(((row, 0), (row, line_len)), dim_style, 10);
+    }
+    for (target_col, _) in eyeliner_targets(&line, col, forward) {
+        textarea.custom_highlight(
+            ((row, target_col), (row, target_col + 1)),
+            target_style,
+            20,
+        );
+    }
+}
+
+pub fn clear_eyeliner_highlights(textarea: &mut TextArea<'static>) {
+    textarea.clear_custom_highlight();
 }
 
 pub fn move_summary_line_last_char(textarea: &mut TextArea<'static>) {
@@ -1916,9 +2030,10 @@ pub fn make_textarea(placeholder: &str) -> TextArea<'static> {
 
 pub fn make_commit_summary_textarea() -> TextArea<'static> {
     let mut ta = make_textarea("Required");
-    ta.set_cursor_line_style(
-        ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
-    );
+    // CommitInput renders the real terminal cursor (bar/block) instead of a
+    // reverse-video TextArea cell, so keep the widget's cursor paint neutral.
+    ta.set_cursor_style(ratatui::style::Style::default());
+    ta.set_cursor_line_style(ratatui::style::Style::default());
     ta
 }
 
@@ -1953,11 +2068,12 @@ pub fn set_commit_input_focus(
     body_textarea: &mut TextArea<'static>,
     new_focus: CommitInputFocus,
 ) {
-    let visible = ratatui::style::Style::default()
-        .add_modifier(ratatui::style::Modifier::REVERSED);
+    let visible = ratatui::style::Style::default();
     let hidden = ratatui::style::Style::default();
-    let current_line = ratatui::style::Style::default()
-        .add_modifier(ratatui::style::Modifier::BOLD);
+    // The active row background is painted by the popup renderer using the
+    // same selected-row color as Files/Commits/Branches. Keep TextArea's own
+    // cursor-line style neutral so it does not add bold/underline on top.
+    let current_line = ratatui::style::Style::default();
     *focus = new_focus;
     match new_focus {
         CommitInputFocus::Summary => {
@@ -2003,8 +2119,7 @@ pub fn reset_commit_input_view(popup: &mut PopupState, wrap_width: usize) {
     *body_textarea = make_commit_body_textarea();
     body_state.render_into(body_textarea, wrap_width.max(1));
 
-    let visible = ratatui::style::Style::default()
-        .add_modifier(ratatui::style::Modifier::REVERSED);
+    let visible = ratatui::style::Style::default();
     let hidden = ratatui::style::Style::default();
     summary_textarea.cancel_selection();
     body_textarea.cancel_selection();
@@ -2097,7 +2212,21 @@ impl CommandEntry {
 
 #[cfg(test)]
 mod commit_body_wrap_tests {
-    use super::{BodySoftWrap, WrapLayout, hard_wrap_commit_body, unwrap_commit_body};
+    use super::{
+        BodySoftWrap, WrapLayout, eyeliner_targets, hard_wrap_commit_body, unwrap_commit_body,
+    };
+
+    #[test]
+    fn eyeliner_marks_unique_per_word_targets_and_fallbacks() {
+        assert_eq!(
+            eyeliner_targets("cat dog pig", 0, true),
+            vec![(1, true), (4, true), (8, true)]
+        );
+        assert_eq!(
+            eyeliner_targets("foo zoo", 0, true),
+            vec![(1, false), (4, true)]
+        );
+    }
 
     #[test]
     fn vim_word_end_and_find_motions_land_on_characters() {
@@ -2116,6 +2245,20 @@ mod commit_body_wrap_tests {
         assert_eq!(body.cursor_index(), 14);
         assert!(body.find_char_on_visual_line(80, 'a', false, 1));
         assert_eq!(body.cursor_index(), 11);
+    }
+
+    #[test]
+    fn vim_word_forward_at_last_word_pins_to_last_character() {
+        let mut body = BodySoftWrap::from_text("alpha beta   ");
+        body.set_cursor_index(6);
+        body.move_word_right_vim();
+        assert_eq!(body.cursor_index(), 9);
+
+        let mut summary = super::make_commit_summary_textarea();
+        summary.insert_str("alpha beta   ");
+        summary.move_cursor(tui_textarea::CursorMove::Jump(0, 6));
+        super::move_summary_word_forward_vim(&mut summary);
+        assert_eq!(summary.cursor().1, 9);
     }
 
     #[test]

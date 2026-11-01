@@ -4963,7 +4963,6 @@ pub fn render_popup(
             body_textarea,
             focus,
             mode,
-            show_help,
             body_scroll_top,
             ..
         } => {
@@ -4999,6 +4998,13 @@ pub fn render_popup(
                     .fg(theme.accent_secondary)
                     .add_modifier(Modifier::BOLD);
                 let unfocused_style = Style::default().fg(theme.text_dimmed);
+                let (mode_color, mode_text_color) = match mode {
+                    CommitInputMode::Normal => (Color::Blue, Color::Black),
+                    CommitInputMode::Insert => (Color::LightGreen, Color::Black),
+                    CommitInputMode::Visual | CommitInputMode::VisualLine => {
+                        (Color::Rgb(170, 110, 255), Color::Black)
+                    }
+                };
 
                 // Summary label
                 let summary_label_area = Rect::new(inner.x, inner.y, inner.width, 1);
@@ -5015,6 +5021,12 @@ pub fn render_popup(
                 // Summary input (1 line)
                 let summary_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
                 frame.render_widget(summary_textarea, summary_area);
+                if *focus == CommitInputFocus::Summary && !mode.is_visual() {
+                    frame.buffer_mut().set_style(
+                        summary_area,
+                        Style::default().bg(theme.selected_bg),
+                    );
+                }
 
                 // Body label
                 let body_label_area = Rect::new(inner.x, inner.y + 3, inner.width, 1);
@@ -5064,7 +5076,7 @@ pub fn render_popup(
                         }
                         let relative = row.abs_diff(cursor_row);
                         let style = if relative == 0 {
-                            Style::default().fg(theme.accent_secondary).add_modifier(Modifier::BOLD)
+                            Style::default().fg(mode_color)
                         } else {
                             Style::default().fg(theme.text_dimmed)
                         };
@@ -5077,6 +5089,23 @@ pub fn render_popup(
                     frame.render_widget(Paragraph::new(numbers), gutter_area);
                 }
 
+                // Match the selected-row treatment used by Files/Commits/Branches:
+                // paint the entire active visual row with the theme's selection
+                // background rather than bolding its text. `set_style` patches only
+                // the background here, preserving text/selection/Eyeliner foregrounds.
+                if *focus == CommitInputFocus::Body && !mode.is_visual() {
+                    if let Some(position) = body_textarea.rendered_cursor_position() {
+                        if position.y >= body_area.y
+                            && position.y < body_area.y.saturating_add(body_area.height)
+                        {
+                            frame.buffer_mut().set_style(
+                                Rect::new(inner.x, position.y, inner.width, 1),
+                                Style::default().bg(theme.selected_bg),
+                            );
+                        }
+                    }
+                }
+
                 let footer_y = inner.y + inner.height.saturating_sub(1);
                 let mode_label = format!(" {} ", mode.label());
                 let mode_width = UnicodeWidthStr::width(mode_label.as_str()) as u16;
@@ -5087,33 +5116,6 @@ pub fn render_popup(
                     mode_width,
                     1,
                 );
-                let (mode_color, mode_text_color) = match mode {
-                    CommitInputMode::Normal => (Color::Blue, Color::Black),
-                    CommitInputMode::Insert => (Color::LightGreen, Color::Black),
-                    CommitInputMode::Visual | CommitInputMode::VisualLine => {
-                        (Color::Rgb(170, 110, 255), Color::Black)
-                    }
-                };
-
-                // Keep the editor chrome quiet. Normal mode exposes only `? help`;
-                // the actual Vim and commit-specific bindings live in the overlay.
-                if *mode == CommitInputMode::Normal {
-                    let footer_width = inner.width.saturating_sub(mode_width.saturating_add(1));
-                    if footer_width > 0 {
-                        frame.render_widget(
-                            Paragraph::new(Line::from(vec![
-                                Span::styled(
-                                    " ? ",
-                                    Style::default()
-                                        .fg(theme.text)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled("help", Style::default().fg(theme.text_dimmed)),
-                            ])),
-                            Rect::new(inner.x, footer_y, footer_width, 1),
-                        );
-                    }
-                }
 
                 frame.render_widget(
                     Block::default().style(Style::default().bg(mode_color)),
@@ -5128,58 +5130,18 @@ pub fn render_popup(
                     mode_rect,
                 );
 
-                if *show_help {
-                    let help_width = ta_rect.width.saturating_sub(6).min(72).max(1);
-                    let help_height = ta_rect.height.saturating_sub(2).min(24).max(1);
-                    let help_rect = Rect::new(
-                        ta_rect.x + ta_rect.width.saturating_sub(help_width) / 2,
-                        ta_rect.y + ta_rect.height.saturating_sub(help_height) / 2,
-                        help_width,
-                        help_height,
-                    );
-                    frame.render_widget(Clear, help_rect);
-                    frame.render_widget(
-                        Block::default()
-                            .title(" Commit editor keys ")
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Blue)),
-                        help_rect,
-                    );
-                    let help_inner = help_rect.inner(ratatui::layout::Margin {
-                        horizontal: 2,
-                        vertical: 1,
-                    });
-                    let key = Style::default().fg(theme.accent_secondary).add_modifier(Modifier::BOLD);
-                    let text = Style::default().fg(theme.text);
-                    let dim = Style::default().fg(theme.text_dimmed);
-                    let section = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
-                    let help_lines = vec![
-                        Line::from(Span::styled("NORMAL", section)),
-                        Line::from(vec![Span::styled("h/l  j/k  w/b  H/L", key), Span::styled("   move / words / line ends", dim)]),
-                        Line::from(vec![Span::styled("f{char} / F{char}", key), Span::styled("   find forward / backward on line", dim)]),
-                        Line::from(vec![Span::styled("2j / 2k / …", key), Span::styled("   count-prefix motions", dim), Span::styled("   backspace", key), Span::styled("   move left", text)]),
-                        Line::from(vec![Span::styled("i/a  I/A", key), Span::styled("   insert/append; I/A at line bounds", dim)]),
-                        Line::from(vec![Span::styled("o", key), Span::styled("   open line below", text), Span::styled("     u", key), Span::styled("   undo", text)]),
-                        Line::from(vec![Span::styled("x", key), Span::styled("   delete char", text), Span::styled("   dw", key), Span::styled("   delete word", text), Span::styled("   dd", key), Span::styled("   delete line", text)]),
-                        Line::from(vec![Span::styled("v / V", key), Span::styled("   visual / whole line", text), Span::styled("   vi{delim}", key), Span::styled("   select inside quotes/brackets", text)]),
-                        Line::from(""),
-                        Line::from(Span::styled("INSERT", section)),
-                        Line::from(vec![Span::styled("esc", key), Span::styled(" normal   ", text), Span::styled("enter", key), Span::styled(" newline / enter description", text)]),
-                        Line::from(vec![Span::styled("ctrl+enter", key), Span::styled(" commit   ", text), Span::styled("tab", key), Span::styled(" switch field", text)]),
-                        Line::from(""),
-                        Line::from(Span::styled("VISUAL", section)),
-                        Line::from(vec![Span::styled("h/j/k/l  w/b  H/L", key), Span::styled("   extend selection", dim)]),
-                        Line::from(vec![Span::styled("d/x", key), Span::styled(" delete   ", text), Span::styled("c", key), Span::styled(" change   ", text), Span::styled("y", key), Span::styled(" yank   ", text), Span::styled("esc/v", key), Span::styled(" normal", text)]),
-                        Line::from(""),
-                        Line::from(Span::styled("COMMIT", section)),
-                        Line::from(vec![Span::styled("ctrl+j / ctrl+k", key), Span::styled("   smooth scroll description", dim)]),
-                        Line::from(vec![Span::styled("tab", key), Span::styled(" switch field   ", text), Span::styled("enter", key), Span::styled(" commit   ", text), Span::styled("esc", key), Span::styled(" save draft", text)]),
-                        Line::from(vec![Span::styled("alt+s", key), Span::styled(" sign-off   ", text), Span::styled("ctrl+o", key), Span::styled(" menu   ", text), Span::styled("ctrl+g", key), Span::styled(" AI message", text)]),
-                        Line::from(""),
-                        Line::from(vec![Span::styled("? / esc", key), Span::styled("   close this help", dim)]),
-                    ];
-                    frame.render_widget(Paragraph::new(help_lines), help_inner);
+                // Use Ratatui's real terminal cursor for the commit editor. The
+                // render loop chooses a bar in INSERT and a block otherwise.
+                // Calling set_cursor_position here also lets Ratatui own cursor
+                // visibility, so every other screen remains cursor-hidden.
+                let cursor_position = match focus {
+                    CommitInputFocus::Summary => summary_textarea.rendered_cursor_position(),
+                    CommitInputFocus::Body => body_textarea.rendered_cursor_position(),
+                };
+                if let Some(position) = cursor_position {
+                    frame.set_cursor_position((position.x, position.y));
                 }
+
             } else {
                 // Fallback: just render summary
                 frame.render_widget(summary_textarea, inner);
@@ -5668,9 +5630,10 @@ pub fn render_popup(
                         Style::default()
                             .fg(theme.accent_secondary)
                             .add_modifier(Modifier::BOLD)
-                    } else if !executable {
-                        Style::default().fg(theme.text_dimmed)
                     } else {
+                        // Keybinding hints stay consistently blue even when an
+                        // entry is reference-only (for example `dw` or `vi{delim}`).
+                        // Availability is still communicated by the description.
                         Style::default().fg(theme.accent)
                     };
 

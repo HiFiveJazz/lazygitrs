@@ -216,7 +216,11 @@ fn install_panic_hook() {
         if crate::os::tty::nested_tty_launch() {
             // Same contract as restore_terminal: Helix still owns alt-screen /
             // raw / mouse. Only undo our kitty push and hand the tty back.
-            let _ = crossterm::execute!(out, crossterm::cursor::Show);
+            let _ = crossterm::execute!(
+                out,
+                crossterm::cursor::SetCursorStyle::DefaultUserShape,
+                crossterm::cursor::Show
+            );
             let _ = crossterm::execute!(
                 out,
                 crossterm::event::PopKeyboardEnhancementFlags,
@@ -232,6 +236,7 @@ fn install_panic_hook() {
                 out,
                 crossterm::event::DisableMouseCapture,
                 crossterm::event::DisableFocusChange,
+                crossterm::cursor::SetCursorStyle::DefaultUserShape,
                 crossterm::cursor::Show,
                 crossterm::terminal::LeaveAlternateScreen,
             );
