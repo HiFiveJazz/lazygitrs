@@ -2171,6 +2171,11 @@ pub enum PopupState {
         free_entry_category: String,
         on_confirm: ListPickerAction,
     },
+    /// Yazi-style three-pane filesystem browser used to choose an existing patch.
+    PatchFilePicker {
+        state: PatchFilePickerState,
+        on_confirm: ListPickerAction,
+    },
     /// Color theme picker with live preview and search.
     ThemePicker {
         core: ListPickerCore,
@@ -2758,6 +2763,331 @@ pub struct ListPickerCore {
     pub selected: usize,
     pub search_textarea: TextArea<'static>,
     pub scroll_offset: usize,
+}
+
+
+#[derive(Debug, Clone)]
+pub struct PatchPickerEntry {
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub is_dir: bool,
+    pub likely_patch: bool,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum PatchPickerPreview {
+    Empty,
+    Directory(Vec<PatchPickerEntry>),
+    Text {
+        lines: Vec<String>,
+        truncated: bool,
+        likely_patch: bool,
+    },
+    Binary {
+        size: u64,
+    },
+    Error(String),
+}
+
+/// Filesystem state for the Apply Patch browser. This deliberately owns its
+/// directory listings and preview instead of performing filesystem I/O during
+/// rendering, which keeps navigation deterministic and cheap.
+pub struct PatchFilePickerState {
+    pub repo_root: std::path::PathBuf,
+    pub current_dir: std::path::PathBuf,
+    pub entries: Vec<PatchPickerEntry>,
+    pub selected: usize,
+    pub parent_entries: Vec<PatchPickerEntry>,
+    pub parent_selected: usize,
+    pub preview: PatchPickerPreview,
+    /// Active line in a text preview. The current line is rendered with its
+    /// absolute number while surrounding lines use relative numbers.
+    pub preview_cursor: usize,
+    /// First visible preview line. This is owned by the picker rather than the
+    /// Paragraph widget so Ctrl-J/K can animate deterministically.
+    pub preview_scroll_top: usize,
+    /// Signed number of preview rows still to animate.
+    pub preview_scroll_remaining: isize,
+    /// Last preview viewport height used when the smooth scroll was queued.
+    preview_visible_rows: usize,
+}
+
+impl PatchFilePickerState {
+    pub fn new(repo_root: std::path::PathBuf, current_dir: std::path::PathBuf) -> Result<Self> {
+        let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
+        let current_dir = current_dir.canonicalize().unwrap_or(current_dir);
+        let mut state = Self {
+            repo_root,
+            current_dir,
+            entries: Vec::new(),
+            selected: 0,
+            parent_entries: Vec::new(),
+            parent_selected: 0,
+            preview: PatchPickerPreview::Empty,
+            preview_cursor: 0,
+            preview_scroll_top: 0,
+            preview_scroll_remaining: 0,
+            preview_visible_rows: 1,
+        };
+        state.refresh()?;
+        Ok(state)
+    }
+
+    pub fn selected_entry(&self) -> Option<&PatchPickerEntry> {
+        self.entries.get(self.selected)
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        if self.entries.is_empty() {
+            self.selected = 0;
+            self.preview = PatchPickerPreview::Empty;
+            return;
+        }
+        let last = self.entries.len().saturating_sub(1) as isize;
+        self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
+        self.refresh_preview();
+    }
+
+    pub fn select_first(&mut self) {
+        self.selected = 0;
+        self.refresh_preview();
+    }
+
+    pub fn select_last(&mut self) {
+        self.selected = self.entries.len().saturating_sub(1);
+        self.refresh_preview();
+    }
+
+    pub fn preview_scroll_active(&self) -> bool {
+        self.preview_scroll_remaining != 0
+    }
+
+    /// Queue a Neovim-style half-page preview scroll. The cursor and viewport
+    /// advance together one row per animation tick; when the entire preview
+    /// fits, only the cursor moves and the viewport remains pinned at zero.
+    pub fn queue_preview_half_page_scroll(&mut self, direction: isize, visible_rows: usize) {
+        let PatchPickerPreview::Text { lines, .. } = &self.preview else {
+            self.preview_scroll_remaining = 0;
+            return;
+        };
+        if lines.is_empty() || direction == 0 {
+            self.preview_scroll_remaining = 0;
+            return;
+        }
+
+        self.preview_visible_rows = visible_rows.max(1);
+        let amount = (self.preview_visible_rows / 2).max(1);
+        let last = lines.len().saturating_sub(1);
+        let current = self.preview_cursor.min(last);
+        let target = if direction > 0 {
+            current.saturating_add(amount).min(last)
+        } else {
+            current.saturating_sub(amount)
+        };
+        self.preview_scroll_remaining = target as isize - current as isize;
+        // Advance one row immediately. The popup is redrawn after the key event,
+        // so Ctrl-J/K always has visible feedback even before the 8 ms animation
+        // timer gets its next tick. Remaining rows continue through the normal
+        // animation loop.
+        if self.preview_scroll_remaining != 0 {
+            self.tick_preview_scroll();
+        }
+    }
+
+    pub fn tick_preview_scroll(&mut self) {
+        if self.preview_scroll_remaining == 0 {
+            return;
+        }
+        let PatchPickerPreview::Text { lines, .. } = &self.preview else {
+            self.preview_scroll_remaining = 0;
+            self.preview_scroll_top = 0;
+            self.preview_cursor = 0;
+            return;
+        };
+        if lines.is_empty() {
+            self.preview_scroll_remaining = 0;
+            self.preview_scroll_top = 0;
+            self.preview_cursor = 0;
+            return;
+        }
+
+        let step = self.preview_scroll_remaining.signum();
+        let last = lines.len().saturating_sub(1);
+        let next = if step > 0 {
+            self.preview_cursor.saturating_add(1).min(last)
+        } else {
+            self.preview_cursor.saturating_sub(1)
+        };
+        if next == self.preview_cursor {
+            self.preview_scroll_remaining = 0;
+            return;
+        }
+        self.preview_cursor = next;
+
+        let visible = self.preview_visible_rows.max(1);
+        let max_top = lines.len().saturating_sub(visible);
+        if max_top == 0 {
+            self.preview_scroll_top = 0;
+        } else if step > 0 {
+            self.preview_scroll_top = self.preview_scroll_top.saturating_add(1).min(max_top);
+        } else {
+            self.preview_scroll_top = self.preview_scroll_top.saturating_sub(1);
+        }
+        self.preview_scroll_remaining -= step;
+    }
+
+    pub fn enter_selected(&mut self) -> Result<Option<std::path::PathBuf>> {
+        let Some(entry) = self.selected_entry().cloned() else {
+            return Ok(None);
+        };
+        if entry.is_dir {
+            self.current_dir = entry.path;
+            self.selected = 0;
+            self.refresh()?;
+            Ok(None)
+        } else {
+            Ok(Some(entry.path))
+        }
+    }
+
+    pub fn go_parent(&mut self) -> Result<()> {
+        let Some(parent) = self.current_dir.parent().map(std::path::Path::to_path_buf) else {
+            return Ok(());
+        };
+        let previous = self.current_dir.clone();
+        self.current_dir = parent;
+        self.refresh()?;
+        if let Some(index) = self.entries.iter().position(|entry| entry.path.as_path() == previous.as_path()) {
+            self.selected = index;
+            self.refresh_preview();
+        }
+        Ok(())
+    }
+
+    pub fn go_to(&mut self, directory: std::path::PathBuf) -> Result<()> {
+        if !directory.is_dir() {
+            anyhow::bail!("Not a directory: {}", directory.display());
+        }
+        self.current_dir = directory.canonicalize().unwrap_or(directory);
+        self.selected = 0;
+        self.refresh()
+    }
+
+    fn refresh(&mut self) -> Result<()> {
+        self.entries = patch_picker_read_dir(&self.current_dir)?;
+        self.selected = self.selected.min(self.entries.len().saturating_sub(1));
+
+        self.parent_entries.clear();
+        self.parent_selected = 0;
+        if let Some(parent) = self.current_dir.parent() {
+            self.parent_entries = patch_picker_read_dir(parent).unwrap_or_default();
+            if let Some(index) = self
+                .parent_entries
+                .iter()
+                .position(|entry| entry.path.as_path() == self.current_dir.as_path())
+            {
+                self.parent_selected = index;
+            }
+        }
+
+        self.refresh_preview();
+        Ok(())
+    }
+
+    fn refresh_preview(&mut self) {
+        self.preview_cursor = 0;
+        self.preview_scroll_top = 0;
+        self.preview_scroll_remaining = 0;
+        self.preview = match self.selected_entry().cloned() {
+            None => PatchPickerPreview::Empty,
+            Some(entry) if entry.is_dir => match patch_picker_read_dir(&entry.path) {
+                Ok(entries) => PatchPickerPreview::Directory(entries),
+                Err(error) => PatchPickerPreview::Error(error.to_string()),
+            },
+            Some(entry) => patch_picker_file_preview(&entry),
+        };
+    }
+}
+
+fn patch_picker_read_dir(directory: &std::path::Path) -> Result<Vec<PatchPickerEntry>> {
+    let mut entries = Vec::new();
+    for item in std::fs::read_dir(directory)? {
+        let Ok(item) = item else { continue };
+        let path = item.path();
+        let name = item.file_name().to_string_lossy().into_owned();
+        if name == ".git" {
+            continue;
+        }
+        let Ok(metadata) = item.metadata() else { continue };
+        let is_dir = metadata.is_dir();
+        if !is_dir && !metadata.is_file() {
+            continue;
+        }
+        let likely_patch = !is_dir && patch_picker_is_probably_patch(&path, &name);
+        entries.push(PatchPickerEntry {
+            path,
+            name,
+            is_dir,
+            likely_patch,
+            size: metadata.len(),
+        });
+    }
+    entries.sort_by(|left, right| {
+        let left_rank = if left.is_dir { 0 } else if left.likely_patch { 1 } else { 2 };
+        let right_rank = if right.is_dir { 0 } else if right.likely_patch { 1 } else { 2 };
+        left_rank
+            .cmp(&right_rank)
+            .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+    });
+    Ok(entries)
+}
+
+fn patch_picker_is_probably_patch(path: &std::path::Path, name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".patch")
+        || lower.ends_with(".diff")
+        || lower.ends_with(".mbox")
+        || lower.ends_with(".eml")
+        || lower.contains("patch")
+    {
+        return true;
+    }
+
+    let Ok(mut file) = std::fs::File::open(path) else { return false };
+    let mut buffer = [0u8; 8192];
+    let Ok(read) = std::io::Read::read(&mut file, &mut buffer) else { return false };
+    if read == 0 || buffer[..read].contains(&0) {
+        return false;
+    }
+    let prefix = String::from_utf8_lossy(&buffer[..read]);
+    prefix.contains("diff --git ")
+        || (prefix.contains("\n--- ") && prefix.contains("\n+++ "))
+        || (prefix.starts_with("From ") && prefix.contains("\nSubject:"))
+        || prefix.starts_with("Index: ")
+}
+
+fn patch_picker_file_preview(entry: &PatchPickerEntry) -> PatchPickerPreview {
+    let Ok(mut file) = std::fs::File::open(&entry.path) else {
+        return PatchPickerPreview::Error("Unable to open file".to_string());
+    };
+    const PREVIEW_BYTES: usize = 64 * 1024;
+    let mut buffer = vec![0u8; PREVIEW_BYTES + 1];
+    let read = match std::io::Read::read(&mut file, &mut buffer) {
+        Ok(read) => read,
+        Err(error) => return PatchPickerPreview::Error(error.to_string()),
+    };
+    buffer.truncate(read.min(PREVIEW_BYTES));
+    if buffer.contains(&0) {
+        return PatchPickerPreview::Binary { size: entry.size };
+    }
+    let text = String::from_utf8_lossy(&buffer);
+    let lines = text.lines().take(500).map(str::to_string).collect();
+    PatchPickerPreview::Text {
+        lines,
+        truncated: read > PREVIEW_BYTES,
+        likely_patch: entry.likely_patch,
+    }
 }
 
 /// True when index 0 is the synthetic free-entry row for `free_entry_category`.
@@ -3473,5 +3803,116 @@ mod email_recipient_tests {
             join_email_recipients(&recipients),
             "Jens Axboe <axboe@kernel.dk>, list@example.org"
         );
+    }
+}
+
+#[cfg(test)]
+mod patch_file_picker_tests {
+    use super::{PatchFilePickerState, PatchPickerPreview};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "lazygitrs-{label}-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn patch_browser_sorts_directories_then_patch_candidates_then_other_files() {
+        let root = temp_dir("patch-browser-sort");
+        std::fs::create_dir(root.join("folder")).unwrap();
+        std::fs::write(root.join("notes.txt"), "hello\n").unwrap();
+        std::fs::write(root.join("fix.patch"), "diff --git a/a b/a\n").unwrap();
+        std::fs::write(
+            root.join("mailbox"),
+            "From deadbeef Mon Sep 17 00:00:00 2001\nSubject: [PATCH] test\n",
+        )
+        .unwrap();
+
+        let state = PatchFilePickerState::new(root.clone(), root.clone()).unwrap();
+        let names: Vec<_> = state.entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["folder", "fix.patch", "mailbox", "notes.txt"]);
+        assert!(state.entries[1].likely_patch);
+        assert!(state.entries[2].likely_patch);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn patch_browser_preview_half_page_scroll_animates_and_clamps() {
+        let root = temp_dir("patch-browser-preview-scroll");
+        let patch = (0..30)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(root.join("long.patch"), patch).unwrap();
+
+        let mut state = PatchFilePickerState::new(root.clone(), root.clone()).unwrap();
+        assert!(matches!(state.preview, PatchPickerPreview::Text { .. }));
+
+        state.queue_preview_half_page_scroll(1, 10);
+        // Queueing advances the first row immediately so the keypress has
+        // visible feedback in the same render frame.
+        assert_eq!(state.preview_cursor, 1);
+        assert_eq!(state.preview_scroll_top, 1);
+        assert_eq!(state.preview_scroll_remaining, 4);
+        for _ in 0..4 {
+            state.tick_preview_scroll();
+        }
+        assert_eq!(state.preview_cursor, 5);
+        assert_eq!(state.preview_scroll_top, 5);
+        assert!(!state.preview_scroll_active());
+
+        state.queue_preview_half_page_scroll(-1, 10);
+        assert_eq!(state.preview_cursor, 4);
+        assert_eq!(state.preview_scroll_top, 4);
+        for _ in 0..4 {
+            state.tick_preview_scroll();
+        }
+        assert_eq!(state.preview_cursor, 0);
+        assert_eq!(state.preview_scroll_top, 0);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn patch_browser_short_preview_keeps_viewport_pinned() {
+        let root = temp_dir("patch-browser-short-preview-scroll");
+        std::fs::write(root.join("short.patch"), "one\ntwo\nthree\n").unwrap();
+
+        let mut state = PatchFilePickerState::new(root.clone(), root.clone()).unwrap();
+        state.queue_preview_half_page_scroll(1, 20);
+        while state.preview_scroll_active() {
+            state.tick_preview_scroll();
+        }
+        assert_eq!(state.preview_cursor, 2);
+        assert_eq!(state.preview_scroll_top, 0);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn patch_browser_enters_directories_and_builds_live_text_preview() {
+        let root = temp_dir("patch-browser-nav");
+        let child = root.join("incoming");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(child.join("change.diff"), "diff --git a/a b/a\n+new\n").unwrap();
+
+        let mut state = PatchFilePickerState::new(root.clone(), root.clone()).unwrap();
+        assert!(state.entries[state.selected].is_dir);
+        assert!(state.enter_selected().unwrap().is_none());
+        assert_eq!(state.current_dir, child.canonicalize().unwrap());
+        assert_eq!(state.entries.len(), 1);
+        assert!(matches!(state.preview, PatchPickerPreview::Text { likely_patch: true, .. }));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -2019,6 +2019,7 @@ impl Gui {
             self.tick_patch_preview_animation();
             self.tick_email_preview_animation();
             self.tick_commit_input_scroll_animation();
+            self.tick_patch_file_picker_preview_animation();
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
@@ -2517,6 +2518,7 @@ impl Gui {
             || self.patch_preview_animation_active()
             || self.email_preview_animation_active()
             || self.commit_input_scroll_animation_active()
+            || self.patch_file_picker_preview_animation_active()
         {
             Duration::from_millis(8)
         } else if self.shell_command_job.is_some()
@@ -6404,6 +6406,7 @@ impl Gui {
         let was_help = matches!(self.popup, PopupState::CommandPalette { .. });
         let was_ref_picker = matches!(self.popup, PopupState::RefPicker { .. });
         let was_list_picker = matches!(self.popup, PopupState::ListPicker { .. });
+        let was_patch_file_picker = matches!(self.popup, PopupState::PatchFilePicker { .. });
         let was_theme_picker = matches!(self.popup, PopupState::ThemePicker { .. });
 
         match &self.popup {
@@ -8820,6 +8823,7 @@ impl Gui {
             PopupState::CommandPalette { .. } => {}
             PopupState::RefPicker { .. } => {}
             PopupState::ListPicker { .. } => {}
+            PopupState::PatchFilePicker { .. } => {}
             PopupState::ThemePicker { .. } => {}
             PopupState::None => {}
         }
@@ -8834,6 +8838,8 @@ impl Gui {
             self.handle_ref_picker_key(key)?;
         } else if was_list_picker && matches!(self.popup, PopupState::ListPicker { .. }) {
             self.handle_list_picker_key(key)?;
+        } else if was_patch_file_picker && matches!(self.popup, PopupState::PatchFilePicker { .. }) {
+            self.handle_patch_file_picker_key(key)?;
         } else if was_theme_picker && matches!(self.popup, PopupState::ThemePicker { .. }) {
             self.handle_theme_picker_key(key);
         }
@@ -9182,6 +9188,88 @@ impl Gui {
             free_entry_category: free_entry_category.into(),
             on_confirm,
         };
+    }
+
+    fn patch_file_picker_preview_animation_active(&self) -> bool {
+        matches!(
+            &self.popup,
+            PopupState::PatchFilePicker { state, .. } if state.preview_scroll_active()
+        )
+    }
+
+    fn tick_patch_file_picker_preview_animation(&mut self) {
+        if let PopupState::PatchFilePicker { state, .. } = &mut self.popup {
+            state.tick_preview_scroll();
+        }
+    }
+
+    fn handle_patch_file_picker_key(&mut self, key: KeyEvent) -> Result<()> {
+        let mut confirm_path: Option<PathBuf> = None;
+        let preview_rows = crate::gui::views::patch_file_picker_preview_height(self.layout.height);
+
+        if let PopupState::PatchFilePicker { state, .. } = &mut self.popup {
+            let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+            // Do not require an exact modifier bit-set: enhanced keyboard
+            // protocols may carry additional modifier information alongside Ctrl.
+            let control = key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') if plain => {
+                    self.popup = PopupState::None;
+                    return Ok(());
+                }
+                KeyCode::Char('j') | KeyCode::Char('J') if control => {
+                    state.queue_preview_half_page_scroll(1, preview_rows);
+                }
+                KeyCode::Char('k') | KeyCode::Char('K') if control => {
+                    state.queue_preview_half_page_scroll(-1, preview_rows);
+                }
+                KeyCode::Down | KeyCode::Char('j') if plain => state.move_selection(1),
+                KeyCode::Up | KeyCode::Char('k') if plain => state.move_selection(-1),
+                KeyCode::PageDown if plain => state.move_selection(10),
+                KeyCode::PageUp if plain => state.move_selection(-10),
+                KeyCode::Home if plain => state.select_first(),
+                KeyCode::End if plain => state.select_last(),
+                KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') if plain => {
+                    state.go_parent()?;
+                }
+                KeyCode::Right | KeyCode::Enter | KeyCode::Char('l') if plain => {
+                    confirm_path = state.enter_selected()?;
+                }
+                KeyCode::Char('r') if plain => {
+                    let repo_root = state.repo_root.clone();
+                    state.go_to(repo_root)?;
+                }
+                KeyCode::Char('~') if plain => {
+                    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                        state.go_to(home)?;
+                    }
+                }
+                KeyCode::Char('d') if plain => {
+                    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                        let downloads = home.join("Downloads");
+                        if downloads.is_dir() {
+                            state.go_to(downloads)?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(path) = confirm_path {
+            let value = path.to_string_lossy().into_owned();
+            let popup = std::mem::replace(&mut self.popup, PopupState::None);
+            if let PopupState::PatchFilePicker { on_confirm, .. } = popup {
+                if let Err(error) = on_confirm(self, &value) {
+                    self.popup = PopupState::Message {
+                        title: "Error".to_string(),
+                        message: error.to_string(),
+                        kind: MessageKind::Error,
+                    };
+                }
+            }
+        }
+        Ok(())
     }
 
     fn handle_theme_picker_key(&mut self, key: KeyEvent) {
@@ -10696,6 +10784,14 @@ impl Gui {
         match &mut self.popup {
             PopupState::ShellCommand { .. } => return,
             PopupState::PatchPreview { .. } => return,
+            PopupState::PatchFilePicker { state, .. } => {
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => state.move_selection(1),
+                    MouseEventKind::ScrollUp => state.move_selection(-1),
+                    _ => {}
+                }
+                return;
+            }
             PopupState::EmailPatch { .. } => return,
             PopupState::PullDivergence { .. } => return,
             PopupState::CommandOutput {
@@ -16717,6 +16813,44 @@ mod terminal_mouse_tests {
         assert!(matches!(&gui.popup, PopupState::CommitInput { mode, .. }
             if *mode == popup::CommitInputMode::Normal));
         assert!(gui.pending_commit_popup.is_none());
+    }
+
+    #[test]
+    fn patch_picker_ctrl_j_accepts_extra_modifiers_and_moves_immediately() {
+        let repo = TempRepo::new("patch-picker-ctrl-j");
+        let picker_dir = repo.path().join("patches");
+        std::fs::create_dir_all(&picker_dir).unwrap();
+        std::fs::write(
+            picker_dir.join("long.patch"),
+            (0..40)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        gui.layout.update_size(120, 40);
+        let state = popup::PatchFilePickerState::new(repo.path().to_path_buf(), picker_dir).unwrap();
+        gui.popup = PopupState::PatchFilePicker {
+            state,
+            on_confirm: Box::new(|_, _| Ok(())),
+        };
+
+        gui.handle_popup_key(KeyEvent::new(
+            KeyCode::Char('J'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ))
+        .unwrap();
+
+        assert!(matches!(
+            &gui.popup,
+            PopupState::PatchFilePicker { state, .. }
+                if state.preview_cursor == 1
+                    && state.preview_scroll_top == 1
+                    && state.preview_scroll_active()
+        ));
     }
 
     #[test]

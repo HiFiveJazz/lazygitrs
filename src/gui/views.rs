@@ -5994,6 +5994,9 @@ pub fn render_popup(
                 ],
             );
         }
+        PopupState::PatchFilePicker { state, .. } => {
+            render_patch_file_picker(frame, area, theme, state);
+        }
         PopupState::ThemePicker { core, .. } => {
             render_list_picker(
                 frame,
@@ -6084,6 +6087,367 @@ pub fn render_popup(
             }
         }
     }
+}
+
+
+fn compact_picker_path(path: &std::path::Path) -> String {
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from)
+        && let Ok(relative) = path.strip_prefix(&home)
+    {
+        if relative.as_os_str().is_empty() {
+            return "~".to_string();
+        }
+        return format!("~/{}", relative.to_string_lossy());
+    }
+    path.to_string_lossy().into_owned()
+}
+
+fn patch_picker_visible_slice(len: usize, selected: usize, height: usize) -> (usize, usize) {
+    if height == 0 || len == 0 {
+        return (0, 0);
+    }
+    let height = height.min(len);
+    let half = height / 2;
+    let start = selected
+        .saturating_sub(half)
+        .min(len.saturating_sub(height));
+    (start, start + height)
+}
+
+fn human_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn patch_picker_entry_line(
+    entry: &super::popup::PatchPickerEntry,
+    width: u16,
+    selected: bool,
+    display_number: usize,
+    number_width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let marker = if selected { "▸ " } else { "  " };
+    let folder_icon = if entry.is_dir { "󰉋 " } else { "" };
+    let marker_style = Style::default().fg(theme.accent_secondary);
+    // Keep folders on the theme's primary accent, matching likely patch files.
+    // This follows the active color theme instead of hard-coding terminal blue.
+    let folder_style = Style::default().fg(theme.accent);
+    let name_style = if entry.is_dir {
+        folder_style
+    } else if entry.likely_patch {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.text)
+    };
+    let number_prefix = format!("{display_number:>number_width$} ");
+    let number_style = if selected {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.text_dimmed)
+    };
+    let fixed = UnicodeWidthStr::width(number_prefix.as_str())
+        + UnicodeWidthStr::width(marker)
+        + UnicodeWidthStr::width(folder_icon);
+    let available = usize::from(width).saturating_sub(fixed);
+    let mut name = entry.name.clone();
+    if UnicodeWidthStr::width(name.as_str()) > available {
+        while UnicodeWidthStr::width(name.as_str()) > available.saturating_sub(1) && !name.is_empty() {
+            name.pop();
+        }
+        if available > 0 {
+            name.push('…');
+        }
+    }
+    let mut spans = vec![
+        Span::styled(number_prefix, number_style),
+        Span::styled(marker.to_string(), marker_style),
+    ];
+    if entry.is_dir {
+        spans.push(Span::styled(folder_icon.to_string(), folder_style));
+    }
+    spans.push(Span::styled(name, name_style));
+    Line::from(spans)
+}
+
+fn render_patch_picker_entries(
+    frame: &mut Frame,
+    rect: Rect,
+    entries: &[super::popup::PatchPickerEntry],
+    selected: Option<usize>,
+    theme: &Theme,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let selected_idx = selected.unwrap_or(0).min(entries.len().saturating_sub(1));
+    let (start, end) = patch_picker_visible_slice(entries.len(), selected_idx, usize::from(rect.height));
+    let number_width = entries.len().max(1).to_string().len();
+    let mut items = Vec::new();
+    for (index, entry) in entries.iter().enumerate().take(end).skip(start) {
+        let is_selected = selected == Some(index);
+        let display_number = if selected.is_some() {
+            if is_selected { index + 1 } else { index.abs_diff(selected_idx) }
+        } else {
+            index + 1
+        };
+        let line = patch_picker_entry_line(
+            entry,
+            rect.width,
+            is_selected,
+            display_number,
+            number_width,
+            theme,
+        );
+        let item = if is_selected {
+            ListItem::new(line).style(Style::default().bg(theme.selected_bg))
+        } else {
+            ListItem::new(line)
+        };
+        items.push(item);
+    }
+    frame.render_widget(List::new(items), rect);
+}
+
+fn render_patch_picker_preview(
+    frame: &mut Frame,
+    rect: Rect,
+    state: &super::popup::PatchFilePickerState,
+    theme: &Theme,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    match &state.preview {
+        super::popup::PatchPickerPreview::Empty => {
+            frame.render_widget(
+                Paragraph::new(Span::styled("Empty directory", Style::default().fg(theme.text_dimmed))),
+                rect,
+            );
+        }
+        super::popup::PatchPickerPreview::Directory(entries) => {
+            render_patch_picker_entries(frame, rect, entries, None, theme);
+        }
+        super::popup::PatchPickerPreview::Binary { size } => {
+            let lines = vec![
+                Line::from(Span::styled("Binary file", Style::default().fg(theme.text_dimmed))),
+                Line::from(Span::styled(human_file_size(*size), Style::default().fg(theme.text))),
+            ];
+            frame.render_widget(Paragraph::new(lines), rect);
+        }
+        super::popup::PatchPickerPreview::Error(error) => {
+            frame.render_widget(
+                Paragraph::new(Span::styled(error.clone(), theme.diff_remove)),
+                rect,
+            );
+        }
+        super::popup::PatchPickerPreview::Text {
+            lines,
+            truncated,
+            likely_patch,
+        } => {
+            if lines.is_empty() {
+                return;
+            }
+            let visible = usize::from(rect.height).max(1);
+            let max_top = lines.len().saturating_sub(visible);
+            let start = state.preview_scroll_top.min(max_top);
+            let end = (start + visible).min(lines.len());
+            let cursor = state.preview_cursor.min(lines.len().saturating_sub(1));
+            let number_width = lines.len().max(1).to_string().len();
+
+            // Diff parsing needs to know whether the viewport starts inside a
+            // diff section, so replay only the cheap header state up to start.
+            let mut in_diff = false;
+            if *likely_patch {
+                for source in lines.iter().take(start) {
+                    if source.starts_with("diff --git ") {
+                        in_diff = true;
+                    }
+                }
+            }
+
+            let mut rendered = Vec::new();
+            for (index, source) in lines.iter().enumerate().take(end).skip(start) {
+                if source.starts_with("diff --git ") {
+                    in_diff = true;
+                }
+                let content_style = if *likely_patch {
+                    patch_line_style(source, theme, in_diff)
+                } else {
+                    Style::default().fg(theme.text)
+                };
+                let number = if index == cursor {
+                    index + 1
+                } else {
+                    index.abs_diff(cursor)
+                };
+                let number_style = if index == cursor {
+                    Style::default().fg(theme.accent)
+                } else {
+                    Style::default().fg(theme.text_dimmed)
+                };
+                let line = Line::from(vec![
+                    Span::styled(format!("{number:>number_width$} "), number_style),
+                    Span::styled(source.clone(), content_style),
+                ]);
+                rendered.push(if index == cursor {
+                    line.style(Style::default().bg(theme.selected_bg))
+                } else {
+                    line
+                });
+            }
+            if *truncated && end == lines.len() && rendered.len() < visible {
+                rendered.push(Line::from(Span::styled(
+                    "… preview truncated …",
+                    Style::default().fg(theme.text_dimmed),
+                )));
+            }
+            frame.render_widget(Paragraph::new(rendered), rect);
+        }
+    }
+}
+
+pub(super) fn patch_file_picker_preview_height(area_height: u16) -> usize {
+    let popup_height = (area_height * 78 / 100)
+        .max(16)
+        .min(area_height.saturating_sub(2).max(1));
+    // popup border (2), inner path/spacer/footer (3), preview title row (1)
+    usize::from(popup_height.saturating_sub(6).max(1))
+}
+
+fn render_patch_file_picker(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    state: &super::popup::PatchFilePickerState,
+) {
+    let width = (area.width * 92 / 100).max(60).min(area.width.saturating_sub(2).max(1));
+    let height = (area.height * 78 / 100).max(16).min(area.height.saturating_sub(2).max(1));
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Apply patch ")
+            .border_style(Style::default().fg(theme.accent)),
+        popup,
+    );
+
+    let inner = popup.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+    if inner.height < 5 || inner.width < 12 {
+        return;
+    }
+
+    let path_rect = Rect::new(inner.x, inner.y, inner.width, 1);
+    let current_path = compact_picker_path(&state.current_dir);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" 󰉋 ", Style::default().fg(theme.accent)),
+            Span::styled(current_path, Style::default().fg(theme.text_strong)),
+        ])),
+        path_rect,
+    );
+
+    let footer_y = inner.y + inner.height.saturating_sub(1);
+    let content_y = inner.y + 2;
+    let content_h = footer_y.saturating_sub(content_y);
+    let content = Rect::new(inner.x, content_y, inner.width, content_h);
+
+    let left_w = (content.width * 24 / 100).max(12);
+    let center_w = (content.width * 34 / 100).max(18);
+    let left_w = left_w.min(content.width);
+    let center_w = center_w.min(content.width.saturating_sub(left_w));
+    let right_w = content.width.saturating_sub(left_w + center_w);
+    let parent_rect = Rect::new(content.x, content.y, left_w, content.height);
+    let current_rect = Rect::new(content.x + left_w, content.y, center_w, content.height);
+    let preview_rect = Rect::new(content.x + left_w + center_w, content.y, right_w, content.height);
+
+    if parent_rect.width > 0 {
+        frame.render_widget(
+            Block::default()
+                .title(" Parent ")
+                .borders(Borders::RIGHT)
+                .border_style(Style::default().fg(theme.text_dimmed)),
+            parent_rect,
+        );
+        let list = Rect::new(
+            parent_rect.x,
+            parent_rect.y + 1,
+            parent_rect.width.saturating_sub(1),
+            parent_rect.height.saturating_sub(1),
+        );
+        render_patch_picker_entries(
+            frame,
+            list,
+            &state.parent_entries,
+            Some(state.parent_selected),
+            theme,
+        );
+    }
+
+    if current_rect.width > 0 {
+        frame.render_widget(
+            Block::default()
+                .title(" Files ")
+                .borders(Borders::RIGHT)
+                .border_style(Style::default().fg(theme.text_dimmed)),
+            current_rect,
+        );
+        let list = Rect::new(
+            current_rect.x,
+            current_rect.y + 1,
+            current_rect.width.saturating_sub(1),
+            current_rect.height.saturating_sub(1),
+        );
+        render_patch_picker_entries(frame, list, &state.entries, Some(state.selected), theme);
+    }
+
+    if preview_rect.width > 0 {
+        let selected = state.selected_entry();
+        let title = selected
+            .map(|entry| {
+                if entry.is_dir {
+                    format!(" {} / ", entry.name)
+                } else {
+                    format!(" {} · {} ", entry.name, human_file_size(entry.size))
+                }
+            })
+            .unwrap_or_else(|| " Preview ".to_string());
+        frame.render_widget(
+            Block::default().title(title).borders(Borders::NONE),
+            preview_rect,
+        );
+        let preview = Rect::new(
+            preview_rect.x + 1,
+            preview_rect.y + 1,
+            preview_rect.width.saturating_sub(2),
+            preview_rect.height.saturating_sub(1),
+        );
+        render_patch_picker_preview(frame, preview, state, theme);
+    }
+
+    let key = |text: &str| Span::styled(text.to_string(), Style::default().fg(theme.accent_secondary));
+    let dim = |text: &str| Span::styled(text.to_string(), Style::default().fg(theme.text_dimmed));
+    let footer = Line::from(vec![
+        key(" j/k"), dim(" navigate  "), key("c-j/c-k"), dim(" preview scroll  "),
+        key("h/l"), dim(" parent/open  "), key("enter"), dim(" select  "), key("r"), dim(" repo  "),
+        key("~"), dim(" home  "), key("d"), dim(" downloads  "),
+        key("q"), dim(" close"),
+    ]);
+    frame.render_widget(Paragraph::new(footer), Rect::new(inner.x, footer_y, inner.width, 1));
 }
 
 use super::popup::ListPickerCore;

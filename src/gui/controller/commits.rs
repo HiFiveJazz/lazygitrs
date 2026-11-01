@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1127,6 +1128,12 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
                 })),
             },
             MenuItem {
+                label: "Apply patch…".to_string(),
+                description: "Choose a patch file to apply".to_string(),
+                key: Some("a".to_string()),
+                action: Some(Box::new(show_apply_patch_picker)),
+            },
+            MenuItem {
                 label: "Custom patch".to_string(),
                 description: "Choose files to stage".to_string(),
                 key: Some("b".to_string()),
@@ -1147,6 +1154,159 @@ fn show_patch_actions_menu(gui: &mut Gui) -> Result<()> {
         selected: 0,
         loading_index: None,
     };
+    Ok(())
+}
+
+/// Open the Yazi-style three-pane browser used to choose a patch file.
+///
+/// Patch extensions are only a ranking/display hint. The browser accepts any
+/// regular file and `git apply --check` remains the source of truth.
+fn show_apply_patch_picker(gui: &mut Gui) -> Result<()> {
+    let repo_root = gui.git.repo_path().to_path_buf();
+    let state = crate::gui::popup::PatchFilePickerState::new(repo_root.clone(), repo_root)?;
+    gui.popup = PopupState::PatchFilePicker {
+        state,
+        on_confirm: Box::new(|gui, value| {
+            show_apply_patch_file_menu(gui, PathBuf::from(value))
+        }),
+    };
+    Ok(())
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn display_picker_path(path: &Path) -> String {
+    if let Some(home) = home_dir()
+        && let Ok(relative) = path.strip_prefix(&home)
+    {
+        if relative.as_os_str().is_empty() {
+            return "~".to_string();
+        }
+        return format!("~/{}", relative.to_string_lossy());
+    }
+    path.to_string_lossy().into_owned()
+}
+
+fn show_apply_patch_file_menu(gui: &mut Gui, path: PathBuf) -> Result<()> {
+    if !path.is_file() {
+        anyhow::bail!("Not a regular file: {}", display_picker_path(&path));
+    }
+
+    let display = display_picker_path(&path);
+    let preview_path = path.clone();
+    let apply_path = path.clone();
+    let index_path = path.clone();
+    let reverse_path = path.clone();
+
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| display_picker_path(&path));
+
+    gui.popup = PopupState::Menu {
+        title: format!("Apply {file_name}"),
+        items: vec![
+            MenuItem {
+                label: "Preview".to_string(),
+                description: display.clone(),
+                key: Some("v".to_string()),
+                action: Some(Box::new(move |gui| {
+                    let bytes = std::fs::read(&preview_path)?;
+                    gui.popup = PopupState::PatchPreview {
+                        title: format!("Patch preview — {}", display_picker_path(&preview_path)),
+                        message: String::from_utf8_lossy(&bytes).into_owned(),
+                        scroll: 0,
+                        cursor_line: 0,
+                        smooth_scroll_from: 0.0,
+                        smooth_scroll_target: 0.0,
+                        smooth_scroll_started_at: None,
+                        smooth_cursor_from: 0.0,
+                        smooth_cursor_target: 0.0,
+                        smooth_cursor_started_at: None,
+                    };
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Apply".to_string(),
+                description: "Apply to working tree (git apply)".to_string(),
+                key: Some("a".to_string()),
+                action: Some(Box::new(move |gui| {
+                    apply_patch_file(gui, &apply_path, PatchApplyMode::Worktree)
+                })),
+            },
+            MenuItem {
+                label: "Apply & stage".to_string(),
+                description: "Apply to working tree and index (--index)".to_string(),
+                key: Some("s".to_string()),
+                action: Some(Box::new(move |gui| {
+                    apply_patch_file(gui, &index_path, PatchApplyMode::Index)
+                })),
+            },
+            MenuItem {
+                label: "Reverse".to_string(),
+                description: "Reverse an already-applied patch (--reverse)".to_string(),
+                key: Some("r".to_string()),
+                action: Some(Box::new(move |gui| {
+                    apply_patch_file(gui, &reverse_path, PatchApplyMode::Reverse)
+                })),
+            },
+        ],
+        selected: 1,
+        loading_index: None,
+    };
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum PatchApplyMode {
+    Worktree,
+    Index,
+    Reverse,
+}
+
+fn patch_apply_command(
+    gui: &Gui,
+    mode: PatchApplyMode,
+) -> crate::os::cmd::CmdBuilder {
+    let mut command = gui.git.git_cmd().arg("apply");
+    if matches!(mode, PatchApplyMode::Index) {
+        command = command.arg("--index");
+    }
+    if matches!(mode, PatchApplyMode::Reverse) {
+        command = command.arg("--reverse");
+    }
+    command
+}
+
+fn apply_patch_file(gui: &mut Gui, path: &Path, mode: PatchApplyMode) -> Result<()> {
+    let path_string = path.to_string_lossy().into_owned();
+
+    // Always validate first. `git apply` without --reject is atomic, so after a
+    // successful check the real apply either succeeds completely or returns an
+    // error without intentionally leaving rejected hunks behind.
+    patch_apply_command(gui, mode)
+        .arg("--check")
+        .arg("--")
+        .arg(&path_string)
+        .run_expecting_success()?;
+    patch_apply_command(gui, mode)
+        .arg("--")
+        .arg(&path_string)
+        .run_expecting_success()?;
+
+    gui.needs_refresh = true;
+    gui.needs_diff_refresh = true;
+    let action = match mode {
+        PatchApplyMode::Worktree => "Patch applied",
+        PatchApplyMode::Index => "Patch applied and staged",
+        PatchApplyMode::Reverse => "Patch reversed",
+    };
+    gui.show_action_toast(action);
     Ok(())
 }
 
