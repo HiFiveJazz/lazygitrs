@@ -2019,7 +2019,7 @@ impl Gui {
             self.tick_patch_preview_animation();
             self.tick_email_preview_animation();
             self.tick_commit_input_scroll_animation();
-            self.tick_patch_file_picker_preview_animation();
+            self.tick_patch_file_picker_animation();
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
@@ -2518,7 +2518,7 @@ impl Gui {
             || self.patch_preview_animation_active()
             || self.email_preview_animation_active()
             || self.commit_input_scroll_animation_active()
-            || self.patch_file_picker_preview_animation_active()
+            || self.patch_file_picker_animation_active()
         {
             Duration::from_millis(8)
         } else if self.shell_command_job.is_some()
@@ -9190,22 +9190,22 @@ impl Gui {
         };
     }
 
-    fn patch_file_picker_preview_animation_active(&self) -> bool {
+    fn patch_file_picker_animation_active(&self) -> bool {
         matches!(
             &self.popup,
-            PopupState::PatchFilePicker { state, .. } if state.preview_scroll_active()
+            PopupState::PatchFilePicker { state, .. } if state.picker_scroll_active()
         )
     }
 
-    fn tick_patch_file_picker_preview_animation(&mut self) {
+    fn tick_patch_file_picker_animation(&mut self) {
         if let PopupState::PatchFilePicker { state, .. } = &mut self.popup {
-            state.tick_preview_scroll();
+            state.tick_picker_scroll();
         }
     }
 
     fn handle_patch_file_picker_key(&mut self, key: KeyEvent) -> Result<()> {
         let mut confirm_path: Option<PathBuf> = None;
-        let preview_rows = crate::gui::views::patch_file_picker_preview_height(self.layout.height);
+        let picker_rows = crate::gui::views::patch_file_picker_preview_height(self.layout.height);
 
         if let PopupState::PatchFilePicker { state, .. } = &mut self.popup {
             let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
@@ -9218,13 +9218,26 @@ impl Gui {
                     return Ok(());
                 }
                 KeyCode::Char('j') | KeyCode::Char('J') if control => {
-                    state.queue_preview_half_page_scroll(1, preview_rows);
+                    state.clear_count();
+                    state.queue_picker_half_page_scroll(1, picker_rows);
                 }
                 KeyCode::Char('k') | KeyCode::Char('K') if control => {
-                    state.queue_preview_half_page_scroll(-1, preview_rows);
+                    state.clear_count();
+                    state.queue_picker_half_page_scroll(-1, picker_rows);
                 }
-                KeyCode::Down | KeyCode::Char('j') if plain => state.move_selection(1),
-                KeyCode::Up | KeyCode::Char('k') if plain => state.move_selection(-1),
+                KeyCode::Char(ch) if plain && ch.is_ascii_digit() => {
+                    state.push_count_digit(ch.to_digit(10).unwrap_or(0));
+                }
+                KeyCode::Down | KeyCode::Char('j') if plain => {
+                    let count = state.take_count();
+                    state.move_selection(count.min(isize::MAX as usize) as isize);
+                }
+                KeyCode::Up | KeyCode::Char('k') if plain => {
+                    let count = state.take_count();
+                    state.move_selection(-(count.min(isize::MAX as usize) as isize));
+                }
+                KeyCode::Char('g') if plain => state.select_first(),
+                KeyCode::Char('G') if plain => state.select_last(),
                 KeyCode::PageDown if plain => state.move_selection(10),
                 KeyCode::PageUp if plain => state.move_selection(-10),
                 KeyCode::Home if plain => state.select_first(),
@@ -16816,18 +16829,17 @@ mod terminal_mouse_tests {
     }
 
     #[test]
-    fn patch_picker_ctrl_j_accepts_extra_modifiers_and_moves_immediately() {
+    fn patch_picker_ctrl_j_accepts_extra_modifiers_and_moves_files_immediately() {
         let repo = TempRepo::new("patch-picker-ctrl-j");
         let picker_dir = repo.path().join("patches");
         std::fs::create_dir_all(&picker_dir).unwrap();
-        std::fs::write(
-            picker_dir.join("long.patch"),
-            (0..40)
-                .map(|line| format!("line {line}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-        .unwrap();
+        for index in 0..30 {
+            std::fs::write(
+                picker_dir.join(format!("{index:02}.patch")),
+                format!("diff --git a/a b/a\n+line {index}\n"),
+            )
+            .unwrap();
+        }
 
         let git = crate::git::GitCommands::new(repo.path()).unwrap();
         let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
@@ -16847,10 +16859,51 @@ mod terminal_mouse_tests {
         assert!(matches!(
             &gui.popup,
             PopupState::PatchFilePicker { state, .. }
-                if state.preview_cursor == 1
-                    && state.preview_scroll_top == 1
-                    && state.preview_scroll_active()
+                if state.selected == 1 && state.picker_scroll_active()
         ));
+    }
+
+    #[test]
+    fn patch_picker_supports_vim_counts_and_top_bottom_jumps() {
+        let repo = TempRepo::new("patch-picker-counts");
+        let picker_dir = repo.path().join("patches");
+        std::fs::create_dir_all(&picker_dir).unwrap();
+        for index in 0..40 {
+            std::fs::write(
+                picker_dir.join(format!("{index:02}.patch")),
+                format!("diff --git a/a b/a\n+line {index}\n"),
+            )
+            .unwrap();
+        }
+
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        gui.layout.update_size(120, 40);
+        let state = popup::PatchFilePickerState::new(repo.path().to_path_buf(), picker_dir).unwrap();
+        gui.popup = PopupState::PatchFilePicker {
+            state,
+            on_confirm: Box::new(|_, _| Ok(())),
+        };
+
+        for ch in ['2', '0', 'j'] {
+            gui.handle_popup_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert!(matches!(&gui.popup, PopupState::PatchFilePicker { state, .. } if state.selected == 20));
+
+        for ch in ['2', '0', 'k'] {
+            gui.handle_popup_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert!(matches!(&gui.popup, PopupState::PatchFilePicker { state, .. } if state.selected == 0));
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::PatchFilePicker { state, .. } if state.selected == 39));
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::PatchFilePicker { state, .. } if state.selected == 0));
     }
 
     #[test]

@@ -2801,16 +2801,14 @@ pub struct PatchFilePickerState {
     pub parent_entries: Vec<PatchPickerEntry>,
     pub parent_selected: usize,
     pub preview: PatchPickerPreview,
-    /// Active line in a text preview. The current line is rendered with its
-    /// absolute number while surrounding lines use relative numbers.
-    pub preview_cursor: usize,
-    /// First visible preview line. This is owned by the picker rather than the
-    /// Paragraph widget so Ctrl-J/K can animate deterministically.
-    pub preview_scroll_top: usize,
-    /// Signed number of preview rows still to animate.
-    pub preview_scroll_remaining: isize,
-    /// Last preview viewport height used when the smooth scroll was queued.
-    preview_visible_rows: usize,
+    /// Signed number of center-pane rows still to move during Ctrl-J/K smooth
+    /// navigation. The selected file is the picker cursor; the renderer derives
+    /// the visible slice from it, so moving this cursor also scrolls the pane.
+    pub picker_scroll_remaining: isize,
+    /// Last center-pane viewport height used when a half-page move was queued.
+    picker_visible_rows: usize,
+    /// Vim-style numeric prefix for center-pane motions (for example `20j`).
+    pending_count: usize,
 }
 
 impl PatchFilePickerState {
@@ -2825,10 +2823,9 @@ impl PatchFilePickerState {
             parent_entries: Vec::new(),
             parent_selected: 0,
             preview: PatchPickerPreview::Empty,
-            preview_cursor: 0,
-            preview_scroll_top: 0,
-            preview_scroll_remaining: 0,
-            preview_visible_rows: 1,
+            picker_scroll_remaining: 0,
+            picker_visible_rows: 1,
+            pending_count: 0,
         };
         state.refresh()?;
         Ok(state)
@@ -2838,7 +2835,37 @@ impl PatchFilePickerState {
         self.entries.get(self.selected)
     }
 
+    pub fn push_count_digit(&mut self, digit: u32) {
+        let digit = digit as usize;
+        // Match Vim's useful count behavior: a leading 0 is not a count, but
+        // zeroes may extend an existing prefix (`2`, `0` -> `20`).
+        if digit == 0 && self.pending_count == 0 {
+            return;
+        }
+        self.pending_count = self
+            .pending_count
+            .saturating_mul(10)
+            .saturating_add(digit)
+            .min(99_999);
+    }
+
+    pub fn take_count(&mut self) -> usize {
+        let count = self.pending_count.max(1);
+        self.pending_count = 0;
+        count
+    }
+
+    pub fn clear_count(&mut self) {
+        self.pending_count = 0;
+    }
+
     pub fn move_selection(&mut self, delta: isize) {
+        self.picker_scroll_remaining = 0;
+        self.pending_count = 0;
+        self.move_selection_step(delta);
+    }
+
+    fn move_selection_step(&mut self, delta: isize) {
         if self.entries.is_empty() {
             self.selected = 0;
             self.preview = PatchPickerPreview::Empty;
@@ -2850,91 +2877,63 @@ impl PatchFilePickerState {
     }
 
     pub fn select_first(&mut self) {
+        self.picker_scroll_remaining = 0;
+        self.pending_count = 0;
         self.selected = 0;
         self.refresh_preview();
     }
 
     pub fn select_last(&mut self) {
+        self.picker_scroll_remaining = 0;
+        self.pending_count = 0;
         self.selected = self.entries.len().saturating_sub(1);
         self.refresh_preview();
     }
 
-    pub fn preview_scroll_active(&self) -> bool {
-        self.preview_scroll_remaining != 0
+    pub fn picker_scroll_active(&self) -> bool {
+        self.picker_scroll_remaining != 0
     }
 
-    /// Queue a Neovim-style half-page preview scroll. The cursor and viewport
-    /// advance together one row per animation tick; when the entire preview
-    /// fits, only the cursor moves and the viewport remains pinned at zero.
-    pub fn queue_preview_half_page_scroll(&mut self, direction: isize, visible_rows: usize) {
-        let PatchPickerPreview::Text { lines, .. } = &self.preview else {
-            self.preview_scroll_remaining = 0;
-            return;
-        };
-        if lines.is_empty() || direction == 0 {
-            self.preview_scroll_remaining = 0;
+    /// Queue a Yazi/Vim-style half-page move in the active Files pane. The
+    /// selection advances one row per animation tick; because the visible slice
+    /// is centered around `selected`, the file list scrolls smoothly with it.
+    pub fn queue_picker_half_page_scroll(&mut self, direction: isize, visible_rows: usize) {
+        if self.entries.is_empty() || direction == 0 {
+            self.picker_scroll_remaining = 0;
             return;
         }
 
-        self.preview_visible_rows = visible_rows.max(1);
-        let amount = (self.preview_visible_rows / 2).max(1);
-        let last = lines.len().saturating_sub(1);
-        let current = self.preview_cursor.min(last);
+        self.picker_visible_rows = visible_rows.max(1);
+        let amount = (self.picker_visible_rows / 2).max(1);
+        let last = self.entries.len().saturating_sub(1);
+        let current = self.selected.min(last);
         let target = if direction > 0 {
             current.saturating_add(amount).min(last)
         } else {
             current.saturating_sub(amount)
         };
-        self.preview_scroll_remaining = target as isize - current as isize;
-        // Advance one row immediately. The popup is redrawn after the key event,
-        // so Ctrl-J/K always has visible feedback even before the 8 ms animation
-        // timer gets its next tick. Remaining rows continue through the normal
-        // animation loop.
-        if self.preview_scroll_remaining != 0 {
-            self.tick_preview_scroll();
+        self.picker_scroll_remaining = target as isize - current as isize;
+
+        // Advance the first row synchronously so the keypress always produces
+        // visible feedback in the very next draw. Remaining rows use the normal
+        // 8 ms animation cadence.
+        if self.picker_scroll_remaining != 0 {
+            self.tick_picker_scroll();
         }
     }
 
-    pub fn tick_preview_scroll(&mut self) {
-        if self.preview_scroll_remaining == 0 {
+    pub fn tick_picker_scroll(&mut self) {
+        if self.picker_scroll_remaining == 0 {
             return;
         }
-        let PatchPickerPreview::Text { lines, .. } = &self.preview else {
-            self.preview_scroll_remaining = 0;
-            self.preview_scroll_top = 0;
-            self.preview_cursor = 0;
-            return;
-        };
-        if lines.is_empty() {
-            self.preview_scroll_remaining = 0;
-            self.preview_scroll_top = 0;
-            self.preview_cursor = 0;
+        let step = self.picker_scroll_remaining.signum();
+        let before = self.selected;
+        self.move_selection_step(step);
+        if self.selected == before {
+            self.picker_scroll_remaining = 0;
             return;
         }
-
-        let step = self.preview_scroll_remaining.signum();
-        let last = lines.len().saturating_sub(1);
-        let next = if step > 0 {
-            self.preview_cursor.saturating_add(1).min(last)
-        } else {
-            self.preview_cursor.saturating_sub(1)
-        };
-        if next == self.preview_cursor {
-            self.preview_scroll_remaining = 0;
-            return;
-        }
-        self.preview_cursor = next;
-
-        let visible = self.preview_visible_rows.max(1);
-        let max_top = lines.len().saturating_sub(visible);
-        if max_top == 0 {
-            self.preview_scroll_top = 0;
-        } else if step > 0 {
-            self.preview_scroll_top = self.preview_scroll_top.saturating_add(1).min(max_top);
-        } else {
-            self.preview_scroll_top = self.preview_scroll_top.saturating_sub(1);
-        }
-        self.preview_scroll_remaining -= step;
+        self.picker_scroll_remaining -= step;
     }
 
     pub fn enter_selected(&mut self) -> Result<Option<std::path::PathBuf>> {
@@ -2975,6 +2974,8 @@ impl PatchFilePickerState {
     }
 
     fn refresh(&mut self) -> Result<()> {
+        self.picker_scroll_remaining = 0;
+        self.pending_count = 0;
         self.entries = patch_picker_read_dir(&self.current_dir)?;
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
 
@@ -2996,9 +2997,6 @@ impl PatchFilePickerState {
     }
 
     fn refresh_preview(&mut self) {
-        self.preview_cursor = 0;
-        self.preview_scroll_top = 0;
-        self.preview_scroll_remaining = 0;
         self.preview = match self.selected_entry().cloned() {
             None => PatchPickerPreview::Empty,
             Some(entry) if entry.is_dir => match patch_picker_read_dir(&entry.path) {
@@ -3847,54 +3845,49 @@ mod patch_file_picker_tests {
     }
 
     #[test]
-    fn patch_browser_preview_half_page_scroll_animates_and_clamps() {
-        let root = temp_dir("patch-browser-preview-scroll");
-        let patch = (0..30)
-            .map(|line| format!("line {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(root.join("long.patch"), patch).unwrap();
+    fn patch_browser_half_page_scroll_animates_active_file_selection() {
+        let root = temp_dir("patch-browser-picker-scroll");
+        for index in 0..30 {
+            std::fs::write(root.join(format!("{index:02}.patch")), format!("line {index}\n")).unwrap();
+        }
 
         let mut state = PatchFilePickerState::new(root.clone(), root.clone()).unwrap();
-        assert!(matches!(state.preview, PatchPickerPreview::Text { .. }));
+        assert_eq!(state.selected, 0);
 
-        state.queue_preview_half_page_scroll(1, 10);
-        // Queueing advances the first row immediately so the keypress has
-        // visible feedback in the same render frame.
-        assert_eq!(state.preview_cursor, 1);
-        assert_eq!(state.preview_scroll_top, 1);
-        assert_eq!(state.preview_scroll_remaining, 4);
+        state.queue_picker_half_page_scroll(1, 10);
+        // First row advances synchronously; four rows remain for animation.
+        assert_eq!(state.selected, 1);
+        assert_eq!(state.picker_scroll_remaining, 4);
         for _ in 0..4 {
-            state.tick_preview_scroll();
+            state.tick_picker_scroll();
         }
-        assert_eq!(state.preview_cursor, 5);
-        assert_eq!(state.preview_scroll_top, 5);
-        assert!(!state.preview_scroll_active());
+        assert_eq!(state.selected, 5);
+        assert!(!state.picker_scroll_active());
 
-        state.queue_preview_half_page_scroll(-1, 10);
-        assert_eq!(state.preview_cursor, 4);
-        assert_eq!(state.preview_scroll_top, 4);
+        state.queue_picker_half_page_scroll(-1, 10);
+        assert_eq!(state.selected, 4);
         for _ in 0..4 {
-            state.tick_preview_scroll();
+            state.tick_picker_scroll();
         }
-        assert_eq!(state.preview_cursor, 0);
-        assert_eq!(state.preview_scroll_top, 0);
+        assert_eq!(state.selected, 0);
+        assert!(!state.picker_scroll_active());
 
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn patch_browser_short_preview_keeps_viewport_pinned() {
-        let root = temp_dir("patch-browser-short-preview-scroll");
-        std::fs::write(root.join("short.patch"), "one\ntwo\nthree\n").unwrap();
+    fn patch_browser_half_page_scroll_clamps_to_available_files() {
+        let root = temp_dir("patch-browser-short-picker-scroll");
+        for index in 0..3 {
+            std::fs::write(root.join(format!("{index}.patch")), "diff --git a/a b/a\n").unwrap();
+        }
 
         let mut state = PatchFilePickerState::new(root.clone(), root.clone()).unwrap();
-        state.queue_preview_half_page_scroll(1, 20);
-        while state.preview_scroll_active() {
-            state.tick_preview_scroll();
+        state.queue_picker_half_page_scroll(1, 20);
+        while state.picker_scroll_active() {
+            state.tick_picker_scroll();
         }
-        assert_eq!(state.preview_cursor, 2);
-        assert_eq!(state.preview_scroll_top, 0);
+        assert_eq!(state.selected, 2);
 
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -6133,7 +6133,7 @@ fn patch_picker_entry_line(
     entry: &super::popup::PatchPickerEntry,
     width: u16,
     selected: bool,
-    display_number: usize,
+    display_number: Option<usize>,
     number_width: usize,
     theme: &Theme,
 ) -> Line<'static> {
@@ -6150,7 +6150,9 @@ fn patch_picker_entry_line(
     } else {
         Style::default().fg(theme.text)
     };
-    let number_prefix = format!("{display_number:>number_width$} ");
+    let number_prefix = display_number
+        .map(|number| format!("{number:>number_width$} "))
+        .unwrap_or_default();
     let number_style = if selected {
         Style::default().fg(theme.accent)
     } else {
@@ -6185,6 +6187,7 @@ fn render_patch_picker_entries(
     rect: Rect,
     entries: &[super::popup::PatchPickerEntry],
     selected: Option<usize>,
+    show_relative_numbers: bool,
     theme: &Theme,
 ) {
     if rect.width == 0 || rect.height == 0 {
@@ -6196,10 +6199,10 @@ fn render_patch_picker_entries(
     let mut items = Vec::new();
     for (index, entry) in entries.iter().enumerate().take(end).skip(start) {
         let is_selected = selected == Some(index);
-        let display_number = if selected.is_some() {
-            if is_selected { index + 1 } else { index.abs_diff(selected_idx) }
+        let display_number = if show_relative_numbers {
+            Some(if is_selected { index + 1 } else { index.abs_diff(selected_idx) })
         } else {
-            index + 1
+            None
         };
         let line = patch_picker_entry_line(
             entry,
@@ -6236,7 +6239,7 @@ fn render_patch_picker_preview(
             );
         }
         super::popup::PatchPickerPreview::Directory(entries) => {
-            render_patch_picker_entries(frame, rect, entries, None, theme);
+            render_patch_picker_entries(frame, rect, entries, None, false, theme);
         }
         super::popup::PatchPickerPreview::Binary { size } => {
             let lines = vec![
@@ -6260,25 +6263,11 @@ fn render_patch_picker_preview(
                 return;
             }
             let visible = usize::from(rect.height).max(1);
-            let max_top = lines.len().saturating_sub(visible);
-            let start = state.preview_scroll_top.min(max_top);
-            let end = (start + visible).min(lines.len());
-            let cursor = state.preview_cursor.min(lines.len().saturating_sub(1));
-            let number_width = lines.len().max(1).to_string().len();
+            let end = visible.min(lines.len());
 
-            // Diff parsing needs to know whether the viewport starts inside a
-            // diff section, so replay only the cheap header state up to start.
             let mut in_diff = false;
-            if *likely_patch {
-                for source in lines.iter().take(start) {
-                    if source.starts_with("diff --git ") {
-                        in_diff = true;
-                    }
-                }
-            }
-
             let mut rendered = Vec::new();
-            for (index, source) in lines.iter().enumerate().take(end).skip(start) {
+            for source in lines.iter().take(end) {
                 if source.starts_with("diff --git ") {
                     in_diff = true;
                 }
@@ -6287,25 +6276,7 @@ fn render_patch_picker_preview(
                 } else {
                     Style::default().fg(theme.text)
                 };
-                let number = if index == cursor {
-                    index + 1
-                } else {
-                    index.abs_diff(cursor)
-                };
-                let number_style = if index == cursor {
-                    Style::default().fg(theme.accent)
-                } else {
-                    Style::default().fg(theme.text_dimmed)
-                };
-                let line = Line::from(vec![
-                    Span::styled(format!("{number:>number_width$} "), number_style),
-                    Span::styled(source.clone(), content_style),
-                ]);
-                rendered.push(if index == cursor {
-                    line.style(Style::default().bg(theme.selected_bg))
-                } else {
-                    line
-                });
+                rendered.push(Line::from(Span::styled(source.clone(), content_style)));
             }
             if *truncated && end == lines.len() && rendered.len() < visible {
                 rendered.push(Line::from(Span::styled(
@@ -6394,6 +6365,7 @@ fn render_patch_file_picker(
             list,
             &state.parent_entries,
             Some(state.parent_selected),
+            false,
             theme,
         );
     }
@@ -6412,7 +6384,14 @@ fn render_patch_file_picker(
             current_rect.width.saturating_sub(1),
             current_rect.height.saturating_sub(1),
         );
-        render_patch_picker_entries(frame, list, &state.entries, Some(state.selected), theme);
+        render_patch_picker_entries(
+            frame,
+            list,
+            &state.entries,
+            Some(state.selected),
+            true,
+            theme,
+        );
     }
 
     if preview_rect.width > 0 {
@@ -6442,7 +6421,8 @@ fn render_patch_file_picker(
     let key = |text: &str| Span::styled(text.to_string(), Style::default().fg(theme.accent_secondary));
     let dim = |text: &str| Span::styled(text.to_string(), Style::default().fg(theme.text_dimmed));
     let footer = Line::from(vec![
-        key(" j/k"), dim(" navigate  "), key("c-j/c-k"), dim(" preview scroll  "),
+        key(" j/k"), dim(" navigate  "), key("20j/20k"), dim(" jump  "),
+        key("g/G"), dim(" top/bottom  "), key("c-j/c-k"), dim(" smooth move  "),
         key("h/l"), dim(" parent/open  "), key("enter"), dim(" select  "), key("r"), dim(" repo  "),
         key("~"), dim(" home  "), key("d"), dim(" downloads  "),
         key("q"), dim(" close"),
