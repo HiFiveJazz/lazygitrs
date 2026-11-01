@@ -1375,14 +1375,30 @@ pub fn checklist_item_at(popup: &PopupState, area: Rect, col: u16, row: u16) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        checklist_item_at, command_log_geometry, email_recipient_row_allocation, format_key_hint,
-        menu_item_at, pull_divergence_popup_geometry, render_popup,
+        checklist_item_at, command_log_geometry, commit_body_viewport,
+        email_recipient_row_allocation, format_key_hint, menu_item_at,
+        pull_divergence_popup_geometry, render_popup,
     };
     use crate::config::Theme;
     use crate::gui::popup::{ChecklistItem, MenuItem, MessageKind, PopupState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn commit_body_viewport_slices_from_explicit_top_row() {
+        use tui_textarea::CursorMove;
+
+        let mut textarea = tui_textarea::TextArea::new(
+            (0..8).map(|i| format!("line {i}")).collect::<Vec<_>>(),
+        );
+        textarea.move_cursor(CursorMove::Jump(5, 0));
+
+        let viewport = commit_body_viewport(&textarea, 3);
+        assert_eq!(viewport.lines()[0], "line 3");
+        assert_eq!(viewport.lines()[1], "line 4");
+        assert_eq!(viewport.cursor(), (2, 0));
+    }
 
     #[test]
     fn pull_divergence_popup_uses_large_dialog_geometry() {

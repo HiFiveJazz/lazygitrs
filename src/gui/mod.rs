@@ -8063,6 +8063,23 @@ impl Gui {
                                 {
                                     *pending_command = popup::CommitPendingCommand::VisualInner;
                                 }
+                            } else if key.code == KeyCode::Char('g') && !ctrl && !alt && !cmd {
+                                let go_top = matches!(
+                                    &self.popup,
+                                    PopupState::CommitInput {
+                                        pending_command: popup::CommitPendingCommand::GoTop,
+                                        ..
+                                    }
+                                );
+                                if go_top {
+                                    self.move_commit_input_description_boundary(false);
+                                } else if let PopupState::CommitInput { pending_command, .. } =
+                                    &mut self.popup
+                                {
+                                    *pending_command = popup::CommitPendingCommand::GoTop;
+                                }
+                            } else if key.code == KeyCode::Char('G') && !ctrl && !alt && !cmd {
+                                self.move_commit_input_description_boundary(true);
                             } else if matches!(key.code, KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Char('c')) {
                                 let wrap_width = self.commit_body_wrap_width();
                                 let change = key.code == KeyCode::Char('c');
@@ -8139,9 +8156,11 @@ impl Gui {
                                     body_textarea,
                                     body_state,
                                     visual_line_anchor,
+                                    pending_command,
                                     ..
                                 } = &mut self.popup
                                 {
+                                    *pending_command = popup::CommitPendingCommand::None;
                                     match *focus {
                                         popup::CommitInputFocus::Summary => {
                                             if let Some(((row, start), (_, end))) =
@@ -8188,9 +8207,11 @@ impl Gui {
                                     body_textarea,
                                     body_state,
                                     visual_line_anchor,
+                                    pending_command,
                                     ..
                                 } = &mut self.popup
                                 {
+                                    *pending_command = popup::CommitPendingCommand::None;
                                     match *focus {
                                         popup::CommitInputFocus::Summary => match key.code {
                                             KeyCode::Char('h') | KeyCode::Left => {
@@ -8283,6 +8304,23 @@ impl Gui {
                                 if let PopupState::CommitInput { pending_command, .. } = &mut self.popup {
                                     *pending_command = popup::CommitPendingCommand::None;
                                 }
+                            } else if key.code == KeyCode::Char('g') && !ctrl && !alt && !cmd {
+                                let go_top = matches!(
+                                    &self.popup,
+                                    PopupState::CommitInput {
+                                        pending_command: popup::CommitPendingCommand::GoTop,
+                                        ..
+                                    }
+                                );
+                                if go_top {
+                                    self.move_commit_input_description_boundary(false);
+                                } else if let PopupState::CommitInput { pending_command, .. } =
+                                    &mut self.popup
+                                {
+                                    *pending_command = popup::CommitPendingCommand::GoTop;
+                                }
+                            } else if key.code == KeyCode::Char('G') && !ctrl && !alt && !cmd {
+                                self.move_commit_input_description_boundary(true);
                             } else if key.code == KeyCode::Enter {
                                 self.submit_commit_input();
                             } else if key.code == KeyCode::Char('u')
@@ -10045,6 +10083,7 @@ impl Gui {
                     CommandEntry::keybinding("2j / 2k / …".into(), "Count-prefix motions".into()),
                     CommandEntry::keybinding("w / b".into(), "Next / previous word".into()),
                     CommandEntry::keybinding("H / L".into(), "Start / last character of line".into()),
+                    CommandEntry::keybinding("gg / G".into(), "Top / bottom of Description".into()),
                     CommandEntry::keybinding("f{char} / F{char}".into(), "Eyeliner find forward / backward".into()),
                     CommandEntry::keybinding("i / a / I / A".into(), "Enter Insert mode".into()),
                     CommandEntry::keybinding("o".into(), "Open line below and insert".into()),
@@ -10072,6 +10111,7 @@ impl Gui {
                 entries: vec![
                     CommandEntry::keybinding("h / j / k / l".into(), "Extend selection".into()),
                     CommandEntry::keybinding("w / b / H / L".into(), "Extend by word / line bound".into()),
+                    CommandEntry::keybinding("gg / G".into(), "Extend to top / bottom of Description".into()),
                     CommandEntry::keybinding("d / x".into(), "Delete selection".into()),
                     CommandEntry::keybinding("c".into(), "Change selection".into()),
                     CommandEntry::keybinding("y".into(), "Yank selection".into()),
@@ -13117,6 +13157,70 @@ impl Gui {
         top
     }
 
+    fn move_commit_input_description_boundary(&mut self, to_bottom: bool) {
+        let wrap_width = self.commit_body_wrap_width();
+        let PopupState::CommitInput {
+            focus,
+            summary_textarea,
+            body_textarea,
+            body_state,
+            mode,
+            pending_command,
+            visual_line_anchor,
+            body_scroll_remaining,
+            body_scroll_top,
+            ..
+        } = &mut self.popup
+        else {
+            return;
+        };
+
+        // `gg` / `G` are Description motions. From Normal mode the Summary
+        // field crosses into Description; Visual selections deliberately stay
+        // local to their field because TextArea cannot represent a selection
+        // spanning the two independent editors.
+        if *focus == popup::CommitInputFocus::Summary {
+            if mode.is_visual() {
+                *pending_command = popup::CommitPendingCommand::None;
+                return;
+            }
+            popup::set_commit_input_focus(
+                focus,
+                summary_textarea,
+                body_textarea,
+                popup::CommitInputFocus::Body,
+            );
+        }
+
+        if to_bottom {
+            body_state.move_to_last_logical_line_start();
+        } else {
+            body_state.move_to_start();
+        }
+
+        match *mode {
+            popup::CommitInputMode::VisualLine => {
+                if let Some(anchor) = *visual_line_anchor {
+                    body_state.select_logical_line_range(body_textarea, wrap_width, anchor);
+                }
+            }
+            popup::CommitInputMode::Visual | popup::CommitInputMode::Normal => {
+                if *mode == popup::CommitInputMode::Normal {
+                    body_state.normalize_normal_cursor(wrap_width);
+                }
+                body_state.apply_cursor_into(body_textarea, wrap_width);
+            }
+            popup::CommitInputMode::Insert => {}
+        }
+
+        // A direct Vim jump supersedes any in-flight smooth scroll. The render
+        // path will pull this zero-based requested viewport to the new cursor
+        // when the target lies off-screen.
+        *body_scroll_remaining = 0;
+        *body_scroll_top = 0;
+        *pending_command = popup::CommitPendingCommand::None;
+    }
+
     fn queue_commit_input_scroll(&mut self, rows: isize) {
         if rows == 0 {
             return;
@@ -13132,16 +13236,12 @@ impl Gui {
             return;
         };
 
-        let line_count = body_textarea.lines().len();
-        let max_top = line_count.saturating_sub(visible_rows);
-        if max_top == 0 {
-            *body_scroll_remaining = 0;
-            *body_scroll_top = 0;
-            return;
-        }
-
-        // Resynchronize the explicit viewport with any ordinary Vim cursor
-        // motion that happened since the last smooth scroll.
+        // Ctrl-J/K is a cursor motion first and a viewport motion second, just
+        // like Vim/Neovim Ctrl-D/U.  Do NOT disable it merely because every
+        // line currently fits in the viewport: in that case the cursor should
+        // still move while the viewport remains at row 0.  Earlier versions
+        // returned here when max_top == 0, which made the binding look dead for
+        // the common short-description case.
         *body_scroll_top = Self::commit_body_effective_scroll_top(
             body_textarea,
             *body_scroll_top,
@@ -13168,43 +13268,56 @@ impl Gui {
             return;
         }
 
-        let line_count = body_textarea.lines().len();
-        let max_top = line_count.saturating_sub(visible_rows);
-        if max_top == 0 {
-            *body_scroll_remaining = 0;
-            *body_scroll_top = 0;
-            return;
+        // Animate the Neovim Ctrl-D/U model directly: the editing cursor and
+        // the visible viewport advance together by one visual row per frame.
+        // Keeping those two pieces in lock-step is the key detail the earlier
+        // attempts missed.  tui-textarea's private viewport is not involved at
+        // all; BodySoftWrap owns the cursor and `body_scroll_top` owns exactly
+        // which wrapped row the renderer starts from.
+        let step: isize = if *body_scroll_remaining > 0 { 1 } else { -1 };
+        let before_cursor = body_state.visual_cursor(wrap_width);
+        if step > 0 {
+            if *mode == popup::CommitInputMode::Insert {
+                body_state.move_visual_down(wrap_width);
+            } else {
+                body_state.move_visual_down_normal(wrap_width);
+            }
+        } else if *mode == popup::CommitInputMode::Insert {
+            body_state.move_visual_up(wrap_width);
+        } else {
+            body_state.move_visual_up_normal(wrap_width);
+        }
+        let after_cursor = body_state.visual_cursor(wrap_width);
+        if after_cursor != before_cursor {
+            body_state.apply_cursor_into(body_textarea, wrap_width);
         }
 
-        let step: isize = if *body_scroll_remaining > 0 { 1 } else { -1 };
-        let next_top = if step > 0 {
+        let line_count = body_textarea.lines().len().max(1);
+        let max_top = line_count.saturating_sub(visible_rows.max(1));
+        let before_top = *body_scroll_top;
+        *body_scroll_top = if step > 0 {
             (*body_scroll_top).saturating_add(1).min(max_top)
         } else {
             (*body_scroll_top).saturating_sub(1)
         };
-        if next_top == *body_scroll_top {
+
+        // If the entire description fits, max_top is zero: the cursor still
+        // animates (matching Neovim), but the viewport correctly stays fixed.
+        // At the opposite extreme, once the viewport reaches the file edge the
+        // cursor may continue to its target without creating blank space.
+        if after_cursor == before_cursor && *body_scroll_top == before_top {
             *body_scroll_remaining = 0;
             return;
         }
-        *body_scroll_top = next_top;
 
-        // Keep the real editing cursor inside the explicitly-owned viewport,
-        // matching textarea/neovim scrolling semantics. The text moves every
-        // animation frame; the cursor only moves when the viewport would
-        // otherwise scroll past it.
-        let (cursor_row, cursor_col) = body_textarea.cursor();
-        let viewport_last = next_top
-            .saturating_add(visible_rows.saturating_sub(1))
-            .min(line_count.saturating_sub(1));
-        let target_row = cursor_row.clamp(next_top, viewport_last);
-        if target_row != cursor_row {
-            body_state.set_cursor_from_visual(target_row, cursor_col, wrap_width);
-            if *mode != popup::CommitInputMode::Insert {
-                body_state.normalize_normal_cursor(wrap_width);
-            }
-            body_state.apply_cursor_into(body_textarea, wrap_width);
-        }
-
+        // Clamp once more against the new cursor in case an edit/resize left a
+        // stale top row before this command began.  This never cancels the
+        // lock-step motion above because the cursor moved in the same direction.
+        *body_scroll_top = Self::commit_body_effective_scroll_top(
+            body_textarea,
+            *body_scroll_top,
+            visible_rows,
+        );
         *body_scroll_remaining -= step;
     }
 
@@ -16441,6 +16554,90 @@ mod terminal_mouse_tests {
     }
 
     #[test]
+    fn commit_editor_supports_gg_g_in_normal_and_visual_modes() {
+        let repo = TempRepo::new("commit-vim-gg-g");
+        repo.commit("file", "base");
+        std::fs::write(repo.path().join("file"), "changed").unwrap();
+        repo.git(&["add", "file"]);
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+
+        let wrap_width = gui.commit_body_wrap_width();
+        if let PopupState::CommitInput {
+            focus,
+            summary_textarea,
+            body_textarea,
+            body_state,
+            mode,
+            ..
+        } = &mut gui.popup
+        {
+            *mode = popup::CommitInputMode::Normal;
+            body_state.set_text("zero\none\ntwo\nthree");
+            body_state.set_cursor_index(6); // `one`, column 1
+            body_state.render_into(body_textarea, wrap_width);
+            popup::set_commit_input_focus(
+                focus,
+                summary_textarea,
+                body_textarea,
+                popup::CommitInputFocus::Body,
+            );
+        }
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+            if body_state.visual_cursor(wrap_width) == (3, 0)));
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+            if body_state.visual_cursor(wrap_width) == (0, 0)));
+
+        if let PopupState::CommitInput { body_state, body_textarea, .. } = &mut gui.popup {
+            body_state.set_cursor_index(6);
+            body_state.apply_cursor_into(body_textarea, wrap_width);
+        }
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput { mode, body_state, body_textarea, .. }
+            if *mode == popup::CommitInputMode::Visual
+                && body_state.visual_cursor(wrap_width) == (3, 0)
+                && body_textarea.selection_range().is_some()));
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        if let PopupState::CommitInput { body_state, body_textarea, .. } = &mut gui.popup {
+            body_state.set_cursor_index(5); // start of `one`
+            body_state.apply_cursor_into(body_textarea, wrap_width);
+        }
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput {
+            mode, body_state, visual_line_anchor: Some(anchor), ..
+        } if *mode == popup::CommitInputMode::VisualLine
+            && body_state.selected_logical_lines_text(*anchor) == "one\ntwo\nthree"));
+
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+            .unwrap();
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(&gui.popup, PopupState::CommitInput {
+            mode, body_state, visual_line_anchor: Some(anchor), ..
+        } if *mode == popup::CommitInputMode::VisualLine
+            && body_state.selected_logical_lines_text(*anchor) == "zero\none\n"));
+    }
+
+    #[test]
     fn commit_editor_supports_find_char_and_character_word_motions() {
         let repo = TempRepo::new("commit-vim-find-char");
         repo.commit("file", "base");
@@ -16531,7 +16728,7 @@ mod terminal_mouse_tests {
     }
 
     #[test]
-    fn commit_editor_ctrl_j_k_animate_explicit_viewport_and_short_text_is_fixed() {
+    fn commit_editor_ctrl_j_k_animate_cursor_and_viewport_but_keep_short_text_fixed() {
         let repo = TempRepo::new("commit-vim-scroll");
         repo.commit("file", "base");
         std::fs::write(repo.path().join("file"), "changed").unwrap();
@@ -16583,29 +16780,82 @@ mod terminal_mouse_tests {
             && body_state.visual_cursor(wrap_width) == (1, 0)
             && body_state.visual_cursor(wrap_width) == body_textarea.cursor()));
 
-        // A new opposite-direction command cancels the old target and scrolls up.
+        // Complete the half-page motion: long content must visibly advance
+        // both the cursor and the explicit viewport by the full target amount.
+        for _ in 0..9 {
+            gui.tick_commit_input_scroll_animation();
+        }
+        assert!(matches!(&gui.popup, PopupState::CommitInput {
+            body_scroll_remaining, body_scroll_top, body_state, body_textarea, ..
+        } if *body_scroll_remaining == 0
+            && *body_scroll_top == 10
+            && body_state.visual_cursor(wrap_width) == (10, 0)
+            && body_state.visual_cursor(wrap_width) == body_textarea.cursor()));
+
+        // A new opposite-direction command must reverse the exact same motion.
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
             .unwrap();
         assert!(matches!(&gui.popup, PopupState::CommitInput { body_scroll_remaining, .. }
             if *body_scroll_remaining == -10));
-        gui.tick_commit_input_scroll_animation();
+        for _ in 0..10 {
+            gui.tick_commit_input_scroll_animation();
+        }
         assert!(matches!(&gui.popup, PopupState::CommitInput {
             body_scroll_remaining, body_scroll_top, body_state, body_textarea, ..
-        } if *body_scroll_remaining == -9
+        } if *body_scroll_remaining == 0
             && *body_scroll_top == 0
-            && body_state.visual_cursor(wrap_width) == (1, 0)
+            && body_state.visual_cursor(wrap_width) == (0, 0)
             && body_state.visual_cursor(wrap_width) == body_textarea.cursor()));
 
-        // If every description row fits, Ctrl-J/K must not create a scroll target.
-        if let PopupState::CommitInput { body_state, body_textarea, .. } = &mut gui.popup {
+        // Short descriptions are the important regression case: Ctrl-J/K must
+        // still animate the cursor even though the viewport itself cannot and
+        // should not scroll because every line already fits on screen.
+        if let PopupState::CommitInput {
+            body_state,
+            body_textarea,
+            body_scroll_top,
+            ..
+        } = &mut gui.popup
+        {
             body_state.set_text("one\ntwo\nthree");
             body_state.move_to_start();
             body_state.render_into(body_textarea, wrap_width);
+            *body_scroll_top = 0;
         }
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
             .unwrap();
         assert!(matches!(&gui.popup, PopupState::CommitInput { body_scroll_remaining, .. }
-            if *body_scroll_remaining == 0));
+            if *body_scroll_remaining == 10));
+        gui.tick_commit_input_scroll_animation();
+        assert!(matches!(&gui.popup, PopupState::CommitInput {
+            body_scroll_remaining, body_scroll_top, body_state, body_textarea, ..
+        } if *body_scroll_remaining == 9
+            && *body_scroll_top == 0
+            && body_state.visual_cursor(wrap_width) == (1, 0)
+            && body_state.visual_cursor(wrap_width) == body_textarea.cursor()));
+
+        // Let the short-buffer animation finish.  It must stop on the final
+        // real row without ever moving the viewport away from zero.
+        for _ in 0..16 {
+            gui.tick_commit_input_scroll_animation();
+        }
+        assert!(matches!(&gui.popup, PopupState::CommitInput {
+            body_scroll_remaining, body_scroll_top, body_state, body_textarea, ..
+        } if *body_scroll_remaining == 0
+            && *body_scroll_top == 0
+            && body_state.visual_cursor(wrap_width) == (2, 0)
+            && body_state.visual_cursor(wrap_width) == body_textarea.cursor()));
+
+        // And Ctrl-K must animate back upward even though there was never any
+        // viewport room to scroll.
+        gui.handle_popup_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
+            .unwrap();
+        gui.tick_commit_input_scroll_animation();
+        assert!(matches!(&gui.popup, PopupState::CommitInput {
+            body_scroll_remaining, body_scroll_top, body_state, ..
+        } if *body_scroll_remaining == -9
+            && *body_scroll_top == 0
+            && body_state.visual_cursor(wrap_width) == (1, 0)));
     }
 
     #[test]

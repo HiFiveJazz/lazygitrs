@@ -450,6 +450,24 @@ impl BodySoftWrap {
         self.cursor = 0;
     }
 
+    /// Move to the first character of the final logical line, matching Vim's
+    /// `G` motion. A single trailing newline terminates the final line rather
+    /// than creating a phantom extra line; additional newlines still represent
+    /// real blank logical lines.
+    pub fn move_to_last_logical_line_start(&mut self) {
+        let chars: Vec<char> = self.raw.chars().collect();
+        if chars.is_empty() {
+            self.cursor = 0;
+            return;
+        }
+        let probe = if chars.last() == Some(&'\n') {
+            chars.len().saturating_sub(1)
+        } else {
+            chars.len()
+        };
+        self.cursor = self.logical_line_bounds_at(probe).0;
+    }
+
     /// Append a commit trailer at the bottom while keeping the conventional
     /// blank line between prose and the trailer block. Returns false when the
     /// exact trailer is already present.
@@ -922,7 +940,9 @@ impl BodySoftWrap {
         let layout = WrapLayout::build(&self.raw, wrap_width);
         let (row, col) = layout.cursor_to_visual(self.cursor);
         if row == 0 {
-            self.cursor = 0;
+            // Arrow/animated vertical motion at the top edge is a no-op.  The
+            // previous implementation jumped to raw cursor 0, which also
+            // changed the column and made Ctrl-K animation mode-dependent.
             return;
         }
         let target = &layout.lines[row - 1];
@@ -933,7 +953,10 @@ impl BodySoftWrap {
         let layout = WrapLayout::build(&self.raw, wrap_width);
         let (row, col) = layout.cursor_to_visual(self.cursor);
         if row + 1 >= layout.line_count() {
-            self.cursor = self.char_count();
+            // Stay on the final visual row.  Jumping to char_count() here puts
+            // an Insert-mode cursor in the end-of-buffer insertion cell, so a
+            // smooth-scroll animation could finish at a different column even
+            // though there was nowhere left to move vertically.
             return;
         }
         let target = &layout.lines[row + 1];
@@ -1268,6 +1291,7 @@ pub enum CommitPendingCommand {
     Delete,
     VisualInner,
     Count(u16),
+    GoTop,
     FindForward(u16),
     FindBackward(u16),
 }
@@ -2415,6 +2439,24 @@ mod commit_body_wrap_tests {
         state.render_into(&mut ta, 80);
         assert_eq!(state.raw(), "- something\n- something 2");
         assert_eq!(ta.lines().join("\n"), "- something\n- something 2");
+    }
+
+    #[test]
+    fn insert_vertical_motion_stays_put_at_visual_buffer_edges() {
+        let mut state = BodySoftWrap::from_text("one\ntwo\nthree");
+
+        // At the first visual row, moving up must not reset the column.
+        state.set_cursor_index(2);
+        state.move_visual_up(80);
+        assert_eq!(state.visual_cursor(80), (0, 2));
+
+        // At the final visual row, moving down must not jump to the
+        // end-of-buffer insertion cell. This is important for Ctrl-J/K
+        // neoscroll because fresh commit editors start in Insert mode.
+        state.set_cursor_index(9); // `three`, column 1
+        assert_eq!(state.visual_cursor(80), (2, 1));
+        state.move_visual_down(80);
+        assert_eq!(state.visual_cursor(80), (2, 1));
     }
 
     #[test]
