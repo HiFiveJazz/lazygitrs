@@ -1018,6 +1018,80 @@ impl BodySoftWrap {
         self.logical_line_bounds_at(self.cursor).0
     }
 
+    /// Return the raw start cursor for the visual (soft-wrapped) row that
+    /// contains the current cursor. Vim `V` in the commit editor intentionally
+    /// operates on what the user sees on screen, so a wrapped paragraph starts
+    /// as exactly one highlighted row instead of the entire logical paragraph.
+    pub fn visual_line_start(&self, wrap_width: usize) -> usize {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (row, _) = layout.cursor_to_visual(self.cursor);
+        layout.lines[row].raw_start
+    }
+
+    /// Move the active linewise-Visual cursor by one displayed row.
+    pub fn move_visual_linewise(&mut self, direction: isize, wrap_width: usize) -> bool {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (row, _) = layout.cursor_to_visual(self.cursor);
+        let target = if direction > 0 {
+            if row + 1 >= layout.lines.len() {
+                return false;
+            }
+            row + 1
+        } else {
+            if row == 0 {
+                return false;
+            }
+            row - 1
+        };
+        self.cursor = layout.lines[target].raw_start;
+        true
+    }
+
+    /// Rebuild a linewise Visual selection from the anchor displayed row to
+    /// the row containing the current cursor. This is deliberately based on
+    /// soft-wrapped rows, not newline-delimited logical lines.
+    pub fn select_visual_line_range(
+        &mut self,
+        textarea: &mut TextArea<'static>,
+        wrap_width: usize,
+        anchor_start: usize,
+    ) {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (anchor_row, _) = layout.cursor_to_visual(anchor_start);
+        let (target_row, _) = layout.cursor_to_visual(self.cursor);
+
+        textarea.cancel_selection();
+        if target_row >= anchor_row {
+            textarea.move_cursor(CursorMove::Jump(anchor_row as u16, 0));
+            textarea.start_selection();
+            let end_col = layout.lines[target_row].char_len;
+            textarea.move_cursor(CursorMove::Jump(target_row as u16, end_col as u16));
+        } else {
+            let anchor_end = layout.lines[anchor_row].char_len;
+            textarea.move_cursor(CursorMove::Jump(anchor_row as u16, anchor_end as u16));
+            textarea.start_selection();
+            textarea.move_cursor(CursorMove::Jump(target_row as u16, 0));
+        }
+    }
+
+    /// Start `V` on exactly the displayed row under the cursor. Returns the
+    /// raw row-start anchor used by subsequent `j`/`k`/`gg`/`G` motions.
+    pub fn select_current_visual_line(
+        &mut self,
+        textarea: &mut TextArea<'static>,
+        wrap_width: usize,
+    ) -> usize {
+        let anchor = self.visual_line_start(wrap_width);
+        self.cursor = anchor;
+        self.select_visual_line_range(textarea, wrap_width, anchor);
+        anchor
+    }
+
+    pub fn move_to_last_visual_line_start(&mut self, wrap_width: usize) {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        self.cursor = layout.lines.last().map_or(0, |line| line.raw_start);
+    }
+
     /// Move by one *logical* line for Vim linewise Visual mode. Soft-wrapped
     /// display rows are deliberately skipped so `Vj` always selects the next
     /// commit-message line, matching Vim/Neovim.
@@ -2457,6 +2531,26 @@ mod commit_body_wrap_tests {
         assert_eq!(state.visual_cursor(80), (2, 1));
         state.move_visual_down(80);
         assert_eq!(state.visual_cursor(80), (2, 1));
+    }
+
+    #[test]
+    fn visual_line_selection_starts_with_only_the_current_wrapped_row() {
+        let mut state = BodySoftWrap::from_text("alpha beta gamma delta");
+        state.set_cursor_index(7); // inside the wrapped `beta` row
+        let mut ta = super::make_commit_body_textarea();
+        state.render_into(&mut ta, 6);
+
+        let anchor = state.select_current_visual_line(&mut ta, 6);
+        let selection = ta.selection_range().expect("V should select one row");
+        assert_eq!(state.selected_visual_text(selection.0, selection.1, 6), "beta");
+
+        assert!(state.move_visual_linewise(1, 6));
+        state.select_visual_line_range(&mut ta, 6, anchor);
+        let selection = ta.selection_range().expect("Vj should extend one row");
+        assert_eq!(
+            state.selected_visual_text(selection.0, selection.1, 6),
+            "beta gamma"
+        );
     }
 
     #[test]

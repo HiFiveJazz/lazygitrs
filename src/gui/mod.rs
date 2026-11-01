@@ -8115,23 +8115,15 @@ impl Gui {
                                             summary_textarea.cancel_selection();
                                         }
                                         popup::CommitInputFocus::Body => {
-                                            let deleted = if *mode == popup::CommitInputMode::VisualLine {
-                                                visual_line_anchor
-                                                    .as_ref()
-                                                    .is_some_and(|anchor| {
-                                                        body_state.delete_logical_line_selection(*anchor)
-                                                    })
-                                            } else {
-                                                body_textarea
-                                                    .selection_range()
-                                                    .is_some_and(|(start, end)| {
-                                                        body_state.delete_visual_selection(
-                                                            start,
-                                                            end,
-                                                            wrap_width,
-                                                        )
-                                                    })
-                                            };
+                                            let deleted = body_textarea
+                                                .selection_range()
+                                                .is_some_and(|(start, end)| {
+                                                    body_state.delete_visual_selection(
+                                                        start,
+                                                        end,
+                                                        wrap_width,
+                                                    )
+                                                });
                                             if !deleted {
                                                 body_state.delete();
                                             }
@@ -8176,11 +8168,7 @@ impl Gui {
                                             }
                                         }
                                         popup::CommitInputFocus::Body => {
-                                            if *mode == popup::CommitInputMode::VisualLine {
-                                                if let Some(anchor) = *visual_line_anchor {
-                                                    selected = body_state.selected_logical_lines_text(anchor);
-                                                }
-                                            } else if let Some((start, end)) = body_textarea.selection_range() {
+                                            if let Some((start, end)) = body_textarea.selection_range() {
                                                 selected = body_state.selected_visual_text(
                                                     start,
                                                     end,
@@ -8252,9 +8240,9 @@ impl Gui {
                                                 } else {
                                                     -1
                                                 };
-                                                if body_state.move_logical_line(direction) {
+                                                if body_state.move_visual_linewise(direction, wrap_width) {
                                                     if let Some(anchor) = *visual_line_anchor {
-                                                        body_state.select_logical_line_range(
+                                                        body_state.select_visual_line_range(
                                                             body_textarea,
                                                             wrap_width,
                                                             anchor,
@@ -8496,7 +8484,7 @@ impl Gui {
                                         }
                                         popup::CommitInputFocus::Body => {
                                             *visual_line_anchor = Some(
-                                                body_state.select_current_logical_line(
+                                                body_state.select_current_visual_line(
                                                     body_textarea,
                                                     wrap_width,
                                                 ),
@@ -13193,7 +13181,11 @@ impl Gui {
         }
 
         if to_bottom {
-            body_state.move_to_last_logical_line_start();
+            if *mode == popup::CommitInputMode::VisualLine {
+                body_state.move_to_last_visual_line_start(wrap_width);
+            } else {
+                body_state.move_to_last_logical_line_start();
+            }
         } else {
             body_state.move_to_start();
         }
@@ -13201,7 +13193,7 @@ impl Gui {
         match *mode {
             popup::CommitInputMode::VisualLine => {
                 if let Some(anchor) = *visual_line_anchor {
-                    body_state.select_logical_line_range(body_textarea, wrap_width, anchor);
+                    body_state.select_visual_line_range(body_textarea, wrap_width, anchor);
                 }
             }
             popup::CommitInputMode::Visual | popup::CommitInputMode::Normal => {
