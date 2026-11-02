@@ -15,9 +15,9 @@ pub mod stash;
 pub mod status;
 pub mod submodule;
 pub mod tag;
-pub mod worktree;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod worktree;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -155,7 +155,8 @@ impl GitCommands {
     /// generation checks between phases prevent a stale status result from
     /// cascading into numstat/hunk/shortstat scans after checkout has started.
     pub fn cancel_worktree_reads(&self) {
-        self.worktree_read_generation.fetch_add(1, Ordering::Relaxed);
+        self.worktree_read_generation
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
@@ -344,9 +345,7 @@ impl GitCommands {
         let git = Arc::clone(self);
         std::thread::spawn(move || {
             let commits = match commit_filter {
-                Some(filter) => {
-                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
-                }
+                Some(filter) => git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0),
                 None => git.load_commits_page(DEFAULT_COMMIT_LIMIT, 0),
             };
 
@@ -530,9 +529,7 @@ impl GitCommands {
             // FileStats carries the complete set so apply_file_stats can append
             // newly discovered untracked rows without disturbing the visible
             // tracked selection.
-            if !published_tracked_early
-                && tx.send(ModelPart::Files(files.clone())).is_err()
-            {
+            if !published_tracked_early && tx.send(ModelPart::Files(files.clone())).is_err() {
                 trim_if_abandoned();
                 return;
             }
@@ -931,7 +928,9 @@ impl GitCommands {
                 // move. Only fall back to `for-each-ref` when checkout created a
                 // local branch we did not previously know about.
                 let cached_branch_is_complete = head.branch_name.is_empty()
-                    || branches.iter().any(|branch| branch.name == head.branch_name);
+                    || branches
+                        .iter()
+                        .any(|branch| branch.name == head.branch_name);
                 if cached_branch_is_complete {
                     for branch in &mut branches {
                         branch.head = branch.name == head.branch_name;
@@ -950,9 +949,7 @@ impl GitCommands {
             // commit graph itself did not change. Reload only the current page;
             // this is much cheaper than the old `git log --all --topo-order` walk.
             let refreshed_commits = match commit_filter {
-                Some(filter) => {
-                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
-                }
+                Some(filter) => git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0),
                 None => git.load_commits_page(DEFAULT_COMMIT_LIMIT, 0),
             };
             if let Ok(fresh) = refreshed_commits {
@@ -1228,14 +1225,13 @@ impl GitCommands {
             .run_expecting_success()?;
         Ok(result.stdout_trimmed().to_string())
     }
-
 }
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
-    use super::*;
     use super::test_support::TempDir;
+    use super::*;
+    use std::process::Command;
 
     fn run_test_git(path: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
@@ -1301,14 +1297,16 @@ mod tests {
             assert_eq!(head.branch_name, "main", "{name}");
 
             let commits = git.load_commits(10).expect("load commits");
-            assert_eq!(commits.first().map(|commit| commit.hash.as_str()), Some(head.hash.as_str()), "{name}");
+            assert_eq!(
+                commits.first().map(|commit| commit.hash.as_str()),
+                Some(head.hash.as_str()),
+                "{name}"
+            );
 
             let branches = git.load_branches().expect("load branches");
             assert!(
                 branches.iter().any(|branch| {
-                    branch.name == "main"
-                        && branch.head
-                        && branch.hash == expected_short_head
+                    branch.name == "main" && branch.head && branch.hash == expected_short_head
                 }),
                 "{name}: main branch should be loaded from the repository format"
             );
@@ -1358,7 +1356,10 @@ mod tests {
 
         let git = GitCommands::new(temp.path()).unwrap();
         let main_commits = git.load_commits_page(50, 0).unwrap();
-        assert_eq!(main_commits.first().map(|c| c.hash.as_str()), Some(main_tip.as_str()));
+        assert_eq!(
+            main_commits.first().map(|c| c.hash.as_str()),
+            Some(main_tip.as_str())
+        );
         assert!(!main_commits.iter().any(|commit| commit.hash == feature_tip));
 
         run(&["checkout", "feature"]);
@@ -1801,10 +1802,7 @@ mod tests {
             .expect_err("dirty worktree must be preserved");
         assert!(err.to_string().contains("local changes"));
         assert!(linked.exists());
-        assert!(git
-            .linked_worktree_for_branch("linked")
-            .unwrap()
-            .is_some());
+        assert!(git.linked_worktree_for_branch("linked").unwrap().is_some());
     }
 
     #[test]
@@ -1831,10 +1829,7 @@ mod tests {
         let git = GitCommands::new(&repo).expect("create git commands");
         git.remove_worktree_for_branch_deletion(linked.to_str().unwrap())
             .expect("prune stale worktree metadata");
-        assert!(git
-            .linked_worktree_for_branch("linked")
-            .unwrap()
-            .is_none());
+        assert!(git.linked_worktree_for_branch("linked").unwrap().is_none());
     }
 
     #[test]
@@ -1924,7 +1919,9 @@ mod tests {
         assert_eq!(tracked.deletions, 0);
         assert_eq!(tracked.hunk_count, 1);
         assert!(enriched_files.iter().any(|file| {
-            file.name == "untracked.txt" && !file.tracked && file.status == model::FileStatus::Untracked
+            file.name == "untracked.txt"
+                && !file.tracked
+                && file.status == model::FileStatus::Untracked
         }));
     }
 

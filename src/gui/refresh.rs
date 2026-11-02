@@ -662,7 +662,10 @@ impl Gui {
     }
 
     /// Kick off the model refresh required after a successful checkout.
-    pub(super) fn start_background_checkout_refresh(&mut self, confirmed_head: Option<HeadState>) -> bool {
+    pub(super) fn start_background_checkout_refresh(
+        &mut self,
+        confirmed_head: Option<HeadState>,
+    ) -> bool {
         let Some(tx) = self.begin_streaming_refresh(CHECKOUT_MODEL_PART_COUNT, true) else {
             return false;
         };
@@ -740,9 +743,4 @@ impl Gui {
             self.context_mgr.files_list_len_override = None;
         }
     }
-
-    /// Resolve the currently selected file index in the files panel.
-    /// In tree view, maps the tree node selection to the actual file index.
-    /// Returns None if a directory node is selected (no file to operate on).
-
 }

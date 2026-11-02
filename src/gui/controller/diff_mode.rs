@@ -1196,7 +1196,6 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
     };
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

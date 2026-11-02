@@ -362,7 +362,6 @@ impl NavigableTreeNode for FileTreeNode {
     }
 }
 
-
 pub fn find_parent_idx<T: NavigableTreeNode>(nodes: &[T], current_idx: usize) -> Option<usize> {
     if current_idx == 0 || nodes.is_empty() || current_idx >= nodes.len() {
         return None;

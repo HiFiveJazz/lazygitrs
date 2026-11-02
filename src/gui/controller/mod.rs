@@ -6,9 +6,8 @@ use crossterm::event::KeyEvent;
 /// Keep this separate from `tree::matches_key`, which intentionally normalizes
 /// shifted punctuation for terminal compatibility.
 pub(super) fn matches_key(key: KeyEvent, binding: &str) -> bool {
-    parse_key(binding).is_some_and(|expected| {
-        key.code == expected.code && key.modifiers == expected.modifiers
-    })
+    parse_key(binding)
+        .is_some_and(|expected| key.code == expected.code && key.modifiers == expected.modifiers)
 }
 
 #[derive(Clone, Copy)]

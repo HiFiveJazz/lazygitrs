@@ -46,11 +46,7 @@ fn enter_tag_commits(gui: &mut Gui) -> Result<()> {
         .get(selected)
         .map(|tag| tag.name.clone());
     if let Some(name) = name {
-        super::enter_named_commit_history(
-            gui,
-            name,
-            Some(crate::gui::context::ContextId::Tags),
-        )?;
+        super::enter_named_commit_history(gui, name, Some(crate::gui::context::ContextId::Tags))?;
     }
     Ok(())
 }

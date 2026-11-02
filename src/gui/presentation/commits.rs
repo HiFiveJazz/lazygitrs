@@ -287,8 +287,6 @@ fn smart_date(unix_ts: i64) -> String {
     }
 }
 
-
-
 /// Initials like lazygit: single word -> first 2 chars, two+ words -> first
 /// char of first two words, wide first grapheme (emoji/CJK) -> first char.
 fn author_initials(name: &str) -> String {

@@ -106,9 +106,8 @@ fn keyboard_enhancement_preserves_terminal_text_input() {
         crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
     );
     assert!(
-        !flags.contains(
-            crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-        )
+        !flags
+            .contains(crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES)
     );
     assert!(!flags.contains(crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
 }
@@ -1202,10 +1201,7 @@ fn checkout_visibility_latency() {
                 assert!(start.elapsed() < Duration::from_secs(10));
                 // Mirror the main loop's input wait before dispatching refresh.
                 std::thread::sleep(gui.input_wait_timeout());
-                if gui.needs_refresh
-                    && !gui.refresh_in_progress
-                    && gui.initial_load_rx.is_none()
-                {
+                if gui.needs_refresh && !gui.refresh_in_progress && gui.initial_load_rx.is_none() {
                     gui.start_background_refresh();
                 }
             }
@@ -1439,7 +1435,10 @@ fn failed_checkout_requeues_refresh_invalidated_at_checkout_start() {
     assert!(gui.needs_refresh);
     assert!(
         model_tx
-            .send(ModelPart::DiffStats { added: 1, deleted: 1 })
+            .send(ModelPart::DiffStats {
+                added: 1,
+                deleted: 1
+            })
             .is_err()
     );
 }
@@ -1724,7 +1723,11 @@ fn push_uses_targeted_background_refresh() {
             .any(|part| matches!(part, ModelPart::UnpushedCommitHashes(_)))
     );
     assert!(!parts.iter().any(|part| matches!(part, ModelPart::Files(_))));
-    assert!(!parts.iter().any(|part| matches!(part, ModelPart::Commits(_))));
+    assert!(
+        !parts
+            .iter()
+            .any(|part| matches!(part, ModelPart::Commits(_)))
+    );
 }
 
 #[test]
@@ -2066,7 +2069,11 @@ fn pull_with_remote_ref_changes_but_unchanged_head_uses_fetch_refresh() {
             .iter()
             .any(|part| matches!(part, ModelPart::DiffStats { .. }))
     );
-    assert!(!parts.iter().any(|part| matches!(part, ModelPart::Reflog(_))));
+    assert!(
+        !parts
+            .iter()
+            .any(|part| matches!(part, ModelPart::Reflog(_)))
+    );
     assert!(
         !parts
             .iter()
@@ -2296,8 +2303,7 @@ fn tree_help_is_only_available_in_active_tree_contexts() {
                         section
                             .entries
                             .iter()
-                            .any(|e| e.key == "."
-                                && e.description == "Select first visible child")
+                            .any(|e| e.key == "." && e.description == "Select first visible child")
                     );
                     assert_eq!(section.entries.iter().any(|e| e.key == "-"), !diff);
                 }
@@ -2680,10 +2686,12 @@ fn stash_defaults_open_wrapped_confirmations_without_full_refresh() {
     // wrapped message body; the title stays compact and cannot be clipped.
     gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::Confirm { title, message, .. }
+    assert!(
+        matches!(&gui.popup, PopupState::Confirm { title, message, .. }
         if title == "Apply stash"
             && message.contains("very long stash subject")
-            && message.contains("keep it in the stash list")));
+            && message.contains("keep it in the stash list"))
+    );
 
     // Confirm apply, then wait for the stash-specific refresh. It must not
     // queue the expensive generic full-model refresh.
@@ -2705,10 +2713,12 @@ fn stash_defaults_open_wrapped_confirmations_without_full_refresh() {
     gui.context_mgr.set_selection(0);
     gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::Confirm { title, message, .. }
+    assert!(
+        matches!(&gui.popup, PopupState::Confirm { title, message, .. }
         if title == "Pop stash"
             && message.contains("very long stash subject")
-            && message.contains("remove it from the stash list")));
+            && message.contains("remove it from the stash list"))
+    );
 }
 
 #[test]
@@ -2727,14 +2737,18 @@ fn alt_s_in_commit_editor_toggles_visible_signoff() {
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, focus, .. }
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, focus, .. }
         if body_state.raw() == "Signed-off-by: Test User <test@example.com>"
-            && *focus == popup::CommitInputFocus::Body));
+            && *focus == popup::CommitInputFocus::Body)
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.raw().is_empty()));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.raw().is_empty())
+    );
 }
 
 #[test]
@@ -2749,9 +2763,11 @@ fn commit_editor_vim_modes_move_between_fields_and_delete_visual_selection() {
     gui.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
         .unwrap();
 
-    assert!(matches!(&gui.popup, PopupState::CommitInput { mode, focus, .. }
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { mode, focus, .. }
         if *mode == popup::CommitInputMode::Insert
-            && *focus == popup::CommitInputFocus::Summary));
+            && *focus == popup::CommitInputFocus::Summary)
+    );
 
     for c in "subject".chars() {
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
@@ -2761,9 +2777,11 @@ fn commit_editor_vim_modes_move_between_fields_and_delete_visual_selection() {
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { mode, focus, .. }
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { mode, focus, .. }
         if *mode == popup::CommitInputMode::Normal
-            && *focus == popup::CommitInputFocus::Body));
+            && *focus == popup::CommitInputFocus::Body)
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))
         .unwrap();
@@ -2784,11 +2802,13 @@ fn commit_editor_vim_modes_move_between_fields_and_delete_visual_selection() {
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
 
-    assert!(matches!(&gui.popup, PopupState::CommitInput { mode, body_state, focus, .. }
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { mode, body_state, focus, .. }
         if *mode == popup::CommitInputMode::Normal
             && *focus == popup::CommitInputFocus::Body
             && body_state.raw() == "pha beta"
-            && body_state.cursor == 0));
+            && body_state.cursor == 0)
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
         .unwrap();
@@ -2818,8 +2838,10 @@ fn commit_editor_supports_vim_operators_undo_open_line_and_quote_object() {
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { summary_textarea, .. }
-        if summary_textarea.lines().join("").is_empty()));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { summary_textarea, .. }
+        if summary_textarea.lines().join("").is_empty())
+    );
 
     // Put text in the body and exercise dw/dd/o.
     let wrap_width = gui.commit_body_wrap_width();
@@ -2846,31 +2868,44 @@ fn commit_editor_supports_vim_operators_undo_open_line_and_quote_object() {
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.raw() == "beta"));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.raw() == "beta")
+    );
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.raw() == "alpha beta"));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.raw() == "alpha beta")
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.raw().is_empty()));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.raw().is_empty())
+    );
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
         .unwrap();
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { mode, body_state, .. }
-        if *mode == popup::CommitInputMode::Insert && body_state.raw() == "alpha beta\n"));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { mode, body_state, .. }
+        if *mode == popup::CommitInputMode::Insert && body_state.raw() == "alpha beta\n")
+    );
     gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
 
     // vi" selects only the quoted contents.
-    if let PopupState::CommitInput { body_textarea, body_state, .. } = &mut gui.popup {
+    if let PopupState::CommitInput {
+        body_textarea,
+        body_state,
+        ..
+    } = &mut gui.popup
+    {
         body_state.set_text("say \"hello world\" now");
         body_state.set_cursor_index(8);
         body_state.render_into(body_textarea, wrap_width);
@@ -2881,10 +2916,12 @@ fn commit_editor_supports_vim_operators_undo_open_line_and_quote_object() {
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('"'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_textarea, body_state, mode, .. }
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_textarea, body_state, mode, .. }
         if mode.is_visual()
             && body_textarea.selection_range().is_some_and(|(start, end)|
-                body_state.selected_visual_text(start, end, wrap_width) == "hello world")));
+                body_state.selected_visual_text(start, end, wrap_width) == "hello world"))
+    );
 }
 
 #[test]
@@ -2925,24 +2962,35 @@ fn commit_editor_supports_counts_backspace_and_linewise_visual() {
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.visual_cursor(wrap_width).0 == 2));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.visual_cursor(wrap_width).0 == 2)
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.visual_cursor(wrap_width).0 == 0));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.visual_cursor(wrap_width).0 == 0)
+    );
 
-    if let PopupState::CommitInput { body_state, body_textarea, .. } = &mut gui.popup {
+    if let PopupState::CommitInput {
+        body_state,
+        body_textarea,
+        ..
+    } = &mut gui.popup
+    {
         body_state.set_cursor_index(3);
         body_state.apply_cursor_into(body_textarea, wrap_width);
     }
     gui.handle_popup_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.cursor_index() == 2 && body_state.raw() == "zero\none\ntwo\nthree"));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.cursor_index() == 2 && body_state.raw() == "zero\none\ntwo\nthree")
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT))
         .unwrap();
@@ -2997,17 +3045,26 @@ fn commit_editor_supports_gg_g_in_normal_and_visual_modes() {
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.visual_cursor(wrap_width) == (3, 0)));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.visual_cursor(wrap_width) == (3, 0))
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.visual_cursor(wrap_width) == (0, 0)));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.visual_cursor(wrap_width) == (0, 0))
+    );
 
-    if let PopupState::CommitInput { body_state, body_textarea, .. } = &mut gui.popup {
+    if let PopupState::CommitInput {
+        body_state,
+        body_textarea,
+        ..
+    } = &mut gui.popup
+    {
         body_state.set_cursor_index(6);
         body_state.apply_cursor_into(body_textarea, wrap_width);
     }
@@ -3015,14 +3072,21 @@ fn commit_editor_supports_gg_g_in_normal_and_visual_modes() {
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { mode, body_state, body_textarea, .. }
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { mode, body_state, body_textarea, .. }
         if *mode == popup::CommitInputMode::Visual
             && body_state.visual_cursor(wrap_width) == (3, 0)
-            && body_textarea.selection_range().is_some()));
+            && body_textarea.selection_range().is_some())
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
-    if let PopupState::CommitInput { body_state, body_textarea, .. } = &mut gui.popup {
+    if let PopupState::CommitInput {
+        body_state,
+        body_textarea,
+        ..
+    } = &mut gui.popup
+    {
         body_state.set_cursor_index(5); // start of `one`
         body_state.apply_cursor_into(body_textarea, wrap_width);
     }
@@ -3083,20 +3147,26 @@ fn commit_editor_supports_find_char_and_character_word_motions() {
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.cursor_index() == 8));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.cursor_index() == 8)
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.cursor_index() == 17));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.cursor_index() == 17)
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT))
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.cursor_index() == 13));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.cursor_index() == 13)
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
         .unwrap();
@@ -3104,8 +3174,10 @@ fn commit_editor_supports_find_char_and_character_word_motions() {
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
-        if body_state.cursor_index() == 4));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_state, .. }
+        if body_state.cursor_index() == 4)
+    );
 }
 
 #[test]
@@ -3126,9 +3198,14 @@ fn commit_editor_question_mark_uses_command_palette_and_restores_editor() {
         .unwrap();
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommandPalette { sections, .. }
-        if sections.iter().any(|section| section.title.contains("NORMAL"))));
-    assert!(matches!(&gui.pending_commit_popup, Some(PopupState::CommitInput { .. })));
+    assert!(
+        matches!(&gui.popup, PopupState::CommandPalette { sections, .. }
+        if sections.iter().any(|section| section.title.contains("NORMAL")))
+    );
+    assert!(matches!(
+        &gui.pending_commit_popup,
+        Some(PopupState::CommitInput { .. })
+    ));
 
     gui.handle_command_palette_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
@@ -3198,7 +3275,9 @@ fn patch_picker_supports_vim_counts_and_top_bottom_jumps() {
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
             .unwrap();
     }
-    assert!(matches!(&gui.popup, PopupState::PatchFilePicker { state, .. } if state.selected == 20));
+    assert!(
+        matches!(&gui.popup, PopupState::PatchFilePicker { state, .. } if state.selected == 20)
+    );
 
     for ch in ['2', '0', 'k'] {
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
@@ -3208,7 +3287,9 @@ fn patch_picker_supports_vim_counts_and_top_bottom_jumps() {
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::PatchFilePicker { state, .. } if state.selected == 39));
+    assert!(
+        matches!(&gui.popup, PopupState::PatchFilePicker { state, .. } if state.selected == 39)
+    );
 
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
         .unwrap();
@@ -3256,7 +3337,10 @@ fn commit_editor_ctrl_j_k_animate_cursor_and_viewport_but_keep_short_text_fixed(
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
         .unwrap();
     let queued = match &gui.popup {
-        PopupState::CommitInput { body_scroll_remaining, .. } => *body_scroll_remaining,
+        PopupState::CommitInput {
+            body_scroll_remaining,
+            ..
+        } => *body_scroll_remaining,
         _ => 0,
     };
     assert_eq!(queued, 10);
@@ -3283,8 +3367,10 @@ fn commit_editor_ctrl_j_k_animate_cursor_and_viewport_but_keep_short_text_fixed(
     // A new opposite-direction command must reverse the exact same motion.
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_scroll_remaining, .. }
-        if *body_scroll_remaining == -10));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_scroll_remaining, .. }
+        if *body_scroll_remaining == -10)
+    );
     for _ in 0..10 {
         gui.tick_commit_input_scroll_animation();
     }
@@ -3312,8 +3398,10 @@ fn commit_editor_ctrl_j_k_animate_cursor_and_viewport_but_keep_short_text_fixed(
     }
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
         .unwrap();
-    assert!(matches!(&gui.popup, PopupState::CommitInput { body_scroll_remaining, .. }
-        if *body_scroll_remaining == 10));
+    assert!(
+        matches!(&gui.popup, PopupState::CommitInput { body_scroll_remaining, .. }
+        if *body_scroll_remaining == 10)
+    );
     gui.tick_commit_input_scroll_animation();
     assert!(matches!(&gui.popup, PopupState::CommitInput {
         body_scroll_remaining, body_scroll_top, body_state, body_textarea, ..
@@ -3367,7 +3455,10 @@ fn commit_editor_normal_escape_stays_open_and_q_saves_draft() {
     gui.handle_popup_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
         .unwrap();
     assert!(matches!(&gui.popup, PopupState::None));
-    assert!(matches!(&gui.saved_commit_popup, Some(PopupState::CommitInput { .. })));
+    assert!(matches!(
+        &gui.saved_commit_popup,
+        Some(PopupState::CommitInput { .. })
+    ));
 }
 
 #[test]
@@ -3532,8 +3623,7 @@ fn ctrl_g_no_longer_switches_panels() {
     ] {
         for diff_focused in [false, true] {
             let git = crate::git::GitCommands::new(repo.path()).unwrap();
-            let mut gui =
-                Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+            let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
             gui.context_mgr.set_active(context);
             gui.diff_focused = diff_focused;
             gui.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
@@ -3683,11 +3773,7 @@ fn commits_startup_selects_actual_head_and_preserves_path_filter() {
             Gui::new(crate::config::AppConfig::default(), git, path.clone(), true).unwrap();
         let commits = gui
             .git
-            .load_filtered_commits_page(
-                &gui.commit_filter_for_load().unwrap_or_default(),
-                300,
-                0,
-            )
+            .load_filtered_commits_page(&gui.commit_filter_for_load().unwrap_or_default(), 300, 0)
             .unwrap();
         gui.model.lock().unwrap().set_commits(commits);
         gui.select_startup_head().unwrap();

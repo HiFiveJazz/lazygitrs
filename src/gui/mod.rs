@@ -1,16 +1,16 @@
-pub mod context;
 mod command_palette;
-mod keyboard;
-mod mouse;
-mod runtime;
-mod refresh;
+pub mod context;
 pub mod controller;
 pub mod input;
+mod keyboard;
 pub mod layout;
 pub mod modes;
+mod mouse;
 pub mod popup;
 mod popup_input;
 pub mod presentation;
+mod refresh;
+mod runtime;
 pub mod scroll;
 pub mod views;
 
@@ -31,8 +31,8 @@ use ratatui::layout::Rect;
 
 use crate::config::keybindings::parse_key;
 use crate::config::{AppConfig, AppState};
-use crate::git::{DEFAULT_COMMIT_LIMIT, GitCommands, HeadState, MODEL_PART_COUNT, ModelPart};
 use crate::git::remote::{PullOutcome, PullStrategy};
+use crate::git::{DEFAULT_COMMIT_LIMIT, GitCommands, HeadState, MODEL_PART_COUNT, ModelPart};
 use crate::model::Model;
 use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode, build_file_tree};
 use crate::os::platform::Platform;
@@ -802,10 +802,7 @@ fn spawn_commit_stat_prefetch_workers(
                     Err(_) => return,
                 };
 
-                let hashes = jobs
-                    .iter()
-                    .map(|job| job.hash.clone())
-                    .collect::<Vec<_>>();
+                let hashes = jobs.iter().map(|job| job.hash.clone()).collect::<Vec<_>>();
                 let batch = git.commit_stats(&hashes);
 
                 for job in jobs {
@@ -1813,8 +1810,6 @@ impl Gui {
             }
         }
     }
-
-
 
     fn patch_preview_animation_active(&self) -> bool {
         matches!(
@@ -3244,8 +3239,10 @@ impl Gui {
                             // worktree row reflect the confirmed HEAD immediately; the
                             // targeted refresh reuses this cached list instead of spawning
                             // `git worktree list --porcelain` again.
-                            if let Some(worktree) =
-                                model.worktrees.iter_mut().find(|worktree| worktree.is_current)
+                            if let Some(worktree) = model
+                                .worktrees
+                                .iter_mut()
+                                .find(|worktree| worktree.is_current)
                             {
                                 worktree.hash.clone_from(&head.hash);
                                 worktree.branch = if head.branch_name.is_empty() {
@@ -3278,7 +3275,10 @@ impl Gui {
                         RemoteOpKind::Pull => {
                             let integrated = matches!(
                                 completion.pull_outcome.as_ref(),
-                                Some(PullOutcome::FastForwarded { .. } | PullOutcome::Integrated { .. })
+                                Some(
+                                    PullOutcome::FastForwarded { .. }
+                                        | PullOutcome::Integrated { .. }
+                                )
                             );
 
                             if integrated {
@@ -3564,12 +3564,7 @@ impl Gui {
 
             // This is the potentially expensive part on very divergent repositories.
             // Keep it off the UI thread and cap the first page just like normal Compare mode.
-            let commits = git.load_compare_commits(
-                &ref_a,
-                &ref_b,
-                DEFAULT_COMMIT_LIMIT,
-                0,
-            );
+            let commits = git.load_compare_commits(&ref_a, &ref_b, DEFAULT_COMMIT_LIMIT, 0);
             let _ = tx.send(CompareLoadEvent::Commits {
                 generation,
                 ref_a,
@@ -3932,12 +3927,7 @@ impl Gui {
         self.launch_remote_op(RemoteOpKind::Pull, "Pull", op);
     }
 
-    fn start_pull_integration(
-        &mut self,
-        upstream: String,
-        strategy: PullStrategy,
-        remember: bool,
-    ) {
+    fn start_pull_integration(&mut self, upstream: String, strategy: PullStrategy, remember: bool) {
         if self.remote_op_label.is_some() || self.pending_remote_op.is_some() {
             return;
         }
@@ -5151,11 +5141,8 @@ impl Gui {
         // still move while the viewport remains at row 0.  Earlier versions
         // returned here when max_top == 0, which made the binding look dead for
         // the common short-description case.
-        *body_scroll_top = Self::commit_body_effective_scroll_top(
-            body_textarea,
-            *body_scroll_top,
-            visible_rows,
-        );
+        *body_scroll_top =
+            Self::commit_body_effective_scroll_top(body_textarea, *body_scroll_top, visible_rows);
         *body_scroll_remaining = rows.clamp(-999, 999);
     }
 
@@ -5222,11 +5209,8 @@ impl Gui {
         // Clamp once more against the new cursor in case an edit/resize left a
         // stale top row before this command began.  This never cancels the
         // lock-step motion above because the cursor moved in the same direction.
-        *body_scroll_top = Self::commit_body_effective_scroll_top(
-            body_textarea,
-            *body_scroll_top,
-            visible_rows,
-        );
+        *body_scroll_top =
+            Self::commit_body_effective_scroll_top(body_textarea, *body_scroll_top, visible_rows);
         *body_scroll_remaining -= step;
     }
 
@@ -5547,7 +5531,6 @@ impl Command for EnableMouseCaptureWithoutHover {
 
 #[cfg(test)]
 mod tests;
-
 
 fn setup_terminal() -> Result<(Term, bool)> {
     terminal::enable_raw_mode()?;

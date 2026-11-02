@@ -77,7 +77,6 @@ impl GitCommands {
     }
 }
 
-
 fn build_visual_block_patch(
     file_path: &str,
     unified_diff: &str,

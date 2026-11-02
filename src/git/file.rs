@@ -124,7 +124,11 @@ impl GitCommands {
         }
 
         let diff_base = if self.head_state().is_ok() {
-            vec!["--literal-pathspecs".to_string(), "diff".to_string(), "HEAD".to_string()]
+            vec![
+                "--literal-pathspecs".to_string(),
+                "diff".to_string(),
+                "HEAD".to_string(),
+            ]
         } else {
             vec![
                 "--literal-pathspecs".to_string(),
@@ -315,15 +319,7 @@ impl GitCommands {
             // staged path from the index turns it into an untracked path; the
             // clean below then leaves both index and worktree empty.
             self.git()
-                .args(&[
-                    "rm",
-                    "--cached",
-                    "-r",
-                    "-f",
-                    "--ignore-unmatch",
-                    "--",
-                    ".",
-                ])
+                .args(&["rm", "--cached", "-r", "-f", "--ignore-unmatch", "--", "."])
                 .run_expecting_success()?;
         }
 
@@ -395,10 +391,7 @@ impl GitCommands {
                 &git_paths,
             )?;
         } else {
-            self.run_git_on_paths(
-                &["rm", "--cached", "-f", "--ignore-unmatch"],
-                &git_paths,
-            )?;
+            self.run_git_on_paths(&["rm", "--cached", "-f", "--ignore-unmatch"], &git_paths)?;
         }
 
         for path in &remove_paths {
@@ -575,7 +568,9 @@ mod tests {
             .collect()
     }
 
-    fn file_status_signature(files: &[File]) -> Vec<(String, String, FileStatus, bool, bool, bool)> {
+    fn file_status_signature(
+        files: &[File],
+    ) -> Vec<(String, String, FileStatus, bool, bool, bool)> {
         let mut signature = files
             .iter()
             .map(|file| {
@@ -610,7 +605,11 @@ mod tests {
         let completed = git_cmds.populate_file_diff_stats_if_current(&mut files, generation);
 
         assert!(completed.is_none());
-        assert!(files.iter().all(|file| file.additions == 0 && file.hunk_count == 0));
+        assert!(
+            files
+                .iter()
+                .all(|file| file.additions == 0 && file.hunk_count == 0)
+        );
     }
 
     #[test]
@@ -638,16 +637,17 @@ mod tests {
             .load_files_status_only_git_uall()
             .expect("legacy status");
 
-        assert_eq!(file_status_signature(&split), file_status_signature(&legacy));
+        assert_eq!(
+            file_status_signature(&split),
+            file_status_signature(&legacy)
+        );
         assert!(split.iter().any(|file| {
             file.name == "old name.txt -> new name.txt"
                 && file.status == FileStatus::Renamed
                 && file.tracked
         }));
         assert!(split.iter().any(|file| {
-            file.name == "line\nbreak.txt"
-                && file.status == FileStatus::Untracked
-                && !file.tracked
+            file.name == "line\nbreak.txt" && file.status == FileStatus::Untracked && !file.tracked
         }));
     }
 
@@ -931,7 +931,9 @@ mod tests {
         let files = git_cmds.load_files_status_only().expect("status");
         assert_eq!(files.len(), 2);
 
-        git_cmds.discard_files(&files).expect("discard unborn files");
+        git_cmds
+            .discard_files(&files)
+            .expect("discard unborn files");
 
         assert!(porcelain_paths(repo).is_empty());
         assert!(!repo.join("staged.txt").exists());
@@ -1074,13 +1076,7 @@ fn parse_untracked_paths_z(output: &str) -> Vec<File> {
         .split('\0')
         .filter(|path| !path.is_empty())
         .map(|path| {
-            file_from_status_parts(
-                '?',
-                '?',
-                path.to_string(),
-                false,
-                FileStatus::Untracked,
-            )
+            file_from_status_parts('?', '?', path.to_string(), false, FileStatus::Untracked)
         })
         .collect()
 }

@@ -127,7 +127,6 @@ impl GitCommands {
     pub fn stash_unstaged(&self, message: &str) -> Result<()> {
         self.stash_keep_index(message)
     }
-
 }
 
 #[cfg(test)]

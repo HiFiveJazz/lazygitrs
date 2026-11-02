@@ -679,13 +679,25 @@ impl Gui {
             CommandSection {
                 title: "Commit editor — NORMAL".into(),
                 entries: vec![
-                    CommandEntry::keybinding("h / l / backspace".into(), "Move left / right".into()),
-                    CommandEntry::keybinding("j / k".into(), "Move down / up; cross Summary/Description".into()),
+                    CommandEntry::keybinding(
+                        "h / l / backspace".into(),
+                        "Move left / right".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        "j / k".into(),
+                        "Move down / up; cross Summary/Description".into(),
+                    ),
                     CommandEntry::keybinding("2j / 2k / …".into(), "Count-prefix motions".into()),
                     CommandEntry::keybinding("w / b".into(), "Next / previous word".into()),
-                    CommandEntry::keybinding("H / L".into(), "Start / last character of line".into()),
+                    CommandEntry::keybinding(
+                        "H / L".into(),
+                        "Start / last character of line".into(),
+                    ),
                     CommandEntry::keybinding("gg / G".into(), "Top / bottom of Description".into()),
-                    CommandEntry::keybinding("f{char} / F{char}".into(), "Eyeliner find forward / backward".into()),
+                    CommandEntry::keybinding(
+                        "f{char} / F{char}".into(),
+                        "Eyeliner find forward / backward".into(),
+                    ),
                     CommandEntry::keybinding("i / a / I / A".into(), "Enter Insert mode".into()),
                     CommandEntry::keybinding("o".into(), "Open line below and insert".into()),
                     CommandEntry::keybinding("x".into(), "Delete character".into()),
@@ -693,7 +705,10 @@ impl Gui {
                     CommandEntry::keybinding("dd".into(), "Delete line".into()),
                     CommandEntry::keybinding("u".into(), "Undo editor change".into()),
                     CommandEntry::keybinding("v / V".into(), "Visual / Visual Line mode".into()),
-                    CommandEntry::keybinding("vi{delim}".into(), "Select inside quotes or brackets".into()),
+                    CommandEntry::keybinding(
+                        "vi{delim}".into(),
+                        "Select inside quotes or brackets".into(),
+                    ),
                     CommandEntry::keybinding("enter".into(), "Create commit".into()),
                     CommandEntry::keybinding("q".into(), "Save draft and close".into()),
                 ],
@@ -702,7 +717,10 @@ impl Gui {
                 title: "Commit editor — INSERT".into(),
                 entries: vec![
                     CommandEntry::keybinding("esc".into(), "Return to Normal mode".into()),
-                    CommandEntry::keybinding("enter".into(), "Description newline / move from Summary".into()),
+                    CommandEntry::keybinding(
+                        "enter".into(),
+                        "Description newline / move from Summary".into(),
+                    ),
                     CommandEntry::keybinding("tab".into(), "Switch Summary / Description".into()),
                     CommandEntry::keybinding("ctrl+enter".into(), "Create commit".into()),
                 ],
@@ -711,8 +729,14 @@ impl Gui {
                 title: "Commit editor — VISUAL".into(),
                 entries: vec![
                     CommandEntry::keybinding("h / j / k / l".into(), "Extend selection".into()),
-                    CommandEntry::keybinding("w / b / H / L".into(), "Extend by word / line bound".into()),
-                    CommandEntry::keybinding("gg / G".into(), "Extend to top / bottom of Description".into()),
+                    CommandEntry::keybinding(
+                        "w / b / H / L".into(),
+                        "Extend by word / line bound".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        "gg / G".into(),
+                        "Extend to top / bottom of Description".into(),
+                    ),
                     CommandEntry::keybinding("d / x".into(), "Delete selection".into()),
                     CommandEntry::keybinding("c".into(), "Change selection".into()),
                     CommandEntry::keybinding("y".into(), "Yank selection".into()),
@@ -722,10 +746,16 @@ impl Gui {
             CommandSection {
                 title: "Commit actions".into(),
                 entries: vec![
-                    CommandEntry::keybinding("ctrl+j / ctrl+k".into(), "Smooth scroll half-page down / up".into()),
+                    CommandEntry::keybinding(
+                        "ctrl+j / ctrl+k".into(),
+                        "Smooth scroll half-page down / up".into(),
+                    ),
                     CommandEntry::keybinding(kb.sign_off.clone(), "Toggle Signed-off-by".into()),
                     CommandEntry::keybinding(kb.commit_menu.clone(), "Open commit menu".into()),
-                    CommandEntry::keybinding(kb.ai_generate.clone(), "Generate commit message with AI".into()),
+                    CommandEntry::keybinding(
+                        kb.ai_generate.clone(),
+                        "Generate commit message with AI".into(),
+                    ),
                     CommandEntry::keybinding("tab".into(), "Switch Summary / Description".into()),
                     CommandEntry::keybinding("? / esc".into(), "Close command palette".into()),
                 ],
@@ -788,10 +818,7 @@ impl Gui {
                     // Restore the stashed editor — user can continue typing
                     // TODO: full $EDITOR integration would suspend the TUI
                     if let Some(mut stashed) = gui.pending_commit_popup.take() {
-                        popup::reset_commit_input_view(
-                            &mut stashed,
-                            gui.commit_body_wrap_width(),
-                        );
+                        popup::reset_commit_input_view(&mut stashed, gui.commit_body_wrap_width());
                         gui.popup = stashed;
                     }
                     Ok(())
@@ -1033,6 +1060,4 @@ impl Gui {
         };
         Ok(())
     }
-
-
 }

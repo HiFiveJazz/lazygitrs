@@ -3,8 +3,8 @@ use std::path::Path;
 use anyhow::{Result, bail};
 
 use super::GitCommands;
-use crate::os::cmd::CmdBuilder;
 use crate::model::Worktree;
+use crate::os::cmd::CmdBuilder;
 
 impl GitCommands {
     pub fn load_worktrees(&self) -> Result<Vec<Worktree>> {

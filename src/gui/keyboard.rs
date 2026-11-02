@@ -932,8 +932,7 @@ impl Gui {
         } else {
             popup_inner
         };
-        let commit_effective_width =
-            popup::commit_body_text_width(self.layout.width, config_width);
+        let commit_effective_width = popup::commit_body_text_width(self.layout.width, config_width);
         match &mut self.popup {
             PopupState::Input {
                 textarea,
@@ -980,7 +979,8 @@ impl Gui {
                                 if !b.is_empty() {
                                     body_state.insert_str(&b);
                                     if commit_effective_width > 0 {
-                                        body_state.render_into(body_textarea, commit_effective_width);
+                                        body_state
+                                            .render_into(body_textarea, commit_effective_width);
                                     }
                                 }
                             }
@@ -1337,6 +1337,4 @@ impl Gui {
         let idx = self.search_matches[self.search_match_idx];
         self.context_mgr.set_selection(idx);
     }
-
-
 }

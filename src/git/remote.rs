@@ -348,10 +348,7 @@ impl GitCommands {
                 }
             }
             PullStrategy::Merge => {
-                let result = self
-                    .git()
-                    .args(&["merge", "--no-stat", upstream])
-                    .run()?;
+                let result = self.git().args(&["merge", "--no-stat", upstream]).run()?;
                 let merge_in_progress = self
                     .git()
                     .args(&["rev-parse", "-q", "--verify", "MERGE_HEAD"])
@@ -389,12 +386,7 @@ impl GitCommands {
     fn current_upstream_ref(&self) -> Result<String> {
         let result = self
             .git()
-            .args(&[
-                "rev-parse",
-                "--abbrev-ref",
-                "--symbolic-full-name",
-                "@{u}",
-            ])
+            .args(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
             .run()?;
         let upstream = result.stdout.trim();
         if result.success && !upstream.is_empty() {
@@ -429,7 +421,8 @@ impl GitCommands {
     fn configured_pull_strategy(&self) -> Result<Option<PullStrategy>> {
         let branch = self.current_branch_name().unwrap_or_default();
         if !branch.is_empty()
-            && let Some(strategy) = self.configured_rebase_value(&format!("branch.{branch}.rebase"))?
+            && let Some(strategy) =
+                self.configured_rebase_value(&format!("branch.{branch}.rebase"))?
         {
             return Ok(Some(strategy));
         }

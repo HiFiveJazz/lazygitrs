@@ -92,11 +92,7 @@ impl GitCommands {
         let branch_ref = format!("refs/heads/{name}");
         let upstream = self
             .git()
-            .args(&[
-                "for-each-ref",
-                "--format=%(upstream)",
-                branch_ref.as_str(),
-            ])
+            .args(&["for-each-ref", "--format=%(upstream)", branch_ref.as_str()])
             .run_expecting_success()?
             .stdout_trimmed()
             .to_string();

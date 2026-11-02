@@ -138,10 +138,7 @@ fn looks_like_commit_trailer(line: &str) -> bool {
     let Some((token, _)) = line.split_once(':') else {
         return false;
     };
-    !token.is_empty()
-        && token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    !token.is_empty() && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 fn wrap_commit_line(line: &str, width: usize) -> Vec<String> {
@@ -172,7 +169,12 @@ fn wrap_commit_line(line: &str, width: usize) -> Vec<String> {
             let rest = &line[dot + 2..];
             // The continuation indent only has to line up with the prose, so
             // leaking this tiny string is unnecessary; build it below.
-            return wrap_commit_words(prefix, &" ".repeat(UnicodeWidthStr::width(prefix)), rest, width);
+            return wrap_commit_words(
+                prefix,
+                &" ".repeat(UnicodeWidthStr::width(prefix)),
+                rest,
+                width,
+            );
         }
         ("", "", line)
     };
@@ -180,7 +182,12 @@ fn wrap_commit_line(line: &str, width: usize) -> Vec<String> {
     wrap_commit_words(first_prefix, continuation_prefix, content, width)
 }
 
-fn wrap_commit_words(prefix: &str, continuation_prefix: &str, content: &str, width: usize) -> Vec<String> {
+fn wrap_commit_words(
+    prefix: &str,
+    continuation_prefix: &str,
+    content: &str,
+    width: usize,
+) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = prefix.to_string();
     let mut has_word = false;
@@ -1075,8 +1082,16 @@ impl BodySoftWrap {
         let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
         let start = layout.visual_to_cursor(start.0, start.1);
         let end = layout.visual_to_cursor(end.0, end.1);
-        let (start, end) = if start <= end { (start, end) } else { (end, start) };
-        self.raw.chars().skip(start).take(end.saturating_sub(start)).collect()
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        self.raw
+            .chars()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .collect()
     }
 
     /// Delete a selection expressed in visual soft-wrap coordinates.
@@ -1090,7 +1105,11 @@ impl BodySoftWrap {
         let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
         let start = layout.visual_to_cursor(start.0, start.1);
         let end = layout.visual_to_cursor(end.0, end.1);
-        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         if start == end {
             return false;
         }
@@ -1265,12 +1284,7 @@ impl CommitEditSnapshot {
         body_state.set_text(self.body);
         body_state.set_cursor_index(self.body_cursor);
         body_state.render_into(body_textarea, wrap_width.max(1));
-        set_commit_input_focus(
-            focus,
-            summary_textarea,
-            body_textarea,
-            self.focus,
-        );
+        set_commit_input_focus(focus, summary_textarea, body_textarea, self.focus);
     }
 }
 
@@ -1303,10 +1317,7 @@ pub fn delete_summary_word_forward(textarea: &mut TextArea<'static>) -> bool {
             end += 1;
         }
     } else {
-        while end < chars.len()
-            && !is_word_char(chars[end])
-            && !chars[end].is_whitespace()
-        {
+        while end < chars.len() && !is_word_char(chars[end]) && !chars[end].is_whitespace() {
             end += 1;
         }
     }
@@ -1382,11 +1393,7 @@ fn eyeliner_targets(line: &str, cursor: usize, forward: bool) -> Vec<(usize, boo
     }
     let cursor = cursor.min(chars.len().saturating_sub(1));
     let in_direction = |idx: usize| {
-        if forward {
-            idx > cursor
-        } else {
-            idx < cursor
-        }
+        if forward { idx > cursor } else { idx < cursor }
     };
 
     let mut frequency = HashMap::<char, usize>::new();
@@ -1422,7 +1429,10 @@ fn eyeliner_targets(line: &str, cursor: usize, forward: bool) -> Vec<(usize, boo
             let directional: Vec<usize> = if forward {
                 (start..end).filter(|idx| in_direction(*idx)).collect()
             } else {
-                (start..end).rev().filter(|idx| in_direction(*idx)).collect()
+                (start..end)
+                    .rev()
+                    .filter(|idx| in_direction(*idx))
+                    .collect()
             };
             if directional.is_empty() {
                 return None;
@@ -1461,11 +1471,7 @@ pub fn apply_eyeliner_highlights(
         textarea.custom_highlight(((row, 0), (row, line_len)), dim_style, 10);
     }
     for (target_col, _) in eyeliner_targets(&line, col, forward) {
-        textarea.custom_highlight(
-            ((row, target_col), (row, target_col + 1)),
-            target_style,
-            20,
-        );
+        textarea.custom_highlight(((row, target_col), (row, target_col + 1)), target_style, 20);
     }
 }
 
@@ -1531,10 +1537,7 @@ pub fn select_summary_line(textarea: &mut TextArea<'static>) {
     textarea.move_cursor(CursorMove::Jump(0, end as u16));
 }
 
-pub fn select_summary_inside_delimiter(
-    textarea: &mut TextArea<'static>,
-    delimiter: char,
-) -> bool {
+pub fn select_summary_inside_delimiter(textarea: &mut TextArea<'static>, delimiter: char) -> bool {
     let text = textarea.lines().join("");
     let cursor = textarea.cursor().1;
     let Some((start, end)) = inside_delimiter_range(&text, cursor, delimiter) else {
@@ -1635,7 +1638,10 @@ pub fn email_address_key(recipient: &str) -> Option<String> {
         value
     };
 
-    if address.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+    if address
+        .chars()
+        .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
         return None;
     }
 
@@ -1648,9 +1654,12 @@ pub fn email_address_key(recipient: &str) -> Option<String> {
     if local.starts_with('.')
         || local.ends_with('.')
         || local.contains("..")
-        || local
-            .chars()
-            .any(|ch| matches!(ch, '<' | '>' | '(' | ')' | '[' | ']' | ',' | ';' | ':' | '\\' | '"'))
+        || local.chars().any(|ch| {
+            matches!(
+                ch,
+                '<' | '>' | '(' | ')' | '[' | ']' | ',' | ';' | ':' | '\\' | '"'
+            )
+        })
     {
         return None;
     }
@@ -1663,7 +1672,9 @@ pub fn email_address_key(recipient: &str) -> Option<String> {
             label.is_empty()
                 || label.starts_with('-')
                 || label.ends_with('-')
-                || !label.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+                || !label
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
         })
     {
         return None;
@@ -1677,13 +1688,13 @@ pub fn email_address_key(recipient: &str) -> Option<String> {
 pub fn dedupe_email_recipients(to: &mut Vec<String>, cc: &mut Vec<String>) {
     let mut seen = HashSet::new();
     to.retain(|recipient| {
-        let key = email_address_key(recipient)
-            .unwrap_or_else(|| recipient.trim().to_ascii_lowercase());
+        let key =
+            email_address_key(recipient).unwrap_or_else(|| recipient.trim().to_ascii_lowercase());
         seen.insert(key)
     });
     cc.retain(|recipient| {
-        let key = email_address_key(recipient)
-            .unwrap_or_else(|| recipient.trim().to_ascii_lowercase());
+        let key =
+            email_address_key(recipient).unwrap_or_else(|| recipient.trim().to_ascii_lowercase());
         seen.insert(key)
     });
 }
@@ -2400,7 +2411,10 @@ mod commit_body_wrap_tests {
 
         let anchor = state.select_current_visual_line(&mut ta, 6);
         let selection = ta.selection_range().expect("V should select one row");
-        assert_eq!(state.selected_visual_text(selection.0, selection.1, 6), "beta");
+        assert_eq!(
+            state.selected_visual_text(selection.0, selection.1, 6),
+            "beta"
+        );
 
         assert!(state.move_visual_linewise(1, 6));
         state.select_visual_line_range(&mut ta, 6, anchor);
@@ -2414,10 +2428,7 @@ mod commit_body_wrap_tests {
     #[test]
     fn visual_selection_maps_soft_wrap_back_to_raw_text() {
         let mut state = BodySoftWrap::from_text("alpha beta gamma");
-        assert_eq!(
-            state.selected_visual_text((0, 0), (1, 4), 6),
-            "alpha beta"
-        );
+        assert_eq!(state.selected_visual_text((0, 0), (1, 4), 6), "alpha beta");
         assert!(state.delete_visual_selection((0, 0), (1, 4), 6));
         assert_eq!(state.raw(), " gamma");
         assert_eq!(state.cursor, 0);
@@ -2486,7 +2497,8 @@ mod commit_body_wrap_tests {
 
     #[test]
     fn hard_wrap_preserves_trailers_and_preformatted_lines() {
-        let trailer = "Signed-off-by: Example Person With A Very Long Name <example.person@example.com>";
+        let trailer =
+            "Signed-off-by: Example Person With A Very Long Name <example.person@example.com>";
         let code = "    this intentionally remains a long preformatted line even when the configured width is narrow";
         let wrapped = hard_wrap_commit_body(&format!("Short prose\n\n{trailer}\n{code}"), 32);
         assert!(wrapped.contains(trailer));
@@ -2595,7 +2607,6 @@ pub struct ListPickerCore {
     pub search_textarea: TextArea<'static>,
     pub scroll_offset: usize,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct PatchPickerEntry {
@@ -2788,7 +2799,11 @@ impl PatchFilePickerState {
         let previous = self.current_dir.clone();
         self.current_dir = parent;
         self.refresh()?;
-        if let Some(index) = self.entries.iter().position(|entry| entry.path.as_path() == previous.as_path()) {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.path.as_path() == previous.as_path())
+        {
             self.selected = index;
             self.refresh_preview();
         }
@@ -2848,7 +2863,9 @@ fn patch_picker_read_dir(directory: &std::path::Path) -> Result<Vec<PatchPickerE
         if name == ".git" {
             continue;
         }
-        let Ok(metadata) = item.metadata() else { continue };
+        let Ok(metadata) = item.metadata() else {
+            continue;
+        };
         let is_dir = metadata.is_dir();
         if !is_dir && !metadata.is_file() {
             continue;
@@ -2863,11 +2880,25 @@ fn patch_picker_read_dir(directory: &std::path::Path) -> Result<Vec<PatchPickerE
         });
     }
     entries.sort_by(|left, right| {
-        let left_rank = if left.is_dir { 0 } else if left.likely_patch { 1 } else { 2 };
-        let right_rank = if right.is_dir { 0 } else if right.likely_patch { 1 } else { 2 };
-        left_rank
-            .cmp(&right_rank)
-            .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+        let left_rank = if left.is_dir {
+            0
+        } else if left.likely_patch {
+            1
+        } else {
+            2
+        };
+        let right_rank = if right.is_dir {
+            0
+        } else if right.likely_patch {
+            1
+        } else {
+            2
+        };
+        left_rank.cmp(&right_rank).then_with(|| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+        })
     });
     Ok(entries)
 }
@@ -2883,9 +2914,13 @@ fn patch_picker_is_probably_patch(path: &std::path::Path, name: &str) -> bool {
         return true;
     }
 
-    let Ok(mut file) = std::fs::File::open(path) else { return false };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
     let mut buffer = [0u8; 8192];
-    let Ok(read) = std::io::Read::read(&mut file, &mut buffer) else { return false };
+    let Ok(read) = std::io::Read::read(&mut file, &mut buffer) else {
+        return false;
+    };
     if read == 0 || buffer[..read].contains(&0) {
         return false;
     }
@@ -3537,7 +3572,6 @@ mod email_recipient_tests {
         );
     }
 
-
     #[test]
     fn validates_and_normalizes_visible_email_addresses() {
         assert_eq!(
@@ -3559,13 +3593,8 @@ mod email_recipient_tests {
         let to = vec!["Jens Axboe <axboe@kernel.dk>".to_string()];
         let cc = vec!["list@example.org".to_string()];
         assert!(
-            validate_email_recipient_candidates(
-                &["AXBOE@kernel.dk".to_string()],
-                &to,
-                &cc,
-                None,
-            )
-            .is_err()
+            validate_email_recipient_candidates(&["AXBOE@kernel.dk".to_string()], &to, &cc, None,)
+                .is_err()
         );
         assert!(
             validate_email_recipient_candidates(
@@ -3603,7 +3632,6 @@ mod email_recipient_tests {
         assert_eq!(cc, vec!["list@example.org"]);
     }
 
-
     #[test]
     fn builds_outgoing_email_preview_from_current_recipients() {
         let preview = build_email_patch_preview(
@@ -3617,7 +3645,9 @@ mod email_recipient_tests {
             "Thu, 30 Oct 2026 10:00:00 -0700",
             "Commit message\n\n---\n diff --git a/a b/a",
         );
-        assert!(preview.starts_with("From: Jazz <jazz@example.com>\nTo: linux-kernel@example.org\n"));
+        assert!(
+            preview.starts_with("From: Jazz <jazz@example.com>\nTo: linux-kernel@example.org\n")
+        );
         assert!(preview.contains("Cc: Jens Axboe <axboe@kernel.dk>,\n    reviewer@example.org\n"));
         assert!(preview.contains("Subject: [PATCH] io_uring: test\n"));
         assert!(preview.ends_with("Commit message\n\n---\n diff --git a/a b/a"));
@@ -3646,10 +3676,8 @@ mod patch_file_picker_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "lazygitrs-{label}-{}-{stamp}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("lazygitrs-{label}-{}-{stamp}", std::process::id()));
         std::fs::create_dir_all(&path).unwrap();
         path
     }
@@ -3667,7 +3695,11 @@ mod patch_file_picker_tests {
         .unwrap();
 
         let state = PatchFilePickerState::new(root.clone(), root.clone()).unwrap();
-        let names: Vec<_> = state.entries.iter().map(|entry| entry.name.as_str()).collect();
+        let names: Vec<_> = state
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
         assert_eq!(names, vec!["folder", "fix.patch", "mailbox", "notes.txt"]);
         assert!(state.entries[1].likely_patch);
         assert!(state.entries[2].likely_patch);
@@ -3679,7 +3711,11 @@ mod patch_file_picker_tests {
     fn patch_browser_half_page_scroll_animates_active_file_selection() {
         let root = temp_dir("patch-browser-picker-scroll");
         for index in 0..30 {
-            std::fs::write(root.join(format!("{index:02}.patch")), format!("line {index}\n")).unwrap();
+            std::fs::write(
+                root.join(format!("{index:02}.patch")),
+                format!("line {index}\n"),
+            )
+            .unwrap();
         }
 
         let mut state = PatchFilePickerState::new(root.clone(), root.clone()).unwrap();
@@ -3735,7 +3771,13 @@ mod patch_file_picker_tests {
         assert!(state.enter_selected().unwrap().is_none());
         assert_eq!(state.current_dir, child.canonicalize().unwrap());
         assert_eq!(state.entries.len(), 1);
-        assert!(matches!(state.preview, PatchPickerPreview::Text { likely_patch: true, .. }));
+        assert!(matches!(
+            state.preview,
+            PatchPickerPreview::Text {
+                likely_patch: true,
+                ..
+            }
+        ));
 
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -2,7 +2,8 @@ use super::matches_key;
 use crate::config::KeybindingConfig;
 use crate::gui::popup::{
     CommitInputFocus, CommitInputKind, CommitInputMode, MenuItem, PopupState,
-    make_commit_body_textarea, make_commit_summary_textarea, make_textarea, reset_commit_input_view,
+    make_commit_body_textarea, make_commit_summary_textarea, make_textarea,
+    reset_commit_input_view,
 };
 use crate::gui::{Gui, RemoteOpKind};
 use crate::os::platform::Platform;
@@ -425,7 +426,7 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
         focus: CommitInputFocus::Summary,
         mode: CommitInputMode::Insert,
         pending_command: Default::default(),
-                        visual_line_anchor: None,
+        visual_line_anchor: None,
         undo_stack: Vec::new(),
         show_help: false,
         body_scroll_remaining: 0,
@@ -483,7 +484,7 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
                     focus: CommitInputFocus::Summary,
                     mode: CommitInputMode::Insert,
                     pending_command: Default::default(),
-                        visual_line_anchor: None,
+                    visual_line_anchor: None,
                     undo_stack: Vec::new(),
                     show_help: false,
                     body_scroll_remaining: 0,
@@ -519,7 +520,7 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
         focus: CommitInputFocus::Summary,
         mode: CommitInputMode::Insert,
         pending_command: Default::default(),
-                        visual_line_anchor: None,
+        visual_line_anchor: None,
         undo_stack: Vec::new(),
         show_help: false,
         body_scroll_remaining: 0,
@@ -1110,7 +1111,6 @@ fn commit_with_editor(gui: &mut Gui) -> Result<()> {
     };
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {

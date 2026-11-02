@@ -266,11 +266,7 @@ fn delete_branch(gui: &mut Gui) -> Result<()> {
                         .and_then(|u| u.split('/').next())
                         .unwrap_or("origin")
                         .to_string();
-                    delete_local_and_remote_branch_worktree_aware(
-                        gui,
-                        name_both.clone(),
-                        remote,
-                    )
+                    delete_local_and_remote_branch_worktree_aware(gui, name_both.clone(), remote)
                 })),
             });
         } else {
@@ -293,7 +289,6 @@ fn delete_branch(gui: &mut Gui) -> Result<()> {
     }
     Ok(())
 }
-
 
 fn maybe_prompt_worktree_branch_delete(
     gui: &mut Gui,
@@ -371,16 +366,11 @@ fn maybe_prompt_worktree_branch_delete(
                 // Keep remote deletion on the serialized network lane. `Other`
                 // intentionally requests a full refresh afterward because this
                 // operation also removes a worktree.
-                gui.start_remote_op(
-                    RemoteOpKind::Other,
-                    "Deleting branch",
-                    "",
-                    move |git| {
-                        git.remove_worktree_for_branch_deletion(&path)?;
-                        git.delete_branch(&branch, delete_force)?;
-                        git.delete_remote_branch(&remote, &branch)
-                    },
-                );
+                gui.start_remote_op(RemoteOpKind::Other, "Deleting branch", "", move |git| {
+                    git.remove_worktree_for_branch_deletion(&path)?;
+                    git.delete_branch(&branch, delete_force)?;
+                    git.delete_remote_branch(&remote, &branch)
+                });
             } else {
                 gui.start_background_mutation(
                     "Removing worktree and deleting branch",
@@ -396,11 +386,7 @@ fn maybe_prompt_worktree_branch_delete(
     Ok(true)
 }
 
-fn delete_local_branch_worktree_aware(
-    gui: &mut Gui,
-    name: String,
-    force: bool,
-) -> Result<()> {
+fn delete_local_branch_worktree_aware(gui: &mut Gui, name: String, force: bool) -> Result<()> {
     if maybe_prompt_worktree_branch_delete(gui, &name, force, None)? {
         return Ok(());
     }

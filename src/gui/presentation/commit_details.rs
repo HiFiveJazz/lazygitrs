@@ -349,10 +349,11 @@ fn format_date(unix_ts: i64) -> String {
     // Local time like lazygit (`time.Unix().In(now.Location())`), not UTC.
     let (year, month, day, hour, minute) = local_from_unix(unix_ts);
     let month_label = month_name(month);
-    format!("{} {}, {} {:02}:{:02}", month_label, day, year, hour, minute)
+    format!(
+        "{} {}, {} {:02}:{:02}",
+        month_label, day, year, hour, minute
+    )
 }
-
-
 
 pub(super) fn avatar_color_for(email: &str, theme: &Theme) -> ratatui::style::Color {
     // Pick a stable color from the graph palette based on a cheap hash of the

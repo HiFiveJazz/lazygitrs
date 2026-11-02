@@ -586,7 +586,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-
     #[test]
     fn builds_preview_with_sender_and_original_author() {
         let output = r#"Dry-OK. Log says:
@@ -612,7 +611,11 @@ Patch body
         populate_send_email_preview(&mut resolved, output, patch);
         assert_eq!(resolved.preview_from, "Jazz <jazz@example.com>");
         assert_eq!(resolved.preview_subject, "[PATCH] io_uring: test");
-        assert!(resolved.preview_body.starts_with("From: Jens Axboe <axboe@kernel.dk>\n\nPatch body"));
+        assert!(
+            resolved
+                .preview_body
+                .starts_with("From: Jens Axboe <axboe@kernel.dk>\n\nPatch body")
+        );
     }
     #[test]
     fn parses_resolved_send_email_recipients() {

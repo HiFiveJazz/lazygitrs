@@ -4,6 +4,7 @@
 //! only and does not change the public rendering path.
 
 use super::*;
+use crate::gui::popup;
 
 pub(crate) fn render_popup(
     frame: &mut Frame,
@@ -564,13 +565,9 @@ pub(crate) fn render_popup(
                     let label = format!(" Patch [{first}-{last}/{}] ", wrapped.len().max(1));
                     let divider_width = usize::from(preview_inner.width);
                     let left = 2usize.min(divider_width);
-                    let right = divider_width.saturating_sub(left + UnicodeWidthStr::width(label.as_str()));
-                    let divider = format!(
-                        "{}{}{}",
-                        "─".repeat(left),
-                        label,
-                        "─".repeat(right),
-                    );
+                    let right =
+                        divider_width.saturating_sub(left + UnicodeWidthStr::width(label.as_str()));
+                    let divider = format!("{}{}{}", "─".repeat(left), label, "─".repeat(right),);
                     frame.render_widget(
                         Paragraph::new(Line::from(Span::styled(
                             divider,
@@ -581,8 +578,7 @@ pub(crate) fn render_popup(
 
                     let body_y = divider_y.saturating_add(1);
                     frame.render_widget(
-                        Paragraph::new(wrapped)
-                            .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+                        Paragraph::new(wrapped).scroll((scroll.min(u16::MAX as usize) as u16, 0)),
                         Rect::new(
                             preview_inner.x,
                             body_y,
@@ -593,7 +589,13 @@ pub(crate) fn render_popup(
                 }
 
                 if *confirming_send {
-                    render_email_send_confirmation(frame, rect, to_recipients, cc_recipients, theme);
+                    render_email_send_confirmation(
+                        frame,
+                        rect,
+                        to_recipients,
+                        cc_recipients,
+                        theme,
+                    );
                 }
                 return;
             }
@@ -792,10 +794,9 @@ pub(crate) fn render_popup(
                 let summary_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
                 frame.render_widget(summary_textarea, summary_area);
                 if *focus == CommitInputFocus::Summary && !mode.is_visual() {
-                    frame.buffer_mut().set_style(
-                        summary_area,
-                        Style::default().bg(theme.selected_bg),
-                    );
+                    frame
+                        .buffer_mut()
+                        .set_style(summary_area, Style::default().bg(theme.selected_bg));
                 }
 
                 // Body label
@@ -827,21 +828,18 @@ pub(crate) fn render_popup(
                 // fresh display-only clone from `body_scroll_top` avoids fighting
                 // tui-textarea's private cursor-following scroll state and makes
                 // Ctrl-J/K neoscroll deterministic in both directions.
-                let viewport_top = commit_body_viewport_top(
-                    body_textarea,
-                    *body_scroll_top,
-                    body_height as usize,
-                );
+                let viewport_top =
+                    commit_body_viewport_top(body_textarea, *body_scroll_top, body_height as usize);
                 let mut body_view = commit_body_viewport(body_textarea, viewport_top);
-                if let super::popup::CommitPendingCommand::FindForward(_) = pending_command {
-                    super::popup::apply_eyeliner_highlights(
+                if let popup::CommitPendingCommand::FindForward(_) = pending_command {
+                    popup::apply_eyeliner_highlights(
                         &mut body_view,
                         true,
                         Style::default().fg(Color::DarkGray),
                         Style::default().fg(Color::Rgb(255, 165, 0)),
                     );
-                } else if let super::popup::CommitPendingCommand::FindBackward(_) = pending_command {
-                    super::popup::apply_eyeliner_highlights(
+                } else if let popup::CommitPendingCommand::FindBackward(_) = pending_command {
+                    popup::apply_eyeliner_highlights(
                         &mut body_view,
                         false,
                         Style::default().fg(Color::DarkGray),
@@ -900,8 +898,8 @@ pub(crate) fn render_popup(
                 // on the selected line as well as elsewhere in the visible field.
                 let eyeliner_pending = matches!(
                     pending_command,
-                    super::popup::CommitPendingCommand::FindForward(_)
-                        | super::popup::CommitPendingCommand::FindBackward(_)
+                    popup::CommitPendingCommand::FindForward(_)
+                        | popup::CommitPendingCommand::FindBackward(_)
                 );
                 if *mode == CommitInputMode::Normal && !eyeliner_pending {
                     // vim-illuminate is commonly themed as a subdued grey
@@ -960,7 +958,6 @@ pub(crate) fn render_popup(
                 if let Some(position) = cursor_position {
                     frame.set_cursor_position((position.x, position.y));
                 }
-
             } else {
                 // Fallback: just render summary
                 frame.render_widget(summary_textarea, inner);
@@ -995,7 +992,11 @@ pub(crate) fn render_popup(
             let selected_style = Style::default()
                 .bg(theme.selected_bg)
                 .add_modifier(Modifier::BOLD);
-            let branch_name = if branch.is_empty() { "HEAD" } else { branch.as_str() };
+            let branch_name = if branch.is_empty() {
+                "HEAD"
+            } else {
+                branch.as_str()
+            };
 
             let option = |index: usize, shortcut: &str, label: String| {
                 let line = Line::from(vec![
@@ -1025,7 +1026,10 @@ pub(crate) fn render_popup(
                 Line::from(vec![
                     Span::styled("  Remote:  ", dim),
                     Span::styled(
-                        format!("{behind} commit{} ahead", if *behind == 1 { "" } else { "s" }),
+                        format!(
+                            "{behind} commit{} ahead",
+                            if *behind == 1 { "" } else { "s" }
+                        ),
                         normal,
                     ),
                 ]),
@@ -1059,7 +1063,10 @@ pub(crate) fn render_popup(
                 Line::from(""),
                 Line::from(vec![
                     Span::styled(" R/M ", key),
-                    Span::styled("choose rebase/merge and remember it for this repository", dim),
+                    Span::styled(
+                        "choose rebase/merge and remember it for this repository",
+                        dim,
+                    ),
                 ]),
                 Line::from(vec![
                     Span::styled(" Esc ", key),
@@ -1173,7 +1180,7 @@ pub(crate) fn render_popup(
             let search = search_textarea.lines().join("");
             // Filter items by search query. Free-entry rows always remain
             // visible because they represent the current typed value.
-            let visible: Vec<(usize, &super::popup::ChecklistItem)> = items
+            let visible: Vec<(usize, &popup::ChecklistItem)> = items
                 .iter()
                 .enumerate()
                 .filter(|(_, it)| {
@@ -1312,22 +1319,18 @@ pub(crate) fn render_popup(
         } => {
             // Collect all visible entries (filtered by search) as flat list with section headers
             let search = search_textarea.lines().join("");
-            let tokens = super::popup::list_picker_search_tokens(&search);
+            let tokens = popup::list_picker_search_tokens(&search);
             let has_search = !tokens.is_empty();
 
             // Build flat display list: (is_header, key, description, executable)
             let mut display: Vec<(bool, String, String, bool)> = Vec::new();
             for section in sections {
-                let visible_entries: Vec<&super::popup::CommandEntry> = if has_search {
+                let visible_entries: Vec<&popup::CommandEntry> = if has_search {
                     section
                         .entries
                         .iter()
                         .filter(|e| {
-                            super::popup::command_palette_entry_matches(
-                                &e.key,
-                                &e.description,
-                                &tokens,
-                            )
+                            popup::command_palette_entry_matches(&e.key, &e.description, &tokens)
                         })
                         .collect()
                 } else {
@@ -1488,7 +1491,7 @@ pub(crate) fn render_popup(
                         }
                         // Highlight every query token (order-free), mirroring
                         // the list-picker highlight.
-                        let ranges = super::popup::list_picker_highlight_ranges(text, &tokens);
+                        let ranges = popup::list_picker_highlight_ranges(text, &tokens);
                         if ranges.is_empty() {
                             return vec![Span::styled(text.to_string(), base)];
                         }

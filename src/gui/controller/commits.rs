@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::KeybindingConfig;
 use crate::git::rebase::RebaseAction;
 use crate::gui::popup::{
-    BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, CommitInputMode, EmailPatchFocus,
-    MenuItem, MessageKind, PopupState, dedupe_email_recipients, make_textarea,
+    BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, CommitInputMode,
+    EmailPatchFocus, MenuItem, MessageKind, PopupState, dedupe_email_recipients, make_textarea,
     split_email_recipients,
 };
 use crate::gui::{Gui, RemoteOpKind};
@@ -213,7 +213,7 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
             focus: CommitInputFocus::Summary,
             mode: CommitInputMode::Normal,
             pending_command: Default::default(),
-                        visual_line_anchor: None,
+            visual_line_anchor: None,
             undo_stack: Vec::new(),
             show_help: false,
             body_scroll_remaining: 0,
@@ -1166,9 +1166,7 @@ fn show_apply_patch_picker(gui: &mut Gui) -> Result<()> {
     let state = crate::gui::popup::PatchFilePickerState::new(repo_root.clone(), repo_root)?;
     gui.popup = PopupState::PatchFilePicker {
         state,
-        on_confirm: Box::new(|gui, value| {
-            show_apply_patch_file_menu(gui, PathBuf::from(value))
-        }),
+        on_confirm: Box::new(|gui, value| show_apply_patch_file_menu(gui, PathBuf::from(value))),
     };
     Ok(())
 }
@@ -1269,10 +1267,7 @@ enum PatchApplyMode {
     Reverse,
 }
 
-fn patch_apply_command(
-    gui: &Gui,
-    mode: PatchApplyMode,
-) -> crate::os::cmd::CmdBuilder {
+fn patch_apply_command(gui: &Gui, mode: PatchApplyMode) -> crate::os::cmd::CmdBuilder {
     let mut command = gui.git.git_cmd().arg("apply");
     if matches!(mode, PatchApplyMode::Index) {
         command = command.arg("--index");
@@ -2047,7 +2042,6 @@ fn enter_interactive_rebase(gui: &mut Gui) -> Result<()> {
 
     enter_interactive_rebase_for_base(gui, base_hash, branch_name)
 }
-
 
 #[cfg(test)]
 mod tests {

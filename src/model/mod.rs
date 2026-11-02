@@ -235,8 +235,10 @@ impl Model {
     /// rebuilt. Appending rather than re-sorting keeps an already-visible tracked
     /// selection stable while untracked discovery catches up.
     pub fn apply_file_stats(&mut self, stats: Vec<File>) -> bool {
-        let mut by_name: HashMap<String, File> =
-            stats.into_iter().map(|file| (file.name.clone(), file)).collect();
+        let mut by_name: HashMap<String, File> = stats
+            .into_iter()
+            .map(|file| (file.name.clone(), file))
+            .collect();
         for file in &mut self.files {
             let Some(stat) = by_name.remove(&file.name) else {
                 continue;

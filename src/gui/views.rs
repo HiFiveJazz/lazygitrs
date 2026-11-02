@@ -1392,9 +1392,8 @@ mod tests {
     fn commit_body_viewport_slices_from_explicit_top_row() {
         use tui_textarea::CursorMove;
 
-        let mut textarea = tui_textarea::TextArea::new(
-            (0..8).map(|i| format!("line {i}")).collect::<Vec<_>>(),
-        );
+        let mut textarea =
+            tui_textarea::TextArea::new((0..8).map(|i| format!("line {i}")).collect::<Vec<_>>());
         textarea.move_cursor(CursorMove::Jump(5, 0));
 
         let viewport = commit_body_viewport(&textarea, 3);
@@ -2684,8 +2683,7 @@ fn render_commit_list_ctx(
         .enumerate()
         .map(|(i, item)| {
             let idx = offset + i;
-            let in_visual_range =
-                is_active && range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi);
+            let in_visual_range = is_active && range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi);
             if in_visual_range {
                 item.style(visual_range_style(theme, idx == selected))
             } else if is_active && idx == selected {
@@ -2809,8 +2807,7 @@ fn render_list_with_range_raw(
         .enumerate()
         .map(|(i, item)| {
             let idx = i + offset;
-            let in_visual_range =
-                is_active && range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi);
+            let in_visual_range = is_active && range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi);
             if in_visual_range {
                 item.style(visual_range_style(theme, idx == selected))
             } else if is_active && idx == selected {
@@ -3892,12 +3889,18 @@ fn email_preview_header_lines(
     let to_value = if to.is_empty() {
         "(none)".to_string()
     } else {
-        to.iter().map(|value| value.trim()).collect::<Vec<_>>().join(", ")
+        to.iter()
+            .map(|value| value.trim())
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let cc_value = if cc.is_empty() {
         "(none)".to_string()
     } else {
-        cc.iter().map(|value| value.trim()).collect::<Vec<_>>().join(", ")
+        cc.iter()
+            .map(|value| value.trim())
+            .collect::<Vec<_>>()
+            .join(", ")
     };
 
     let values = [
@@ -4147,12 +4150,18 @@ fn render_email_send_confirmation(
     let to_value = if to.is_empty() {
         "(none)".to_string()
     } else {
-        to.iter().map(|value| value.trim()).collect::<Vec<_>>().join(", ")
+        to.iter()
+            .map(|value| value.trim())
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let cc_value = if cc.is_empty() {
         "(none)".to_string()
     } else {
-        cc.iter().map(|value| value.trim()).collect::<Vec<_>>().join(", ")
+        cc.iter()
+            .map(|value| value.trim())
+            .collect::<Vec<_>>()
+            .join(", ")
     };
 
     let mut recipient_lines = Vec::new();
@@ -4247,9 +4256,7 @@ fn render_email_send_confirmation(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             cancel_label,
-            Style::default()
-                .fg(theme.text)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ))),
         Rect::new(
             start_x.saturating_add(send_width).saturating_add(gap),
@@ -4324,9 +4331,15 @@ fn commit_body_viewport(
         if cursor_is_start {
             view.move_cursor(tui_textarea::CursorMove::Jump(end.0 as u16, end.1 as u16));
             view.start_selection();
-            view.move_cursor(tui_textarea::CursorMove::Jump(start.0 as u16, start.1 as u16));
+            view.move_cursor(tui_textarea::CursorMove::Jump(
+                start.0 as u16,
+                start.1 as u16,
+            ));
         } else {
-            view.move_cursor(tui_textarea::CursorMove::Jump(start.0 as u16, start.1 as u16));
+            view.move_cursor(tui_textarea::CursorMove::Jump(
+                start.0 as u16,
+                start.1 as u16,
+            ));
             view.start_selection();
             view.move_cursor(tui_textarea::CursorMove::Jump(end.0 as u16, end.1 as u16));
         }
@@ -4372,11 +4385,7 @@ fn highlight_commit_word_occurrences(
     let Some(rendered_cursor) = textarea.rendered_cursor_position() else {
         return;
     };
-    let viewport_top = cursor_row.saturating_sub(
-        rendered_cursor
-            .y
-            .saturating_sub(area.y) as usize,
-    );
+    let viewport_top = cursor_row.saturating_sub(rendered_cursor.y.saturating_sub(area.y) as usize);
 
     for visible_row in 0..area.height as usize {
         let row = viewport_top + visible_row;
@@ -4408,20 +4417,12 @@ fn highlight_commit_word_occurrences(
             }
             let width = match_width.min(area.width.saturating_sub(x_offset));
             frame.buffer_mut().set_style(
-                Rect::new(
-                    area.x + x_offset,
-                    area.y + visible_row as u16,
-                    width,
-                    1,
-                ),
+                Rect::new(area.x + x_offset, area.y + visible_row as u16, width, 1),
                 Style::default().bg(background),
             );
         }
     }
 }
-
-
-
 
 fn compact_picker_path(path: &std::path::Path) -> String {
     if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from)
@@ -4497,7 +4498,9 @@ fn patch_picker_entry_line(
     let available = usize::from(width).saturating_sub(fixed);
     let mut name = entry.name.clone();
     if UnicodeWidthStr::width(name.as_str()) > available {
-        while UnicodeWidthStr::width(name.as_str()) > available.saturating_sub(1) && !name.is_empty() {
+        while UnicodeWidthStr::width(name.as_str()) > available.saturating_sub(1)
+            && !name.is_empty()
+        {
             name.pop();
         }
         if available > 0 {
@@ -4527,13 +4530,18 @@ fn render_patch_picker_entries(
         return;
     }
     let selected_idx = selected.unwrap_or(0).min(entries.len().saturating_sub(1));
-    let (start, end) = patch_picker_visible_slice(entries.len(), selected_idx, usize::from(rect.height));
+    let (start, end) =
+        patch_picker_visible_slice(entries.len(), selected_idx, usize::from(rect.height));
     let number_width = entries.len().max(1).to_string().len();
     let mut items = Vec::new();
     for (index, entry) in entries.iter().enumerate().take(end).skip(start) {
         let is_selected = selected == Some(index);
         let display_number = if show_relative_numbers {
-            Some(if is_selected { index + 1 } else { index.abs_diff(selected_idx) })
+            Some(if is_selected {
+                index + 1
+            } else {
+                index.abs_diff(selected_idx)
+            })
         } else {
             None
         };
@@ -4567,7 +4575,10 @@ fn render_patch_picker_preview(
     match &state.preview {
         super::popup::PatchPickerPreview::Empty => {
             frame.render_widget(
-                Paragraph::new(Span::styled("Empty directory", Style::default().fg(theme.text_dimmed))),
+                Paragraph::new(Span::styled(
+                    "Empty directory",
+                    Style::default().fg(theme.text_dimmed),
+                )),
                 rect,
             );
         }
@@ -4576,8 +4587,14 @@ fn render_patch_picker_preview(
         }
         super::popup::PatchPickerPreview::Binary { size } => {
             let lines = vec![
-                Line::from(Span::styled("Binary file", Style::default().fg(theme.text_dimmed))),
-                Line::from(Span::styled(human_file_size(*size), Style::default().fg(theme.text))),
+                Line::from(Span::styled(
+                    "Binary file",
+                    Style::default().fg(theme.text_dimmed),
+                )),
+                Line::from(Span::styled(
+                    human_file_size(*size),
+                    Style::default().fg(theme.text),
+                )),
             ];
             frame.render_widget(Paragraph::new(lines), rect);
         }
@@ -4636,8 +4653,12 @@ fn render_patch_file_picker(
     theme: &Theme,
     state: &super::popup::PatchFilePickerState,
 ) {
-    let width = (area.width * 92 / 100).max(60).min(area.width.saturating_sub(2).max(1));
-    let height = (area.height * 78 / 100).max(16).min(area.height.saturating_sub(2).max(1));
+    let width = (area.width * 92 / 100)
+        .max(60)
+        .min(area.width.saturating_sub(2).max(1));
+    let height = (area.height * 78 / 100)
+        .max(16)
+        .min(area.height.saturating_sub(2).max(1));
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let popup = Rect::new(x, y, width, height);
@@ -4650,7 +4671,10 @@ fn render_patch_file_picker(
         popup,
     );
 
-    let inner = popup.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
     if inner.height < 5 || inner.width < 12 {
         return;
     }
@@ -4677,7 +4701,12 @@ fn render_patch_file_picker(
     let right_w = content.width.saturating_sub(left_w + center_w);
     let parent_rect = Rect::new(content.x, content.y, left_w, content.height);
     let current_rect = Rect::new(content.x + left_w, content.y, center_w, content.height);
-    let preview_rect = Rect::new(content.x + left_w + center_w, content.y, right_w, content.height);
+    let preview_rect = Rect::new(
+        content.x + left_w + center_w,
+        content.y,
+        right_w,
+        content.height,
+    );
 
     if parent_rect.width > 0 {
         frame.render_widget(
@@ -4751,16 +4780,39 @@ fn render_patch_file_picker(
         render_patch_picker_preview(frame, preview, state, theme);
     }
 
-    let key = |text: &str| Span::styled(text.to_string(), Style::default().fg(theme.accent_secondary));
+    let key = |text: &str| {
+        Span::styled(
+            text.to_string(),
+            Style::default().fg(theme.accent_secondary),
+        )
+    };
     let dim = |text: &str| Span::styled(text.to_string(), Style::default().fg(theme.text_dimmed));
     let footer = Line::from(vec![
-        key(" j/k"), dim(" navigate  "), key("20j/20k"), dim(" jump  "),
-        key("g/G"), dim(" top/bottom  "), key("c-j/c-k"), dim(" smooth move  "),
-        key("h/l"), dim(" parent/open  "), key("enter"), dim(" select  "), key("r"), dim(" repo  "),
-        key("~"), dim(" home  "), key("d"), dim(" downloads  "),
-        key("q"), dim(" close"),
+        key(" j/k"),
+        dim(" navigate  "),
+        key("20j/20k"),
+        dim(" jump  "),
+        key("g/G"),
+        dim(" top/bottom  "),
+        key("c-j/c-k"),
+        dim(" smooth move  "),
+        key("h/l"),
+        dim(" parent/open  "),
+        key("enter"),
+        dim(" select  "),
+        key("r"),
+        dim(" repo  "),
+        key("~"),
+        dim(" home  "),
+        key("d"),
+        dim(" downloads  "),
+        key("q"),
+        dim(" close"),
     ]);
-    frame.render_widget(Paragraph::new(footer), Rect::new(inner.x, footer_y, inner.width, 1));
+    frame.render_widget(
+        Paragraph::new(footer),
+        Rect::new(inner.x, footer_y, inner.width, 1),
+    );
 }
 
 use super::popup::ListPickerCore;

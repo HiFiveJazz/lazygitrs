@@ -1542,6 +1542,4 @@ impl Gui {
         // Subtract 2 for top/bottom borders
         panel_rect.height.saturating_sub(2) as usize
     }
-
-
 }
