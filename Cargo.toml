@@ -7,6 +7,10 @@ repository = "https://github.com/blankeos/lazygitrs"
 homepage = "https://github.com/blankeos/lazygitrs"
 license = "MIT"
 
+[features]
+default = ["mimalloc-allocator"]
+mimalloc-allocator = ["dep:mimalloc"]
+
 [dependencies]
 anyhow = "1.0.104"
 gix = { version = "0.90.0", default-features = false, features = ["anyhow", "parallel", "revision", "sha1", "sha256"] }
@@ -47,6 +51,7 @@ tui-textarea = {
 }
 textwrap = { version = "0.16.4", default-features = false, features = ["unicode-width"] }
 libc = "0.2.191"
+mimalloc = { version = "0.1.52", optional = true }
 strip-ansi-escapes = "0.2.1"
 
 # Keep crossterm's normal mio backend everywhere except macOS. `use-dev-tty`

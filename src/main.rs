@@ -7,6 +7,10 @@ mod os;
 mod pager;
 mod upgrade;
 
+#[cfg(feature = "mimalloc-allocator")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
