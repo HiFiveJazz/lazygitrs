@@ -244,6 +244,9 @@ const PUSH_MODEL_PART_COUNT: usize = 3;
 const PERIODIC_MODEL_PART_COUNT: usize = 2;
 /// Keep speculative auto-fetch out of the way of interactive work.
 const AUTO_FETCH_IDLE_GRACE: Duration = Duration::from_secs(2);
+/// After an allocation-heavy interaction burst, return unused mimalloc pages
+/// to the OS once the UI and its background workers have been quiet for a while.
+const MEMORY_COLLECT_IDLE_GRACE: Duration = Duration::from_secs(10);
 
 fn plain_char_key(key: KeyEvent, expected: char) -> bool {
     let modifiers = if expected.is_uppercase() {
@@ -1048,21 +1051,29 @@ pub struct Gui {
     index_mutation_generation: u64,
     /// Background `git ls-files` for the path-filter picker (ctrl-s → path).
     filter_paths_rx: Option<mpsc::Receiver<Result<Vec<String>>>>,
-    /// Receiver for silent auto-fetch results. Kept separate from remote_op
-    /// so auto-fetch failures don't show error popups or clobber a
+    /// Receiver for automatic fetch results. Kept separate from remote_op so
+    /// startup/periodic fetch failures stay non-modal and cannot clobber a
     /// user-initiated push/pull.
     auto_fetch_rx: mpsc::Receiver<Result<bool>>,
-    /// Sender cloned into background threads for auto-fetch.
+    /// Sender cloned into background threads for automatic fetches.
     auto_fetch_tx: mpsc::Sender<Result<bool>>,
-    /// When the last auto-fetch interval started. Initialized at startup so the
-    /// first speculative network operation waits a full interval instead of
-    /// competing with startup navigation/checkout/push.
+    /// When the last automatic fetch started. The visible startup fetch resets
+    /// this clock so periodic auto-fetch waits a full configured interval.
     last_auto_fetch_at: Option<Instant>,
-    /// Last terminal interaction. Auto-fetch only starts after a short idle
-    /// grace period so a user actively navigating toward Push/Pull/Checkout wins.
+    /// Last terminal interaction. Periodic auto-fetch only starts after a short
+    /// idle grace period so a user navigating toward Push/Pull/Checkout wins.
     last_user_activity_at: Instant,
-    /// True while a background auto-fetch is in flight, so we don't stack them.
+    /// True while an automatic fetch is in flight, so startup/periodic fetches
+    /// and manual network operations share one serialized lane.
     auto_fetch_in_flight: bool,
+    /// True only for the initial automatic fetch. Its "Fetching" overlay is
+    /// cleared as soon as the network operation finishes; periodic fetches stay
+    /// silent as before.
+    startup_fetch_in_flight: bool,
+    /// Rearmed by terminal activity and cleared after one idle allocator collect.
+    /// Keeps `mi_collect(true)` off the hot path while still letting RSS fall
+    /// after bursty commit/diff navigation.
+    memory_collect_armed: bool,
     /// Receiver for background menu item operations (e.g. fetching PR URLs).
     menu_async_rx: mpsc::Receiver<Result<popup::MenuAsyncResult>>,
     /// Sender cloned into background threads for menu async operations.
@@ -1608,6 +1619,8 @@ impl Gui {
             last_auto_fetch_at: Some(Instant::now()),
             last_user_activity_at: Instant::now(),
             auto_fetch_in_flight: false,
+            startup_fetch_in_flight: false,
+            memory_collect_armed: false,
             menu_async_rx,
             menu_async_tx,
             ui_job_rx,
@@ -1682,6 +1695,12 @@ impl Gui {
         // uses the correct geometry from the very first frame.
         let size = terminal.size()?;
         self.layout.update_size(size.width, size.height);
+
+        // Match lazygit's startup behavior: immediately refresh remote-tracking
+        // refs in the background so ahead/behind counts reflect the server, not
+        // just the last local fetch. The operation is non-interactive and the
+        // visible "Fetching" overlay disappears as soon as it completes.
+        self.start_startup_fetch();
 
         let mut keyboard_enhanced = keyboard_enhanced;
         let result = self.main_loop(&mut terminal, &input, &mut keyboard_enhanced);
@@ -2315,6 +2334,11 @@ impl Gui {
             // Apply completed light files refresh without blocking input.
             self.receive_files_refresh();
 
+            // Run allocator collection only after this frame has started any
+            // refresh work that became due, so we never trim immediately before
+            // kicking off another allocation-heavy background operation.
+            self.maybe_collect_idle_memory();
+
             if self.should_quit {
                 break;
             }
@@ -2570,10 +2594,45 @@ impl Gui {
         }
     }
 
+    /// Return unused mimalloc pages after a burst of interactive work.
+    ///
+    /// Collection is deliberately conservative: it runs at most once per input
+    /// burst, only after a long idle window, and never while the main diff/stat
+    /// or repository refresh lanes are still active. The system-allocator build
+    /// uses the same policy but `collect_unused_memory()` is a no-op.
+    fn maybe_collect_idle_memory(&mut self) {
+        if !self.memory_collect_armed
+            || self.last_user_activity_at.elapsed() < MEMORY_COLLECT_IDLE_GRACE
+        {
+            return;
+        }
+
+        let background_work_active = self.diff_loading
+            || !self.diff_prefetch_inflight.is_empty()
+            || !self.commit_stat_prefetch_inflight.is_empty()
+            || self.initial_load_rx.is_some()
+            || self.refresh_in_progress
+            || self.files_refresh_in_progress
+            || self.commit_page_loading
+            || self.auto_fetch_in_flight
+            || self.remote_op_label.is_some()
+            || self.background_mutation_label.is_some()
+            || self.index_mutation_busy.load(Ordering::Relaxed)
+            || self.ai_commit_job.is_some();
+
+        if background_work_active {
+            return;
+        }
+
+        crate::allocator::collect_unused_memory();
+        self.memory_collect_armed = false;
+    }
+
     /// Apply one batch of terminal events before the next paint.
     fn handle_event_batch(&mut self, events: Vec<Event>) {
         if !events.is_empty() {
             self.last_user_activity_at = Instant::now();
+            self.memory_collect_armed = true;
         }
         for event in events {
             match event {
@@ -3541,6 +3600,22 @@ impl Gui {
         self.commit_window_start = 0;
     }
 
+    /// Start the initial visible fetch used to make branch divergence current
+    /// with the remote as soon as lazygitrs opens. Respect the existing
+    /// auto-fetch controls: users who disable automatic network access still get
+    /// a completely local startup.
+    fn start_startup_fetch(&mut self) {
+        if !self.config.user_config.git.auto_fetch
+            || self.config.user_config.refresher.fetch_interval == 0
+            || self.auto_fetch_in_flight
+            || self.remote_op_label.is_some()
+        {
+            return;
+        }
+
+        self.start_automatic_fetch(true);
+    }
+
     /// Kick off a silent background `git fetch --all` if auto-fetch is enabled
     /// and the configured interval has elapsed since the last one. No popup,
     /// no status on the head branch — the user shouldn't be interrupted.
@@ -3574,8 +3649,23 @@ impl Gui {
         if !due {
             return;
         }
+
+        self.start_automatic_fetch(false);
+    }
+
+    /// Shared worker launcher for the visible startup fetch and silent periodic
+    /// auto-fetch. Both use the same non-interactive network lane so a missing
+    /// credential can never hang the TUI and manual push/pull operations queue
+    /// behind at most one automatic fetch.
+    fn start_automatic_fetch(&mut self, visible: bool) {
         self.last_auto_fetch_at = Some(Instant::now());
         self.auto_fetch_in_flight = true;
+        self.startup_fetch_in_flight = visible;
+        if visible {
+            self.remote_op_label = Some("Fetching".to_string());
+            self.remote_op_success_at = None;
+        }
+
         let git = Arc::clone(&self.git);
         let tx = self.auto_fetch_tx.clone();
         let cmd_log = self.command_log.clone();
@@ -3586,12 +3676,18 @@ impl Gui {
         });
     }
 
-    /// Collect auto-fetch completions. When refs changed, reuse the targeted
-    /// fetch refresh rather than reloading the entire model. Failures
+    /// Collect automatic fetch completions. When refs changed, reuse the
+    /// targeted fetch refresh rather than reloading the entire model. Failures
     /// (offline, auth prompt suppressed, etc.) remain intentionally silent.
     fn receive_auto_fetch_results(&mut self) {
         while let Ok(result) = self.auto_fetch_rx.try_recv() {
             self.auto_fetch_in_flight = false;
+            let startup_fetch = std::mem::take(&mut self.startup_fetch_in_flight);
+            if startup_fetch && self.remote_op_label.as_deref() == Some("Fetching") {
+                // The startup spinner is only for the network check itself. Let
+                // the refreshed ahead/behind counts become visible immediately.
+                self.remote_op_label = None;
+            }
 
             // Manual network operations own the lane as soon as auto-fetch
             // releases it. A queued guided pull immediately fetches/classifies
@@ -15512,6 +15608,49 @@ mod terminal_mouse_tests {
     }
 
     #[test]
+    fn startup_fetch_is_visible_until_network_check_finishes() {
+        let repo = TempRepo::new("startup-fetch-visible");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.start_startup_fetch();
+
+        assert!(gui.auto_fetch_in_flight);
+        assert!(gui.startup_fetch_in_flight);
+        assert_eq!(gui.remote_op_label.as_deref(), Some("Fetching"));
+
+        // A repository with no remotes makes `git fetch --all` a quick no-op,
+        // which is useful here: verify the automatic lane still clears the
+        // startup indicator instead of showing a success toast or error modal.
+        for _ in 0..100 {
+            gui.receive_auto_fetch_results();
+            if !gui.auto_fetch_in_flight {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(!gui.auto_fetch_in_flight);
+        assert!(!gui.startup_fetch_in_flight);
+        assert!(gui.remote_op_label.is_none());
+        assert!(gui.remote_op_success_at.is_none());
+    }
+
+    #[test]
+    fn startup_fetch_respects_auto_fetch_setting() {
+        let repo = TempRepo::new("startup-fetch-disabled");
+        let mut gui = checkout_test_gui(&repo);
+        let mut config = crate::config::AppConfig::default();
+        config.user_config.git.auto_fetch = false;
+        gui.config = Arc::new(config);
+
+        gui.start_startup_fetch();
+
+        assert!(!gui.auto_fetch_in_flight);
+        assert!(!gui.startup_fetch_in_flight);
+        assert!(gui.remote_op_label.is_none());
+    }
+
+    #[test]
     fn auto_fetch_waits_for_interval_and_user_idle() {
         let repo = TempRepo::new("auto-fetch-idle-priority");
         let mut gui = checkout_test_gui(&repo);
@@ -15538,6 +15677,8 @@ mod terminal_mouse_tests {
         gui.last_user_activity_at = Instant::now() - AUTO_FETCH_IDLE_GRACE;
         gui.maybe_start_auto_fetch();
         assert!(gui.auto_fetch_in_flight);
+        assert!(!gui.startup_fetch_in_flight);
+        assert!(gui.remote_op_label.is_none());
 
         // Ensure the worker is finished before the temporary repository drops.
         let result = gui

@@ -597,7 +597,7 @@ impl InlineImagePreview {
     fn start_load(&mut self) {
         use std::sync::atomic::Ordering;
         if INLINE_LOADS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < MAX_INLINE_LOADS).then_some(n + 1)
             })
             .is_err()
