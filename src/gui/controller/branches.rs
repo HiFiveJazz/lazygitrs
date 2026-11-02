@@ -1,5 +1,5 @@
+use super::matches_key;
 use crate::config::KeybindingConfig;
-use crate::config::keybindings::parse_key;
 use crate::gui::popup::{MenuItem, MessageKind, PopupState, make_textarea};
 use crate::gui::{Gui, RemoteOpKind};
 use crate::os::platform::Platform;
@@ -7,7 +7,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
-    if super::commits::matches_key(key, &keybindings.commits.open_log_menu) {
+    if matches_key(key, &keybindings.commits.open_log_menu) {
         return super::commits::show_filtering_menu(gui);
     }
 
@@ -74,24 +74,15 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
 
 fn enter_branch_commits(gui: &mut Gui) -> Result<()> {
     let selected = gui.context_mgr.selected_active();
-    let model = gui.model.lock().unwrap();
-    if let Some(branch) = model.branches.get(selected) {
-        let name = branch.name.clone();
-        drop(model);
-
-        // Load commits for this branch
-        let commits = gui.git.load_commits_for_branch(&name, 300)?;
-        {
-            let mut model = gui.model.lock().unwrap();
-            model.set_sub_commits(commits);
-        }
-        gui.branch_commits_name = name;
-
-        // Switch to BranchCommits context
-        gui.context_mgr
-            .set_active(crate::gui::context::ContextId::BranchCommits);
-        gui.context_mgr.set_selection(0);
-        gui.needs_diff_refresh = true;
+    let name = gui
+        .model
+        .lock()
+        .unwrap()
+        .branches
+        .get(selected)
+        .map(|branch| branch.name.clone());
+    if let Some(name) = name {
+        super::enter_named_commit_history(gui, name, None)?;
     }
     Ok(())
 }
@@ -139,38 +130,7 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
         });
     }
 
-    for branch in &model.branches {
-        if branch.head {
-            continue;
-        }
-        items.push(ListPickerItem {
-            value: branch.name.clone(),
-            label: branch.name.clone(),
-            category: "Branches".to_string(),
-            description: None,
-        });
-    }
-
-    for remote in &model.remotes {
-        for branch in &remote.branches {
-            let full_name = format!("{}/{}", remote.name, branch.name);
-            items.push(ListPickerItem {
-                value: full_name.clone(),
-                label: full_name,
-                category: "Remote Branches".to_string(),
-                description: None,
-            });
-        }
-    }
-
-    for tag in &model.tags {
-        items.push(ListPickerItem {
-            value: tag.name.clone(),
-            label: tag.name.clone(),
-            category: "Tags".to_string(),
-            description: None,
-        });
-    }
+    super::append_named_ref_picker_items(&mut items, &model, true);
 
     for commit in &model.commits {
         items.push(ListPickerItem {
@@ -322,12 +282,7 @@ fn delete_branch(gui: &mut Gui) -> Result<()> {
             });
         }
 
-        items.push(MenuItem {
-            label: "Cancel".to_string(),
-            description: String::new(),
-            key: None,
-            action: Some(Box::new(|_| Ok(()))),
-        });
+        items.push(MenuItem::cancel());
 
         gui.popup = PopupState::Menu {
             title: format!("Delete branch '{}'?", name),
@@ -575,12 +530,7 @@ fn rebase_branch(gui: &mut Gui) -> Result<()> {
                     Ok(())
                 })),
             },
-            MenuItem {
-                label: "Cancel".to_string(),
-                description: String::new(),
-                key: None,
-                action: Some(Box::new(|_gui| Ok(()))),
-            },
+            MenuItem::cancel(),
         ];
 
         gui.popup = PopupState::Menu {
@@ -724,24 +674,7 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
                 })),
             },
         ];
-
-        // PR URL may not be available — try to detect if branch has a PR
-        let pr_branch = branch_for_pr.clone();
-        let copy_pr_index = items.len();
-        items.push(MenuItem {
-            label: "Copy PR URL".to_string(),
-            description: "(requires existing PR)".to_string(),
-            key: Some("p".to_string()),
-            action: Some(Box::new(move |gui| {
-                use crate::gui::popup::MenuAsyncResult;
-                let branch = pr_branch.clone();
-                gui.start_menu_async(copy_pr_index, move |git| {
-                    let url = git.get_pr_url(&branch)?;
-                    Ok(MenuAsyncResult::CopyToClipboard(url))
-                });
-                Ok(())
-            })),
-        });
+        super::push_pr_url_item(&mut items, branch_for_pr, super::PrUrlAction::Copy);
 
         gui.popup = PopupState::Menu {
             title: "Copy to clipboard".to_string(),
@@ -786,23 +719,7 @@ fn open_in_browser_menu(gui: &mut Gui) -> Result<()> {
                 })),
             },
         ];
-
-        let pr_branch = branch_for_pr.clone();
-        let open_pr_index = items.len();
-        items.push(MenuItem {
-            label: "Open PR URL".to_string(),
-            description: "(requires existing PR)".to_string(),
-            key: Some("p".to_string()),
-            action: Some(Box::new(move |gui| {
-                use crate::gui::popup::MenuAsyncResult;
-                let branch = pr_branch.clone();
-                gui.start_menu_async(open_pr_index, move |git| {
-                    let url = git.get_pr_url(&branch)?;
-                    Ok(MenuAsyncResult::OpenUrl(url))
-                });
-                Ok(())
-            })),
-        });
+        super::push_pr_url_item(&mut items, branch_for_pr, super::PrUrlAction::Open);
 
         gui.popup = PopupState::Menu {
             title: "Open in browser".to_string(),
@@ -812,12 +729,4 @@ fn open_in_browser_menu(gui: &mut Gui) -> Result<()> {
         };
     }
     Ok(())
-}
-
-fn matches_key(key: KeyEvent, binding: &str) -> bool {
-    if let Some(expected) = parse_key(binding) {
-        key.code == expected.code && key.modifiers == expected.modifiers
-    } else {
-        false
-    }
 }

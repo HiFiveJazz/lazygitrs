@@ -3,13 +3,26 @@ use anyhow::{Context, Result, bail};
 use super::GitCommands;
 
 impl GitCommands {
+    fn apply_visual_block_patch(
+        &self,
+        file_path: &str,
+        unified_diff: &str,
+        want_old: Option<(usize, usize)>,
+        want_new: Option<(usize, usize)>,
+        args: &[&str],
+        action: &str,
+    ) -> Result<()> {
+        let patch = build_visual_block_patch(file_path, unified_diff, want_old, want_new)?;
+        self.git()
+            .args(args)
+            .stdin(patch)
+            .run_expecting_success()
+            .with_context(|| format!("failed to {action} hunk in {file_path}"))?;
+        Ok(())
+    }
+
     /// Reverse-apply only the lines of a single visual change block to the
-    /// working tree copy of `file_path`. `want_old` and `want_new` are the
-    /// inclusive old-file and new-file line-number ranges the visual block
-    /// covers; either may be `None` for pure insertion or pure deletion.
-    /// The block typically lives inside one of the `@@` hunks of
-    /// `unified_diff`, but may be narrower than that `@@` — visual blocks
-    /// can be split by 1–3 lines of context within a single `@@`.
+    /// working tree copy of `file_path`.
     pub fn revert_visual_block_in_worktree(
         &self,
         file_path: &str,
@@ -17,18 +30,17 @@ impl GitCommands {
         want_old: Option<(usize, usize)>,
         want_new: Option<(usize, usize)>,
     ) -> Result<()> {
-        let patch = build_visual_block_patch(file_path, unified_diff, want_old, want_new)?;
-        self.git()
-            .args(&["apply", "--reverse", "--unidiff-zero", "-"])
-            .stdin(patch)
-            .run_expecting_success()
-            .with_context(|| format!("failed to revert hunk in {}", file_path))?;
-        Ok(())
+        self.apply_visual_block_patch(
+            file_path,
+            unified_diff,
+            want_old,
+            want_new,
+            &["apply", "--reverse", "--unidiff-zero", "-"],
+            "revert",
+        )
     }
 
-    /// Stage only the lines of a single visual change block by applying a
-    /// sub-patch sliced from the unstaged (`git diff`) `unified_diff` to the
-    /// index (`git apply --cached`).
+    /// Stage a visual change block by applying it to the index.
     pub fn stage_visual_block(
         &self,
         file_path: &str,
@@ -36,18 +48,17 @@ impl GitCommands {
         want_old: Option<(usize, usize)>,
         want_new: Option<(usize, usize)>,
     ) -> Result<()> {
-        let patch = build_visual_block_patch(file_path, unified_diff, want_old, want_new)?;
-        self.git()
-            .args(&["apply", "--cached", "--unidiff-zero", "-"])
-            .stdin(patch)
-            .run_expecting_success()
-            .with_context(|| format!("failed to stage hunk in {}", file_path))?;
-        Ok(())
+        self.apply_visual_block_patch(
+            file_path,
+            unified_diff,
+            want_old,
+            want_new,
+            &["apply", "--cached", "--unidiff-zero", "-"],
+            "stage",
+        )
     }
 
-    /// Unstage only the lines of a single visual change block by
-    /// reverse-applying a sub-patch sliced from the staged
-    /// (`git diff --cached`) `unified_diff` to the index.
+    /// Unstage a visual change block by reverse-applying it to the index.
     pub fn unstage_visual_block(
         &self,
         file_path: &str,
@@ -55,15 +66,17 @@ impl GitCommands {
         want_old: Option<(usize, usize)>,
         want_new: Option<(usize, usize)>,
     ) -> Result<()> {
-        let patch = build_visual_block_patch(file_path, unified_diff, want_old, want_new)?;
-        self.git()
-            .args(&["apply", "--cached", "--reverse", "--unidiff-zero", "-"])
-            .stdin(patch)
-            .run_expecting_success()
-            .with_context(|| format!("failed to unstage hunk in {}", file_path))?;
-        Ok(())
+        self.apply_visual_block_patch(
+            file_path,
+            unified_diff,
+            want_old,
+            want_new,
+            &["apply", "--cached", "--reverse", "--unidiff-zero", "-"],
+            "unstage",
+        )
     }
 }
+
 
 fn build_visual_block_patch(
     file_path: &str,

@@ -38,25 +38,19 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig)
 
 fn enter_tag_commits(gui: &mut Gui) -> Result<()> {
     let selected = gui.context_mgr.selected_active();
-    let model = gui.model.lock().unwrap();
-    if let Some(tag) = model.tags.get(selected) {
-        let name = tag.name.clone();
-        drop(model);
-
-        // Load commits reachable from this tag
-        let commits = gui.git.load_commits_for_branch(&name, 300)?;
-        {
-            let mut model = gui.model.lock().unwrap();
-            model.set_sub_commits(commits);
-        }
-        gui.branch_commits_name = name;
-        gui.sub_commits_parent_context = crate::gui::context::ContextId::Tags;
-
-        // Switch to BranchCommits context (reused for tag commits)
-        gui.context_mgr
-            .set_active(crate::gui::context::ContextId::BranchCommits);
-        gui.context_mgr.set_selection(0);
-        gui.needs_diff_refresh = true;
+    let name = gui
+        .model
+        .lock()
+        .unwrap()
+        .tags
+        .get(selected)
+        .map(|tag| tag.name.clone());
+    if let Some(name) = name {
+        super::enter_named_commit_history(
+            gui,
+            name,
+            Some(crate::gui::context::ContextId::Tags),
+        )?;
     }
     Ok(())
 }

@@ -129,7 +129,7 @@ fn rename_leaf_name(name: &str) -> Option<String> {
     Some(format!("{} -> {}", old_leaf, new_leaf))
 }
 
-/// A node in the flattened file tree for display.
+/// A node in a flattened file tree for display.
 #[derive(Debug, Clone)]
 pub struct FileTreeNode {
     /// Indentation depth (0 = root level).
@@ -138,32 +138,67 @@ pub struct FileTreeNode {
     pub name: String,
     /// Full directory path (e.g. "src/gui") for directories, used for collapse tracking.
     pub path: String,
-    /// If this is a file node, the index into `Model.files`.
+    /// If this is a file node, the index into the source file slice.
     pub file_index: Option<usize>,
     pub is_dir: bool,
-    /// For directory nodes: indices into `Model.files` of all descendant files.
+    /// For directory nodes: indices into the source file slice of all descendants.
     pub child_file_indices: Vec<usize>,
 }
 
-/// Build a flat list of tree nodes from the file list.
+/// Working-tree and commit-file trees have the same presentation shape.  Keep
+/// one node type so navigation/rendering utilities do not need parallel models.
+pub type CommitFileTreeNode = FileTreeNode;
+
+trait TreeFile {
+    fn tree_name(&self) -> &str;
+}
+
+impl TreeFile for File {
+    fn tree_name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl TreeFile for CommitFile {
+    fn tree_name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Build a flat list of tree nodes from the working-tree file list.
 /// `collapsed_dirs` controls which directories are collapsed (hidden children).
 pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<FileTreeNode> {
+    build_tree(files, collapsed_dirs)
+}
+
+/// Build a flat list of tree nodes from a commit's file list.
+pub fn build_commit_file_tree(
+    files: &[CommitFile],
+    collapsed_dirs: &HashSet<String>,
+) -> Vec<CommitFileTreeNode> {
+    build_tree(files, collapsed_dirs)
+}
+
+/// Shared tree construction for working-tree and commit files.  This remains
+/// monomorphized for each file type, so sharing the source does not add dynamic
+/// dispatch to this render-sensitive path.
+fn build_tree<T: TreeFile>(files: &[T], collapsed_dirs: &HashSet<String>) -> Vec<FileTreeNode> {
     if files.is_empty() {
         return Vec::new();
     }
 
-    // Collect (path_parts, file_index) and sort with directories before files
+    // Collect (path_parts, file_index) and sort with directories before files.
     let mut entries: Vec<(Vec<&str>, usize)> = files
         .iter()
         .enumerate()
-        .map(|(i, f)| {
-            let parts: Vec<&str> = tree_path_for_name(&f.name).split('/').collect();
+        .map(|(i, file)| {
+            let parts: Vec<&str> = tree_path_for_name(file.tree_name()).split('/').collect();
             (parts, i)
         })
         .collect();
     entries.sort_by(|a, b| sort_dirs_first(&a.0, &b.0));
 
-    // First pass: collect child file indices per directory path
+    // First pass: collect descendant file indices per directory path.
     let mut dir_children: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
     for (parts, file_idx) in &entries {
@@ -173,22 +208,16 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
         }
     }
 
-    let mut nodes = Vec::new();
-
-    // Root node — represents the entire tree
-    let all_indices: Vec<usize> = (0..files.len()).collect();
-    let root_collapsed = collapsed_dirs.contains(".");
-    nodes.push(FileTreeNode {
+    let mut nodes = vec![FileTreeNode {
         depth: 0,
         name: ".".to_string(),
         path: ".".to_string(),
         file_index: None,
         is_dir: true,
-        child_file_indices: all_indices,
-    });
+        child_file_indices: (0..files.len()).collect(),
+    }];
 
-    // If root is collapsed, return just the root node
-    if root_collapsed {
+    if collapsed_dirs.contains(".") {
         return nodes;
     }
 
@@ -196,51 +225,38 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
 
     for (parts, file_idx) in &entries {
         let dir_parts = &parts[..parts.len() - 1];
-        let file_name = rename_leaf_name(&files[*file_idx].name)
+        let file_name = rename_leaf_name(files[*file_idx].tree_name())
             .unwrap_or_else(|| parts[parts.len() - 1].to_string());
 
-        // Check if any ancestor directory is collapsed — if so, skip this file
-        let mut hidden = false;
-        for depth in 0..dir_parts.len() {
+        let hidden = (0..dir_parts.len()).any(|depth| {
             let ancestor_path = parts[..=depth].join("/");
-            if collapsed_dirs.contains(&ancestor_path) {
-                // Only hide if this file is deeper than the collapsed dir itself
-                // (the collapsed dir node is still shown)
-                hidden = true;
-                break;
-            }
-        }
+            collapsed_dirs.contains(&ancestor_path)
+        });
 
-        // Emit directory nodes for any new directories
         let common_prefix = last_dirs
             .iter()
             .zip(dir_parts.iter())
             .take_while(|(a, b)| a.as_str() == **b)
             .count();
 
-        // Add new directory levels (but only if not hidden by a collapsed ancestor)
         for (depth, dir) in dir_parts.iter().enumerate().skip(common_prefix) {
             let dir_path = parts[..=depth].join("/");
-
-            // Check if THIS directory is hidden by a collapsed ancestor above it
-            let dir_hidden = (0..depth).any(|d| {
-                let ancestor = parts[..=d].join("/");
+            let dir_hidden = (0..depth).any(|ancestor_depth| {
+                let ancestor = parts[..=ancestor_depth].join("/");
                 collapsed_dirs.contains(&ancestor)
             });
 
             if !dir_hidden {
-                let children = dir_children.get(&dir_path).cloned().unwrap_or_default();
                 nodes.push(FileTreeNode {
                     depth: depth + 1, // +1 for root node
                     name: dir.to_string(),
                     path: dir_path.clone(),
                     file_index: None,
                     is_dir: true,
-                    child_file_indices: children,
+                    child_file_indices: dir_children.get(&dir_path).cloned().unwrap_or_default(),
                 });
             }
 
-            // If this directory is collapsed, don't process deeper dirs
             if collapsed_dirs.contains(&dir_path) {
                 break;
             }
@@ -257,17 +273,17 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
             });
         }
 
-        last_dirs = dir_parts.iter().map(|s| s.to_string()).collect();
+        last_dirs = dir_parts.iter().map(|part| part.to_string()).collect();
     }
 
     compress_single_child_dirs(&mut nodes);
 
-    // Remove root node if it has only one direct child (matches lazygit behavior)
-    if nodes.first().is_some_and(|n| n.path == ".") {
-        let direct_children = nodes[1..].iter().filter(|n| n.depth == 1).count();
+    // Match lazygit: hide a synthetic root that only has one direct child.
+    if nodes.first().is_some_and(|node| node.path == ".") {
+        let direct_children = nodes[1..].iter().filter(|node| node.depth == 1).count();
         if direct_children == 1 {
             nodes.remove(0);
-            for node in nodes.iter_mut() {
+            for node in &mut nodes {
                 node.depth -= 1;
             }
         }
@@ -277,7 +293,7 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
 }
 
 /// Compress single-child directory chains into combined path nodes.
-/// e.g., `apps` → `nextjs` → `src` becomes `apps/nextjs/src` as one node.
+/// e.g. `apps` → `nextjs` → `src` becomes `apps/nextjs/src` as one node.
 fn compress_single_child_dirs(nodes: &mut Vec<FileTreeNode>) {
     let mut i = 0;
     while i < nodes.len() {
@@ -286,14 +302,11 @@ fn compress_single_child_dirs(nodes: &mut Vec<FileTreeNode>) {
             continue;
         }
 
-        let d = nodes[i].depth;
-
-        // Check if next node is a single dir child at depth d+1
-        if i + 1 < nodes.len() && nodes[i + 1].is_dir && nodes[i + 1].depth == d + 1 {
-            // Ensure no sibling at depth d+1 (only one direct child)
+        let depth = nodes[i].depth;
+        if i + 1 < nodes.len() && nodes[i + 1].is_dir && nodes[i + 1].depth == depth + 1 {
             let has_sibling = (i + 2..nodes.len())
-                .take_while(|&j| nodes[j].depth > d)
-                .any(|j| nodes[j].depth == d + 1);
+                .take_while(|&j| nodes[j].depth > depth)
+                .any(|j| nodes[j].depth == depth + 1);
 
             if !has_sibling {
                 let child = nodes.remove(i + 1);
@@ -305,13 +318,13 @@ fn compress_single_child_dirs(nodes: &mut Vec<FileTreeNode>) {
                 nodes[i].path = child.path;
                 nodes[i].child_file_indices = child.child_file_indices;
 
-                // Decrease depth of all descendants by 1
+                // Pull all descendants up one level after merging the directory.
                 let mut j = i + 1;
-                while j < nodes.len() && nodes[j].depth > d {
+                while j < nodes.len() && nodes[j].depth > depth {
                     nodes[j].depth -= 1;
                     j += 1;
                 }
-                continue; // re-check same node for further merges
+                continue; // re-check this node for a longer single-child chain
             }
         }
 
@@ -319,8 +332,8 @@ fn compress_single_child_dirs(nodes: &mut Vec<FileTreeNode>) {
     }
 }
 
-/// Sort path parts so directories appear before files at each level,
-/// then alphabetically within each group.
+/// Sort path parts so directories appear before files at each level, then
+/// alphabetically within each group.
 fn sort_dirs_first(a: &[&str], b: &[&str]) -> std::cmp::Ordering {
     for i in 0..a.len().min(b.len()) {
         if a[i] != b[i] {
@@ -339,181 +352,6 @@ fn sort_dirs_first(a: &[&str], b: &[&str]) -> std::cmp::Ordering {
     b.len().cmp(&a.len())
 }
 
-/// A node in the flattened commit file tree for display.
-#[derive(Debug, Clone)]
-pub struct CommitFileTreeNode {
-    pub depth: usize,
-    pub name: String,
-    pub path: String,
-    /// If this is a file node, the index into `Model.commit_files`.
-    pub file_index: Option<usize>,
-    pub is_dir: bool,
-    /// For directory nodes: indices into `Model.commit_files` of all descendant files.
-    pub child_file_indices: Vec<usize>,
-}
-
-/// Build a flat list of tree nodes from the commit file list.
-pub fn build_commit_file_tree(
-    files: &[CommitFile],
-    collapsed_dirs: &HashSet<String>,
-) -> Vec<CommitFileTreeNode> {
-    if files.is_empty() {
-        return Vec::new();
-    }
-
-    let mut entries: Vec<(Vec<&str>, usize)> = files
-        .iter()
-        .enumerate()
-        .map(|(i, f)| {
-            let parts: Vec<&str> = tree_path_for_name(&f.name).split('/').collect();
-            (parts, i)
-        })
-        .collect();
-    entries.sort_by(|a, b| sort_dirs_first(&a.0, &b.0));
-
-    // First pass: collect child file indices per directory path
-    let mut dir_children: std::collections::HashMap<String, Vec<usize>> =
-        std::collections::HashMap::new();
-    for (parts, file_idx) in &entries {
-        for depth in 0..parts.len().saturating_sub(1) {
-            let dir_path = parts[..=depth].join("/");
-            dir_children.entry(dir_path).or_default().push(*file_idx);
-        }
-    }
-
-    let mut nodes = Vec::new();
-
-    // Root node
-    let all_indices: Vec<usize> = (0..files.len()).collect();
-    let root_collapsed = collapsed_dirs.contains(".");
-    nodes.push(CommitFileTreeNode {
-        depth: 0,
-        name: ".".to_string(),
-        path: ".".to_string(),
-        file_index: None,
-        is_dir: true,
-        child_file_indices: all_indices,
-    });
-
-    if root_collapsed {
-        return nodes;
-    }
-
-    let mut last_dirs: Vec<String> = Vec::new();
-
-    for (parts, file_idx) in &entries {
-        let dir_parts = &parts[..parts.len() - 1];
-        let file_name = rename_leaf_name(&files[*file_idx].name)
-            .unwrap_or_else(|| parts[parts.len() - 1].to_string());
-
-        let mut hidden = false;
-        for depth in 0..dir_parts.len() {
-            let ancestor_path = parts[..=depth].join("/");
-            if collapsed_dirs.contains(&ancestor_path) {
-                hidden = true;
-                break;
-            }
-        }
-
-        let common_prefix = last_dirs
-            .iter()
-            .zip(dir_parts.iter())
-            .take_while(|(a, b)| a.as_str() == **b)
-            .count();
-
-        for (depth, dir) in dir_parts.iter().enumerate().skip(common_prefix) {
-            let dir_path = parts[..=depth].join("/");
-            let dir_hidden = (0..depth).any(|d| {
-                let ancestor = parts[..=d].join("/");
-                collapsed_dirs.contains(&ancestor)
-            });
-
-            if !dir_hidden {
-                let children = dir_children.get(&dir_path).cloned().unwrap_or_default();
-                nodes.push(CommitFileTreeNode {
-                    depth: depth + 1, // +1 for root node
-                    name: dir.to_string(),
-                    path: dir_path.clone(),
-                    file_index: None,
-                    is_dir: true,
-                    child_file_indices: children,
-                });
-            }
-
-            if collapsed_dirs.contains(&dir_path) {
-                break;
-            }
-        }
-
-        if !hidden {
-            nodes.push(CommitFileTreeNode {
-                depth: dir_parts.len() + 1, // +1 for root node
-                name: file_name,
-                path: parts.join("/"),
-                file_index: Some(*file_idx),
-                is_dir: false,
-                child_file_indices: Vec::new(),
-            });
-        }
-
-        last_dirs = dir_parts.iter().map(|s| s.to_string()).collect();
-    }
-
-    compress_single_child_commit_dirs(&mut nodes);
-
-    // Remove root node if it has only one direct child
-    if nodes.first().is_some_and(|n| n.path == ".") {
-        let direct_children = nodes[1..].iter().filter(|n| n.depth == 1).count();
-        if direct_children == 1 {
-            nodes.remove(0);
-            for node in nodes.iter_mut() {
-                node.depth -= 1;
-            }
-        }
-    }
-
-    nodes
-}
-
-/// Compress single-child directory chains for commit file trees.
-fn compress_single_child_commit_dirs(nodes: &mut Vec<CommitFileTreeNode>) {
-    let mut i = 0;
-    while i < nodes.len() {
-        if !nodes[i].is_dir {
-            i += 1;
-            continue;
-        }
-
-        let d = nodes[i].depth;
-
-        if i + 1 < nodes.len() && nodes[i + 1].is_dir && nodes[i + 1].depth == d + 1 {
-            let has_sibling = (i + 2..nodes.len())
-                .take_while(|&j| nodes[j].depth > d)
-                .any(|j| nodes[j].depth == d + 1);
-
-            if !has_sibling {
-                let child = nodes.remove(i + 1);
-                if nodes[i].name == "." {
-                    nodes[i].name = child.name;
-                } else {
-                    nodes[i].name = format!("{}/{}", nodes[i].name, child.name);
-                }
-                nodes[i].path = child.path;
-                nodes[i].child_file_indices = child.child_file_indices;
-
-                let mut j = i + 1;
-                while j < nodes.len() && nodes[j].depth > d {
-                    nodes[j].depth -= 1;
-                    j += 1;
-                }
-                continue;
-            }
-        }
-
-        i += 1;
-    }
-}
-
 pub trait NavigableTreeNode {
     fn depth(&self) -> usize;
 }
@@ -524,11 +362,6 @@ impl NavigableTreeNode for FileTreeNode {
     }
 }
 
-impl NavigableTreeNode for CommitFileTreeNode {
-    fn depth(&self) -> usize {
-        self.depth
-    }
-}
 
 pub fn find_parent_idx<T: NavigableTreeNode>(nodes: &[T], current_idx: usize) -> Option<usize> {
     if current_idx == 0 || nodes.is_empty() || current_idx >= nodes.len() {

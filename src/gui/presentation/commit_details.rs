@@ -1,3 +1,4 @@
+use super::time::{local_from_unix, month_name};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -347,65 +348,11 @@ fn format_date(unix_ts: i64) -> String {
     }
     // Local time like lazygit (`time.Unix().In(now.Location())`), not UTC.
     let (year, month, day, hour, minute) = local_from_unix(unix_ts);
-    let month_name = match month {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        12 => "Dec",
-        _ => "???",
-    };
-    format!("{} {}, {} {:02}:{:02}", month_name, day, year, hour, minute)
+    let month_label = month_name(month);
+    format!("{} {}, {} {:02}:{:02}", month_label, day, year, hour, minute)
 }
 
-/// Local-time conversion via libc, with UTC fallback.
-fn local_from_unix(secs: i64) -> (i64, u32, u32, u32, u32) {
-    unsafe {
-        let t = secs as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        #[cfg(windows)]
-        let ok = libc::localtime_s(&mut tm, &t) == 0;
-        #[cfg(not(windows))]
-        let ok = !libc::localtime_r(&t, &mut tm).is_null();
-        if !ok {
-            return civil_from_unix(secs);
-        }
-        (
-            tm.tm_year as i64 + 1900,
-            (tm.tm_mon + 1) as u32,
-            tm.tm_mday as u32,
-            tm.tm_hour as u32,
-            tm.tm_min as u32,
-        )
-    }
-}
 
-/// Very small civil-from-unix converter (UTC).  Matches Howard Hinnant's
-/// algorithm.  Returns (year, month, day, hour, minute).
-fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32) {
-    let days = secs.div_euclid(86_400);
-    let time_of_day = secs.rem_euclid(86_400);
-    let hour = (time_of_day / 3600) as u32;
-    let minute = ((time_of_day % 3600) / 60) as u32;
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if m <= 2 { y + 1 } else { y };
-    (year, m, d, hour, minute)
-}
 
 pub(super) fn avatar_color_for(email: &str, theme: &Theme) -> ratatui::style::Color {
     // Pick a stable color from the graph palette based on a cheap hash of the

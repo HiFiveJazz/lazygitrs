@@ -685,38 +685,9 @@ fn parse_todo_entries(content: &str) -> Vec<TodoEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
+    use crate::git::test_support::TempDir;
+    use std::path::Path;
     use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(prefix: &str) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "lazygitrs-{prefix}-{unique}-{}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&path).expect("mkdir");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
 
     fn git_in(dir: &Path, args: &[&str]) {
         let status = Command::new("git")

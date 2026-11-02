@@ -8,7 +8,7 @@ use crate::config::Theme;
 use crate::gui::modes::diff_mode::{
     CompareDiffSource, CompareLayout, DiffModeFocus, DiffModeState, RefKind,
 };
-use crate::gui::presentation::commit_files::commit_file_status_display;
+use crate::gui::presentation::commit_files::{commit_file_status_display, render_commit_file_item};
 use crate::gui::presentation::commits::{CommitListCache, render_compare_commit_list_window};
 use crate::gui::presentation::files::append_file_stats;
 use crate::model::file_tree::CommitFileTreeNode;
@@ -555,49 +555,7 @@ fn render_commit_files(frame: &mut Frame, area: Rect, state: &mut DiffModeState,
         state
             .diff_files
             .iter()
-            .map(|file| {
-                let (status_style, status_icon) = commit_file_status_display(file, theme);
-                let dim_style = Style::default().fg(theme.text_dimmed);
-                let name_style = Style::default().fg(theme.text_strong);
-
-                if file.rename_paths().is_some() {
-                    let spans = vec![
-                        Span::styled(format!(" {} ", status_icon), status_style),
-                        Span::styled(file.name.clone(), name_style),
-                    ];
-                    return ListItem::new(Line::from(append_file_stats(
-                        spans,
-                        file.hunk_count,
-                        file.additions,
-                        file.deletions,
-                        theme,
-                        content_width,
-                    )));
-                }
-
-                let path = file.name.as_str();
-                let (dir, name) = match path.rfind('/') {
-                    Some(idx) => (&path[..=idx], &path[idx + 1..]),
-                    None => ("", path),
-                };
-
-                let mut spans = vec![
-                    Span::styled(format!(" {} ", status_icon), status_style),
-                    Span::styled(name.to_string(), name_style),
-                ];
-                if !dir.is_empty() {
-                    spans.push(Span::styled(format!(" {}", dir), dim_style));
-                }
-
-                ListItem::new(Line::from(append_file_stats(
-                    spans,
-                    file.hunk_count,
-                    file.additions,
-                    file.deletions,
-                    theme,
-                    content_width,
-                )))
-            })
+            .map(|file| render_commit_file_item(file, theme, content_width))
             .collect()
     };
 

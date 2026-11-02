@@ -1,8 +1,8 @@
+use super::matches_key;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
-use crate::config::keybindings::parse_key;
 use crate::gui::Gui;
 use crate::gui::context::ContextId;
 use crate::gui::popup::PopupState;
@@ -49,35 +49,30 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
 
 fn enter_remote_branch_commits(gui: &mut Gui) -> Result<()> {
     let selected = gui.context_mgr.selected_active();
-    let model = gui.model.lock().unwrap();
-    if let Some(rb) = model.sub_remote_branches.get(selected) {
-        let full_name = rb.full_name();
-        drop(model);
-
-        // Load commits for this remote branch
-        let commits = gui.git.load_commits_for_branch(&full_name, 300)?;
-        {
-            let mut model = gui.model.lock().unwrap();
-            model.set_sub_commits(commits);
-        }
-        gui.branch_commits_name = full_name;
-        gui.sub_commits_parent_context = ContextId::RemoteBranches;
-
-        gui.context_mgr.set_active(ContextId::BranchCommits);
-        gui.context_mgr.set_selection(0);
-        gui.needs_diff_refresh = true;
+    let full_name = gui
+        .model
+        .lock()
+        .unwrap()
+        .sub_remote_branches
+        .get(selected)
+        .map(|branch| branch.full_name());
+    if let Some(full_name) = full_name {
+        super::enter_named_commit_history(gui, full_name, Some(ContextId::RemoteBranches))?;
     }
     Ok(())
 }
 
-fn checkout_remote_branch(gui: &mut Gui) -> Result<()> {
+fn selected_remote_branch(gui: &Gui) -> Option<(String, String)> {
     let selected = gui.context_mgr.selected_active();
     let model = gui.model.lock().unwrap();
-    if let Some(rb) = model.sub_remote_branches.get(selected) {
-        let remote = rb.remote_name.clone();
-        let branch = rb.name.clone();
-        drop(model);
+    model
+        .sub_remote_branches
+        .get(selected)
+        .map(|branch| (branch.remote_name.clone(), branch.name.clone()))
+}
 
+fn checkout_remote_branch(gui: &mut Gui) -> Result<()> {
+    if let Some((remote, branch)) = selected_remote_branch(gui) {
         gui.popup = PopupState::Confirm {
             title: "Checkout".to_string(),
             message: format!(
@@ -95,14 +90,8 @@ fn checkout_remote_branch(gui: &mut Gui) -> Result<()> {
 }
 
 fn merge_remote_branch(gui: &mut Gui) -> Result<()> {
-    let selected = gui.context_mgr.selected_active();
-    let model = gui.model.lock().unwrap();
-    if let Some(rb) = model.sub_remote_branches.get(selected) {
-        let remote = rb.remote_name.clone();
-        let branch = rb.name.clone();
+    if let Some((remote, branch)) = selected_remote_branch(gui) {
         let merge_args = gui.config.user_config.git.merging.args.clone();
-        drop(model);
-
         gui.popup = PopupState::Confirm {
             title: "Merge".to_string(),
             message: format!("Merge '{}/{}' into current branch?", remote, branch),
@@ -117,13 +106,7 @@ fn merge_remote_branch(gui: &mut Gui) -> Result<()> {
 }
 
 fn rebase_remote_branch(gui: &mut Gui) -> Result<()> {
-    let selected = gui.context_mgr.selected_active();
-    let model = gui.model.lock().unwrap();
-    if let Some(rb) = model.sub_remote_branches.get(selected) {
-        let remote = rb.remote_name.clone();
-        let branch = rb.name.clone();
-        drop(model);
-
+    if let Some((remote, branch)) = selected_remote_branch(gui) {
         gui.popup = PopupState::Confirm {
             title: "Rebase".to_string(),
             message: format!("Rebase onto '{}/{}'?", remote, branch),
@@ -138,13 +121,7 @@ fn rebase_remote_branch(gui: &mut Gui) -> Result<()> {
 }
 
 fn delete_remote_branch(gui: &mut Gui) -> Result<()> {
-    let selected = gui.context_mgr.selected_active();
-    let model = gui.model.lock().unwrap();
-    if let Some(rb) = model.sub_remote_branches.get(selected) {
-        let remote = rb.remote_name.clone();
-        let branch = rb.name.clone();
-        drop(model);
-
+    if let Some((remote, branch)) = selected_remote_branch(gui) {
         gui.popup = PopupState::Confirm {
             title: "Delete remote branch".to_string(),
             message: format!(
@@ -159,12 +136,4 @@ fn delete_remote_branch(gui: &mut Gui) -> Result<()> {
         };
     }
     Ok(())
-}
-
-fn matches_key(key: KeyEvent, binding: &str) -> bool {
-    if let Some(expected) = parse_key(binding) {
-        key.code == expected.code && key.modifiers == expected.modifiers
-    } else {
-        false
-    }
 }

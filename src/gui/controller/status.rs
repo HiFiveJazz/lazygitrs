@@ -1,8 +1,8 @@
+use super::matches_key;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
-use crate::config::keybindings::parse_key;
 use crate::gui::Gui;
 use crate::gui::popup::{MenuItem, PopupState};
 use crate::os::platform::Platform;
@@ -76,23 +76,7 @@ fn copy_menu(gui: &mut Gui) -> Result<()> {
                 Ok(())
             })),
         });
-
-        let pr_branch = branch_for_pr.clone();
-        let copy_pr_index = items.len();
-        items.push(MenuItem {
-            label: "Copy PR URL".to_string(),
-            description: "(requires existing PR)".to_string(),
-            key: Some("p".to_string()),
-            action: Some(Box::new(move |gui| {
-                use crate::gui::popup::MenuAsyncResult;
-                let branch = pr_branch.clone();
-                gui.start_menu_async(copy_pr_index, move |git| {
-                    let url = git.get_pr_url(&branch)?;
-                    Ok(MenuAsyncResult::CopyToClipboard(url))
-                });
-                Ok(())
-            })),
-        });
+        super::push_pr_url_item(&mut items, branch_for_pr, super::PrUrlAction::Copy);
     }
 
     gui.popup = PopupState::Menu {
@@ -133,23 +117,7 @@ fn open_menu(gui: &mut Gui) -> Result<()> {
                 Ok(())
             })),
         });
-
-        let pr_branch = branch_for_pr.clone();
-        let open_pr_index = items.len();
-        items.push(MenuItem {
-            label: "Open PR URL".to_string(),
-            description: "(requires existing PR)".to_string(),
-            key: Some("p".to_string()),
-            action: Some(Box::new(move |gui| {
-                use crate::gui::popup::MenuAsyncResult;
-                let branch = pr_branch.clone();
-                gui.start_menu_async(open_pr_index, move |git| {
-                    let url = git.get_pr_url(&branch)?;
-                    Ok(MenuAsyncResult::OpenUrl(url))
-                });
-                Ok(())
-            })),
-        });
+        super::push_pr_url_item(&mut items, branch_for_pr, super::PrUrlAction::Open);
     }
 
     gui.popup = PopupState::Menu {
@@ -159,12 +127,4 @@ fn open_menu(gui: &mut Gui) -> Result<()> {
         loading_index: None,
     };
     Ok(())
-}
-
-fn matches_key(key: KeyEvent, binding: &str) -> bool {
-    if let Some(expected) = parse_key(binding) {
-        key.code == expected.code && key.modifiers == expected.modifiers
-    } else {
-        false
-    }
 }

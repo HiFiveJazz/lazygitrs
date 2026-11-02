@@ -35,31 +35,24 @@ impl GitCommands {
         Ok(entries)
     }
 
-    pub fn stash_save(&self, message: &str) -> Result<()> {
-        if message.is_empty() {
-            self.git()
-                .args(&["stash", "push", "--quiet"])
-                .run_expecting_success()?;
-        } else {
-            self.git()
-                .args(&["stash", "push", "--quiet", "-m", message])
-                .run_expecting_success()?;
+    fn stash_push(&self, message: &str, mode: &[&str]) -> Result<()> {
+        let mut args = Vec::with_capacity(5);
+        args.extend_from_slice(&["stash", "push", "--quiet"]);
+        args.extend_from_slice(mode);
+        if !message.is_empty() {
+            args.extend_from_slice(&["-m", message]);
         }
+        self.git().args(&args).run_expecting_success()?;
         Ok(())
+    }
+
+    pub fn stash_save(&self, message: &str) -> Result<()> {
+        self.stash_push(message, &[])
     }
 
     /// Stash only staged changes.
     pub fn stash_staged(&self, message: &str) -> Result<()> {
-        if message.is_empty() {
-            self.git()
-                .args(&["stash", "push", "--quiet", "--staged"])
-                .run_expecting_success()?;
-        } else {
-            self.git()
-                .args(&["stash", "push", "--quiet", "--staged", "-m", message])
-                .run_expecting_success()?;
-        }
-        Ok(())
+        self.stash_push(message, &["--staged"])
     }
 
     /// Rename a stash entry.
@@ -122,80 +115,29 @@ impl GitCommands {
 
     /// Stash all changes including untracked files.
     pub fn stash_include_untracked(&self, message: &str) -> Result<()> {
-        if message.is_empty() {
-            self.git()
-                .args(&["stash", "push", "--quiet", "--include-untracked"])
-                .run_expecting_success()?;
-        } else {
-            self.git()
-                .args(&["stash", "push", "--quiet", "--include-untracked", "-m", message])
-                .run_expecting_success()?;
-        }
-        Ok(())
+        self.stash_push(message, &["--include-untracked"])
     }
 
     /// Stash all changes but keep the index (staged changes remain staged).
     pub fn stash_keep_index(&self, message: &str) -> Result<()> {
-        if message.is_empty() {
-            self.git()
-                .args(&["stash", "push", "--quiet", "--keep-index"])
-                .run_expecting_success()?;
-        } else {
-            self.git()
-                .args(&["stash", "push", "--quiet", "--keep-index", "-m", message])
-                .run_expecting_success()?;
-        }
-        Ok(())
+        self.stash_push(message, &["--keep-index"])
     }
 
-    /// Stash only unstaged changes (keep staged intact).
+    /// Stash only unstaged changes (equivalent to keeping the current index).
     pub fn stash_unstaged(&self, message: &str) -> Result<()> {
-        if message.is_empty() {
-            self.git()
-                .args(&["stash", "push", "--quiet", "--keep-index"])
-                .run_expecting_success()?;
-        } else {
-            self.git()
-                .args(&["stash", "push", "--quiet", "--keep-index", "-m", message])
-                .run_expecting_success()?;
-        }
-        Ok(())
+        self.stash_keep_index(message)
     }
+
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::git::GitCommands;
+    use crate::git::test_support::TempDir;
     use crate::pager::side_by_side::DiffViewState;
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(prefix: &str) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time before unix epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "lazygitrs-{prefix}-{unique}-{}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            Self { path }
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
 
     fn git(repo: &Path, args: &[&str]) {
         assert!(

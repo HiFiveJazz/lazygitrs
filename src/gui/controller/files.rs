@@ -1,5 +1,5 @@
+use super::matches_key;
 use crate::config::KeybindingConfig;
-use crate::config::keybindings::parse_key;
 use crate::gui::popup::{
     CommitInputFocus, CommitInputKind, CommitInputMode, MenuItem, PopupState,
     make_commit_body_textarea, make_commit_summary_textarea, make_textarea, reset_commit_input_view,
@@ -14,7 +14,7 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
     if super::diff_grep::is_diff_grep_key(key) {
         return super::diff_grep::open_diff_grep_picker(gui);
     }
-    if super::commits::matches_key(key, &keybindings.commits.open_log_menu) {
+    if matches_key(key, &keybindings.commits.open_log_menu) {
         return super::commits::show_files_filtering_menu(gui);
     }
 
@@ -671,12 +671,7 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
                     Ok(())
                 })),
             },
-            MenuItem {
-                label: "Cancel".to_string(),
-                description: String::new(),
-                key: None,
-                action: Some(Box::new(|_| Ok(()))),
-            },
+            MenuItem::cancel(),
         ],
         selected: 0,
         loading_index: None,
@@ -690,21 +685,7 @@ fn selected_dir_abs_path(gui: &Gui) -> Option<String> {
     if !gui.show_file_tree {
         return None;
     }
-    let selected = gui.context_mgr.selected_active();
-    let node = gui.file_tree_nodes.get(selected)?;
-    if !node.is_dir {
-        return None;
-    }
-    if node.path == "." || node.path.is_empty() {
-        return Some(gui.git.repo_path().to_string_lossy().to_string());
-    }
-    Some(
-        gui.git
-            .repo_path()
-            .join(&node.path)
-            .to_string_lossy()
-            .to_string(),
-    )
+    super::tree_dir_abs_path(gui, &gui.file_tree_nodes, gui.context_mgr.selected_active())
 }
 
 fn open_in_editor(gui: &mut Gui) -> Result<()> {
@@ -833,12 +814,7 @@ fn open_stash_options(gui: &mut Gui) -> Result<()> {
                     Ok(())
                 })),
             },
-            MenuItem {
-                label: "Cancel".to_string(),
-                description: String::new(),
-                key: None,
-                action: Some(Box::new(|_| Ok(()))),
-            },
+            MenuItem::cancel(),
         ],
         selected: 0,
         loading_index: None,
@@ -1079,12 +1055,7 @@ fn ignore_file(gui: &mut Gui) -> Result<()> {
                         Ok(())
                     })),
                 },
-                MenuItem {
-                    label: "Cancel".to_string(),
-                    description: String::new(),
-                    key: None,
-                    action: Some(Box::new(|_| Ok(()))),
-                },
+                MenuItem::cancel(),
             ],
             selected: 0,
             loading_index: None,
@@ -1140,13 +1111,6 @@ fn commit_with_editor(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
-fn matches_key(key: KeyEvent, binding: &str) -> bool {
-    if let Some(expected) = parse_key(binding) {
-        key.code == expected.code && key.modifiers == expected.modifiers
-    } else {
-        false
-    }
-}
 
 #[cfg(test)]
 mod tests {

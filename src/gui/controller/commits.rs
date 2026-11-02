@@ -1,10 +1,10 @@
+use super::matches_key;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::KeybindingConfig;
-use crate::config::keybindings::parse_key;
 use crate::git::rebase::RebaseAction;
 use crate::gui::popup::{
     BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, CommitInputMode, EmailPatchFocus,
@@ -1628,12 +1628,7 @@ pub fn copy_commit_to_clipboard_menu_for(
                         None
                     },
                 },
-                MenuItem {
-                    label: "Cancel".to_string(),
-                    description: String::new(),
-                    key: None,
-                    action: Some(Box::new(|_| Ok(()))),
-                },
+                MenuItem::cancel(),
             ],
             selected: 0,
             loading_index: None,
@@ -2008,41 +2003,21 @@ fn show_branch_filter_menu(gui: &mut Gui) -> Result<()> {
 
 fn enter_commit_files(gui: &mut Gui) -> Result<()> {
     let selected = gui.context_mgr.selected_active();
-    let model = gui.model.lock().unwrap();
-    if let Some(commit) = model.commits.get(selected) {
-        let hash = commit.hash.clone();
-        let message = commit.name.clone();
-        drop(model);
-
-        // Load commit files
-        let commit_files = gui.git.commit_files(&hash)?;
-        {
-            let mut model = gui.model.lock().unwrap();
-            model.commit_files = commit_files;
-        }
-        gui.commit_files_hash = hash;
-        gui.commit_files_message = message;
-
-        // Build commit file tree
-        if gui.show_commit_file_tree {
-            let model = gui.model.lock().unwrap();
-            gui.commit_file_tree_nodes = crate::model::file_tree::build_commit_file_tree(
-                &model.commit_files,
-                &gui.commit_files_collapsed_dirs,
-            );
-            gui.context_mgr.commit_files_list_len_override = Some(gui.commit_file_tree_nodes.len());
-        } else {
-            gui.commit_file_tree_nodes.clear();
-            let model = gui.model.lock().unwrap();
-            gui.context_mgr.commit_files_list_len_override = None;
-            let _ = model.commit_files.len(); // just ensure it compiles
-        }
-
-        // Switch to CommitFiles context
-        gui.context_mgr
-            .set_active(crate::gui::context::ContextId::CommitFiles);
-        gui.context_mgr.set_selection(0);
-        gui.needs_diff_refresh = true;
+    let commit = gui
+        .model
+        .lock()
+        .unwrap()
+        .commits
+        .get(selected)
+        .map(|commit| (commit.hash.clone(), commit.name.clone()));
+    if let Some((hash, message)) = commit {
+        super::enter_commit_files_view(
+            gui,
+            hash,
+            message,
+            crate::gui::context::ContextId::CommitFiles,
+            true,
+        )?;
     }
     Ok(())
 }
@@ -2073,13 +2048,6 @@ fn enter_interactive_rebase(gui: &mut Gui) -> Result<()> {
     enter_interactive_rebase_for_base(gui, base_hash, branch_name)
 }
 
-pub(super) fn matches_key(key: KeyEvent, binding: &str) -> bool {
-    if let Some(expected) = parse_key(binding) {
-        key.code == expected.code && key.modifiers == expected.modifiers
-    } else {
-        false
-    }
-}
 
 #[cfg(test)]
 mod tests {

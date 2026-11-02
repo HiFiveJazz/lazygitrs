@@ -2228,6 +2228,17 @@ pub struct MenuItem {
     pub action: Option<MenuAction>,
 }
 
+impl MenuItem {
+    pub fn cancel() -> Self {
+        Self {
+            label: "Cancel".to_string(),
+            description: String::new(),
+            key: None,
+            action: Some(Box::new(|_| Ok(()))),
+        }
+    }
+}
+
 pub struct CommandSection {
     pub title: String,
     pub entries: Vec<CommandEntry>,

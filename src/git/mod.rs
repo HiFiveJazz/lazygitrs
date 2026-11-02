@@ -16,6 +16,8 @@ pub mod status;
 pub mod submodule;
 pub mod tag;
 pub mod worktree;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1232,38 +1234,8 @@ impl GitCommands {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use super::*;
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(prefix: &str) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time before unix epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "lazygitrs-{prefix}-{unique}-{}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
+    use super::test_support::TempDir;
 
     fn run_test_git(path: &Path, args: &[&str]) -> String {
         let output = Command::new("git")

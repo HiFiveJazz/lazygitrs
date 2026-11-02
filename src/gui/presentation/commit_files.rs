@@ -21,50 +21,59 @@ pub fn render_commit_file_list<'a>(
     model
         .commit_files
         .iter()
-        .map(|file| {
-            let (status_style, status_icon) = commit_file_status_display(file, theme);
-            let dim_style = Style::default().fg(theme.text_dimmed);
-            let name_style = Style::default().fg(theme.text_strong);
-
-            if file.rename_paths().is_some() {
-                let spans = vec![
-                    Span::styled(format!(" {} ", status_icon), status_style),
-                    Span::styled(file.name.clone(), name_style),
-                ];
-                return ListItem::new(Line::from(append_file_stats(
-                    spans,
-                    file.hunk_count,
-                    file.additions,
-                    file.deletions,
-                    theme,
-                    width,
-                )));
-            }
-
-            let path = file.name.as_str();
-            let (dir, name) = match path.rfind('/') {
-                Some(idx) => (&path[..=idx], &path[idx + 1..]),
-                None => ("", path),
-            };
-
-            let mut spans = vec![
-                Span::styled(format!(" {} ", status_icon), status_style),
-                Span::styled(name.to_string(), name_style),
-            ];
-            if !dir.is_empty() {
-                spans.push(Span::styled(format!(" {}", dir), dim_style));
-            }
-
-            ListItem::new(Line::from(append_file_stats(
-                spans,
-                file.hunk_count,
-                file.additions,
-                file.deletions,
-                theme,
-                width,
-            )))
-        })
+        .map(|file| render_commit_file_item(file, theme, width))
         .collect()
+}
+
+/// Render one flat commit-file row. Shared by the normal commit-files panel
+/// and diff-mode's comparison file list so status/path/stats formatting stays
+/// identical.
+pub(super) fn render_commit_file_item<'a>(
+    file: &CommitFile,
+    theme: &Theme,
+    width: usize,
+) -> ListItem<'a> {
+    let (status_style, status_icon) = commit_file_status_display(file, theme);
+    let dim_style = Style::default().fg(theme.text_dimmed);
+    let name_style = Style::default().fg(theme.text_strong);
+
+    if file.rename_paths().is_some() {
+        let spans = vec![
+            Span::styled(format!(" {} ", status_icon), status_style),
+            Span::styled(file.name.clone(), name_style),
+        ];
+        return ListItem::new(Line::from(append_file_stats(
+            spans,
+            file.hunk_count,
+            file.additions,
+            file.deletions,
+            theme,
+            width,
+        )));
+    }
+
+    let path = file.name.as_str();
+    let (dir, name) = match path.rfind('/') {
+        Some(idx) => (&path[..=idx], &path[idx + 1..]),
+        None => ("", path),
+    };
+
+    let mut spans = vec![
+        Span::styled(format!(" {} ", status_icon), status_style),
+        Span::styled(name.to_string(), name_style),
+    ];
+    if !dir.is_empty() {
+        spans.push(Span::styled(format!(" {}", dir), dim_style));
+    }
+
+    ListItem::new(Line::from(append_file_stats(
+        spans,
+        file.hunk_count,
+        file.additions,
+        file.deletions,
+        theme,
+        width,
+    )))
 }
 
 /// Render commit file tree nodes into list items.

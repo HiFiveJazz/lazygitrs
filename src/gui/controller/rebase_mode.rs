@@ -345,20 +345,29 @@ fn continue_rebase(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
-fn skip_rebase(gui: &mut Gui) -> Result<()> {
+fn confirm_rebase_control<F>(
+    gui: &mut Gui,
+    title: &'static str,
+    message: &'static str,
+    error_title: &'static str,
+    action: F,
+) -> Result<()>
+where
+    F: FnOnce(&crate::git::GitCommands) -> Result<()> + 'static,
+{
     gui.popup = PopupState::Confirm {
-        title: "Skip commit".to_string(),
-        message: "Skip the current commit and continue rebasing?".to_string(),
-        on_confirm: Box::new(|gui| {
-            match gui.git.rebase_skip() {
+        title: title.to_string(),
+        message: message.to_string(),
+        on_confirm: Box::new(move |gui| {
+            match action(gui.git.as_ref()) {
                 Ok(()) => {
                     gui.rebase_mode.exit();
                     gui.request_history_refresh();
                 }
-                Err(e) => {
+                Err(error) => {
                     gui.popup = PopupState::Message {
-                        title: "Skip failed".to_string(),
-                        message: format!("{}", e),
+                        title: error_title.to_string(),
+                        message: error.to_string(),
                         kind: MessageKind::Error,
                     };
                 }
@@ -369,28 +378,24 @@ fn skip_rebase(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
+fn skip_rebase(gui: &mut Gui) -> Result<()> {
+    confirm_rebase_control(
+        gui,
+        "Skip commit",
+        "Skip the current commit and continue rebasing?",
+        "Skip failed",
+        |git| git.rebase_skip(),
+    )
+}
+
 fn abort_rebase(gui: &mut Gui) -> Result<()> {
-    gui.popup = PopupState::Confirm {
-        title: "Abort rebase".to_string(),
-        message: "Abort the current rebase and return to the original state?".to_string(),
-        on_confirm: Box::new(|gui| {
-            match gui.git.abort_rebase() {
-                Ok(()) => {
-                    gui.rebase_mode.exit();
-                    gui.request_history_refresh();
-                }
-                Err(e) => {
-                    gui.popup = PopupState::Message {
-                        title: "Abort failed".to_string(),
-                        message: format!("{}", e),
-                        kind: MessageKind::Error,
-                    };
-                }
-            }
-            Ok(())
-        }),
-    };
-    Ok(())
+    confirm_rebase_control(
+        gui,
+        "Abort rebase",
+        "Abort the current rebase and return to the original state?",
+        "Abort failed",
+        |git| git.abort_rebase(),
+    )
 }
 
 // ── Execute (Planning phase) ────────────────────────────────────────────

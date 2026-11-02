@@ -1,8 +1,8 @@
+use super::matches_key;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
-use crate::config::keybindings::parse_key;
 use crate::gui::Gui;
 use crate::gui::context::ContextId;
 use crate::gui::popup::{MenuItem, PopupState};
@@ -13,7 +13,7 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
     if super::diff_grep::is_diff_grep_key(key) {
         return super::diff_grep::open_diff_grep_picker(gui);
     }
-    if super::commits::matches_key(key, &keybindings.commits.open_log_menu) {
+    if matches_key(key, &keybindings.commits.open_log_menu) {
         let selected = gui.context_mgr.selected_active();
         let selected_path = if gui.show_commit_file_tree {
             gui.commit_file_tree_nodes
@@ -131,20 +131,10 @@ fn selected_commit_dir_abs_path(gui: &Gui) -> Option<String> {
     if !gui.show_commit_file_tree {
         return None;
     }
-    let selected = gui.context_mgr.selected_active();
-    let node = gui.commit_file_tree_nodes.get(selected)?;
-    if !node.is_dir {
-        return None;
-    }
-    if node.path == "." || node.path.is_empty() {
-        return Some(gui.git.repo_path().to_string_lossy().to_string());
-    }
-    Some(
-        gui.git
-            .repo_path()
-            .join(&node.path)
-            .to_string_lossy()
-            .to_string(),
+    super::tree_dir_abs_path(
+        gui,
+        &gui.commit_file_tree_nodes,
+        gui.context_mgr.selected_active(),
     )
 }
 
@@ -290,12 +280,7 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
                     Ok(())
                 })),
             },
-            MenuItem {
-                label: "Cancel".to_string(),
-                description: String::new(),
-                key: None,
-                action: Some(Box::new(|_| Ok(()))),
-            },
+            MenuItem::cancel(),
         ],
         selected: 0,
         loading_index: None,
@@ -314,13 +299,5 @@ pub fn update_commit_file_tree_state(gui: &mut Gui) {
     } else {
         gui.commit_file_tree_nodes.clear();
         gui.context_mgr.commit_files_list_len_override = None;
-    }
-}
-
-fn matches_key(key: KeyEvent, binding: &str) -> bool {
-    if let Some(expected) = parse_key(binding) {
-        key.code == expected.code && key.modifiers == expected.modifiers
-    } else {
-        false
     }
 }

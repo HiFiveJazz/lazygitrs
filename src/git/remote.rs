@@ -1059,36 +1059,11 @@ fn github_pr_head_selectors(branch: &str, repos: &[GithubRemoteRepo]) -> Vec<Str
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(prefix: &str) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time before unix epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "lazygitrs-{prefix}-{unique}-{}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            Self { path }
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
+    use crate::git::test_support::TempDir;
 
     fn git(repo: &Path, args: &[&str]) -> String {
         let output = Command::new("git")

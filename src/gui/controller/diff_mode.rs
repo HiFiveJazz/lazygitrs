@@ -1,10 +1,12 @@
+use super::matches_key;
+#[cfg(test)]
+use crate::config::keybindings::parse_key;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::config::keybindings::parse_key;
 use crate::gui::modes::diff_mode::{CompareDiffSource, DiffModeFocus, DiffModeSelector};
 use crate::gui::popup::{CommandEntry, CommandSection, MenuItem, PopupState};
 use crate::gui::{DiffPayload, Gui, textarea_input};
@@ -604,12 +606,7 @@ fn show_commit_file_copy_menu(gui: &mut Gui) -> Result<()> {
                     Ok(())
                 })),
             },
-            MenuItem {
-                label: "Cancel".to_string(),
-                description: String::new(),
-                key: None,
-                action: Some(Box::new(|_| Ok(()))),
-            },
+            MenuItem::cancel(),
         ],
         selected: 0,
         loading_index: None,
@@ -1199,13 +1196,6 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
     };
 }
 
-fn matches_key(key: KeyEvent, binding: &str) -> bool {
-    if let Some(expected) = parse_key(binding) {
-        key.code == expected.code && key.modifiers == expected.modifiers
-    } else {
-        false
-    }
-}
 
 #[cfg(test)]
 mod tests {
