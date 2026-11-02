@@ -388,7 +388,6 @@ pub struct DiffViewState {
     pub filename: String,
     pub old_content: String,
     pub new_content: String,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub tab_width: usize,
     /// Per-file-section highlighters for multi-file diffs.
     sections: Vec<FileSection>,

@@ -16827,16 +16827,18 @@ mod terminal_mouse_tests {
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT))
             .unwrap();
         assert!(matches!(&gui.popup, PopupState::CommitInput {
-            mode, body_state, visual_line_anchor: Some(anchor), ..
+            mode, body_state, body_textarea, visual_line_anchor: Some(_), ..
         } if *mode == popup::CommitInputMode::VisualLine
-            && body_state.selected_logical_lines_text(*anchor) == "zero\n"));
+            && body_textarea.selection_range().is_some_and(|(start, end)|
+                body_state.selected_visual_text(start, end, wrap_width) == "zero")));
 
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .unwrap();
         assert!(matches!(&gui.popup, PopupState::CommitInput {
-            mode, body_state, visual_line_anchor: Some(anchor), ..
+            mode, body_state, body_textarea, visual_line_anchor: Some(_), ..
         } if *mode == popup::CommitInputMode::VisualLine
-            && body_state.selected_logical_lines_text(*anchor) == "zero\none\n"));
+            && body_textarea.selection_range().is_some_and(|(start, end)|
+                body_state.selected_visual_text(start, end, wrap_width) == "zero\none")));
     }
 
     #[test]
@@ -16909,18 +16911,20 @@ mod terminal_mouse_tests {
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT))
             .unwrap();
         assert!(matches!(&gui.popup, PopupState::CommitInput {
-            mode, body_state, visual_line_anchor: Some(anchor), ..
+            mode, body_state, body_textarea, visual_line_anchor: Some(_), ..
         } if *mode == popup::CommitInputMode::VisualLine
-            && body_state.selected_logical_lines_text(*anchor) == "one\ntwo\nthree"));
+            && body_textarea.selection_range().is_some_and(|(start, end)|
+                body_state.selected_visual_text(start, end, wrap_width) == "one\ntwo\nthree")));
 
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
             .unwrap();
         gui.handle_popup_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
             .unwrap();
         assert!(matches!(&gui.popup, PopupState::CommitInput {
-            mode, body_state, visual_line_anchor: Some(anchor), ..
+            mode, body_state, body_textarea, visual_line_anchor: Some(_), ..
         } if *mode == popup::CommitInputMode::VisualLine
-            && body_state.selected_logical_lines_text(*anchor) == "zero\none\n"));
+            && body_textarea.selection_range().is_some_and(|(start, end)|
+                body_state.selected_visual_text(start, end, wrap_width) == "zero\none")));
     }
 
     #[test]

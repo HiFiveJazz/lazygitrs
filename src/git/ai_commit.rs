@@ -10,17 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 
-/// Generate a commit message by piping `git diff --cached` via stdin to the configured command.
-#[allow(dead_code)]
-pub fn generate_commit_message(repo_path: &Path, generate_command: &str) -> Result<String> {
-    let cancel = Arc::new(AtomicBool::new(false));
-    match generate_commit_message_cancellable(repo_path, generate_command, cancel)? {
-        Some(message) => Ok(message),
-        None => bail!("AI commit generation cancelled"),
-    }
-}
-
-/// Generate a commit message like [`generate_commit_message`], but return
+/// Generate a commit message, returning
 /// `Ok(None)` when `cancel` is set while the external generator is running.
 pub fn generate_commit_message_cancellable(
     repo_path: &Path,

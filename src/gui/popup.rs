@@ -918,24 +918,6 @@ impl BodySoftWrap {
         self.cursor = start;
     }
 
-    pub fn move_home(&mut self) {
-        let chars: Vec<char> = self.raw.chars().collect();
-        let mut i = self.cursor;
-        while i > 0 && chars[i - 1] != '\n' {
-            i -= 1;
-        }
-        self.cursor = i;
-    }
-
-    pub fn move_end(&mut self) {
-        let chars: Vec<char> = self.raw.chars().collect();
-        let mut i = self.cursor;
-        while i < chars.len() && chars[i] != '\n' {
-            i += 1;
-        }
-        self.cursor = i;
-    }
-
     pub fn move_visual_up(&mut self, wrap_width: usize) {
         let layout = WrapLayout::build(&self.raw, wrap_width);
         let (row, col) = layout.cursor_to_visual(self.cursor);
@@ -966,11 +948,6 @@ impl BodySoftWrap {
     pub fn visual_cursor(&self, wrap_width: usize) -> (usize, usize) {
         let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
         layout.cursor_to_visual(self.cursor)
-    }
-
-    pub fn set_cursor_from_visual(&mut self, row: usize, col: usize, wrap_width: usize) {
-        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
-        self.cursor = layout.visual_to_cursor(row, col);
     }
 
     /// Select the text inside the nearest surrounding delimiter pair, matching
@@ -1012,10 +989,6 @@ impl BodySoftWrap {
         }
         let end_with_newline = if end < chars.len() { end + 1 } else { end };
         (start, end, end_with_newline)
-    }
-
-    pub fn logical_line_start(&self) -> usize {
-        self.logical_line_bounds_at(self.cursor).0
     }
 
     /// Return the raw start cursor for the visual (soft-wrapped) row that
@@ -1090,135 +1063,6 @@ impl BodySoftWrap {
     pub fn move_to_last_visual_line_start(&mut self, wrap_width: usize) {
         let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
         self.cursor = layout.lines.last().map_or(0, |line| line.raw_start);
-    }
-
-    /// Move by one *logical* line for Vim linewise Visual mode. Soft-wrapped
-    /// display rows are deliberately skipped so `Vj` always selects the next
-    /// commit-message line, matching Vim/Neovim.
-    pub fn move_logical_line(&mut self, direction: isize) -> bool {
-        let chars: Vec<char> = self.raw.chars().collect();
-        let (start, end, _) = self.logical_line_bounds_at(self.cursor);
-        let col = self.cursor.saturating_sub(start);
-
-        let target_cursor = if direction > 0 {
-            if end >= chars.len() {
-                return false;
-            }
-            end + 1
-        } else {
-            if start == 0 {
-                return false;
-            }
-            start - 1
-        };
-
-        let (target_start, target_end, _) = self.logical_line_bounds_at(target_cursor);
-        self.cursor = if target_end > target_start {
-            target_start + col.min(target_end - target_start - 1)
-        } else {
-            target_start
-        };
-        true
-    }
-
-    /// Rebuild a Vim linewise Visual selection from its original logical-line
-    /// anchor through the line containing the current body cursor. Keeping the
-    /// anchor explicitly avoids the old `V` behavior where the selection cursor
-    /// sat at the next line's start and `j` skipped a line.
-    pub fn select_logical_line_range(
-        &mut self,
-        textarea: &mut TextArea<'static>,
-        wrap_width: usize,
-        anchor_start: usize,
-    ) {
-        let (anchor_start, anchor_end, _) = self.logical_line_bounds_at(anchor_start);
-        let (target_start, target_end, _) = self.logical_line_bounds_at(self.cursor);
-        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
-
-        textarea.cancel_selection();
-        if target_start >= anchor_start {
-            let anchor_visual = layout.cursor_to_visual(anchor_start);
-            let target_visual = layout.cursor_to_visual(target_end);
-            textarea.move_cursor(CursorMove::Jump(
-                anchor_visual.0 as u16,
-                anchor_visual.1 as u16,
-            ));
-            textarea.start_selection();
-            textarea.move_cursor(CursorMove::Jump(
-                target_visual.0 as u16,
-                target_visual.1 as u16,
-            ));
-            self.cursor = if target_end > target_start {
-                target_end - 1
-            } else {
-                target_start
-            };
-        } else {
-            let anchor_visual = layout.cursor_to_visual(anchor_end);
-            let target_visual = layout.cursor_to_visual(target_start);
-            textarea.move_cursor(CursorMove::Jump(
-                anchor_visual.0 as u16,
-                anchor_visual.1 as u16,
-            ));
-            textarea.start_selection();
-            textarea.move_cursor(CursorMove::Jump(
-                target_visual.0 as u16,
-                target_visual.1 as u16,
-            ));
-            self.cursor = target_start;
-        }
-    }
-
-    /// Select the entire current logical line for Vim `V` without placing the
-    /// active body cursor on the following line. Returns the raw line-start
-    /// anchor used by subsequent `j`/`k` linewise motions.
-    pub fn select_current_logical_line(
-        &mut self,
-        textarea: &mut TextArea<'static>,
-        wrap_width: usize,
-    ) -> usize {
-        let anchor = self.logical_line_start();
-        self.select_logical_line_range(textarea, wrap_width, anchor);
-        anchor
-    }
-
-    pub fn selected_logical_lines_text(&self, anchor_start: usize) -> String {
-        let (anchor_start, _, anchor_end_with_newline) =
-            self.logical_line_bounds_at(anchor_start);
-        let (target_start, _, target_end_with_newline) =
-            self.logical_line_bounds_at(self.cursor);
-        let start = anchor_start.min(target_start);
-        let end = anchor_end_with_newline.max(target_end_with_newline);
-        self.raw
-            .chars()
-            .skip(start)
-            .take(end.saturating_sub(start))
-            .collect()
-    }
-
-    pub fn delete_logical_line_selection(&mut self, anchor_start: usize) -> bool {
-        if self.raw.is_empty() {
-            return false;
-        }
-        let (anchor_start, _, anchor_end_with_newline) =
-            self.logical_line_bounds_at(anchor_start);
-        let (target_start, _, target_end_with_newline) =
-            self.logical_line_bounds_at(self.cursor);
-        let mut start = anchor_start.min(target_start);
-        let end = anchor_end_with_newline.max(target_end_with_newline);
-        let char_count = self.char_count();
-
-        // When deleting through the final line, consume the preceding newline
-        // rather than leaving a synthetic blank line at EOF.
-        if end == char_count && start > 0 {
-            start -= 1;
-        }
-        if start >= end {
-            return false;
-        }
-        self.replace_char_range(start, end, "");
-        self.cursor = start.min(self.char_count());
-        true
     }
 
     /// Return the raw text covered by a selection in the soft-wrapped display.
@@ -2015,7 +1859,6 @@ pub enum PopupState {
         textarea: TextArea<'static>,
         on_confirm: InputAction,
         /// When true, this is a commit message editor — enables AI generation via <c-g>.
-        #[allow(dead_code)]
         is_commit: bool,
         /// When true, focus is on the Confirm button instead of the textarea.
         confirm_focused: bool,
@@ -2134,7 +1977,6 @@ pub enum PopupState {
         smooth_cursor_started_at: Option<Instant>,
     },
     /// Shown while a background operation (like AI commit generation) is running.
-    #[allow(dead_code)]
     Loading {
         title: String,
         message: String,
@@ -2556,28 +2398,6 @@ mod commit_body_wrap_tests {
             state.selected_visual_text(selection.0, selection.1, 6),
             "beta gamma"
         );
-    }
-
-    #[test]
-    fn visual_line_keeps_cursor_on_line_and_extends_logical_lines() {
-        let mut state = BodySoftWrap::from_text("one\ntwo\nthree");
-        state.set_cursor_index(5); // middle of `two`
-        let mut ta = super::make_commit_body_textarea();
-        state.render_into(&mut ta, 80);
-
-        let anchor = state.select_current_logical_line(&mut ta, 80);
-        assert_eq!(anchor, 4);
-        assert_eq!(state.cursor_index(), 6); // last character of `two`, not line 3
-
-        assert!(state.move_logical_line(1));
-        state.select_logical_line_range(&mut ta, 80, anchor);
-        assert_eq!(state.selected_logical_lines_text(anchor), "two\nthree");
-
-        state.set_cursor_index(5);
-        state.select_logical_line_range(&mut ta, 80, anchor);
-        assert!(state.move_logical_line(-1));
-        state.select_logical_line_range(&mut ta, 80, anchor);
-        assert_eq!(state.selected_logical_lines_text(anchor), "one\ntwo\n");
     }
 
     #[test]
