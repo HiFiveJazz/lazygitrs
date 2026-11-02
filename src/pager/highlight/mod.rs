@@ -2,6 +2,7 @@ mod config;
 mod queries;
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
 
 use ratatui::prelude::*;
@@ -51,7 +52,8 @@ pub fn warm_configs() {
 /// Handles multi-line constructs like JSDoc comments properly.
 #[derive(Default)]
 pub struct FileHighlighter {
-    line_highlights: HashMap<usize, Vec<(String, Option<usize>)>>,
+    content: String,
+    line_highlights: HashMap<usize, Vec<(Range<usize>, Option<usize>)>>,
 }
 
 impl FileHighlighter {
@@ -60,79 +62,95 @@ impl FileHighlighter {
             return Self::default();
         };
 
-        let mut highlighter = Highlighter::new();
-        let highlights =
-            highlighter.highlight(&lang_config.config, content.as_bytes(), None, None, |_| {
-                None
-            });
+        // Keep one backing allocation for all highlighted source text. The
+        // previous representation copied every highlighted fragment into its
+        // own String, creating huge allocation counts for large diffs and then
+        // cloning those Strings again during every render. Store byte ranges
+        // instead and let rendered Spans borrow directly from this buffer.
+        let content = content.to_string();
 
-        let Ok(highlights) = highlights else {
-            return Self::default();
-        };
+        // Tree-sitter's highlight iterator borrows `content`. Keep the entire
+        // highlighting pass in its own scope so both the iterator and
+        // `Highlighter` are dropped before we move `content` into `Self`.
+        let line_highlights = {
+            let mut highlighter = Highlighter::new();
+            let highlights =
+                highlighter.highlight(&lang_config.config, content.as_bytes(), None, None, |_| {
+                    None
+                });
 
-        // Build byte offset -> line number map (1-based)
-        let mut line_starts: Vec<usize> = vec![0];
-        for (i, c) in content.char_indices() {
-            if c == '\n' {
-                line_starts.push(i + 1);
+            let Ok(highlights) = highlights else {
+                return Self::default();
+            };
+
+            // Build byte offset -> line number map (1-based)
+            let mut line_starts: Vec<usize> = vec![0];
+            for (i, c) in content.char_indices() {
+                if c == '\n' {
+                    line_starts.push(i + 1);
+                }
             }
-        }
 
-        let byte_to_line = |byte_offset: usize| -> usize {
-            match line_starts.binary_search(&byte_offset) {
-                Ok(line) => line + 1,
-                Err(line) => line,
-            }
-        };
+            let byte_to_line = |byte_offset: usize| -> usize {
+                match line_starts.binary_search(&byte_offset) {
+                    Ok(line) => line + 1,
+                    Err(line) => line,
+                }
+            };
 
-        let mut line_highlights: HashMap<usize, Vec<(String, Option<usize>)>> = HashMap::new();
-        let mut current_highlight: Option<usize> = None;
+            let mut line_highlights: HashMap<usize, Vec<(Range<usize>, Option<usize>)>> =
+                HashMap::new();
+            let mut current_highlight: Option<usize> = None;
 
-        for event in highlights.flatten() {
-            match event {
-                HighlightEvent::Source { start, end } => {
-                    let text = &content[start..end];
-                    let start_line = byte_to_line(start);
-                    let mut current_line = start_line;
-                    let mut line_start = 0;
+            for event in highlights.flatten() {
+                match event {
+                    HighlightEvent::Source { start, end } => {
+                        let text = &content[start..end];
+                        let start_line = byte_to_line(start);
+                        let mut current_line = start_line;
+                        let mut line_start = 0;
 
-                    for (i, c) in text.char_indices() {
-                        if c == '\n' {
-                            let line_text = &text[line_start..i];
-                            if !line_text.is_empty() {
-                                line_highlights
-                                    .entry(current_line)
-                                    .or_default()
-                                    .push((line_text.to_string(), current_highlight));
+                        for (i, c) in text.char_indices() {
+                            if c == '\n' {
+                                if line_start < i {
+                                    line_highlights
+                                        .entry(current_line)
+                                        .or_default()
+                                        .push((start + line_start..start + i, current_highlight));
+                                }
+                                current_line += 1;
+                                line_start = i + 1;
                             }
-                            current_line += 1;
-                            line_start = i + 1;
+                        }
+
+                        if line_start < text.len() {
+                            line_highlights
+                                .entry(current_line)
+                                .or_default()
+                                .push((start + line_start..end, current_highlight));
                         }
                     }
-
-                    if line_start < text.len() {
-                        let remaining = &text[line_start..];
-                        line_highlights
-                            .entry(current_line)
-                            .or_default()
-                            .push((remaining.to_string(), current_highlight));
+                    HighlightEvent::HighlightStart(h) => {
+                        current_highlight = Some(h.0);
+                    }
+                    HighlightEvent::HighlightEnd => {
+                        current_highlight = None;
                     }
                 }
-                HighlightEvent::HighlightStart(h) => {
-                    current_highlight = Some(h.0);
-                }
-                HighlightEvent::HighlightEnd => {
-                    current_highlight = None;
-                }
             }
-        }
 
-        Self { line_highlights }
+            line_highlights
+        };
+
+        Self {
+            content,
+            line_highlights,
+        }
     }
 
     /// Get highlighted spans for a specific line (1-based line number).
     pub fn get_line_spans<'a>(
-        &self,
+        &'a self,
         line_number: usize,
         bg: Option<Color>,
         theme: &Theme,
@@ -145,12 +163,12 @@ impl FileHighlighter {
             .map(|spans| {
                 spans
                     .iter()
-                    .filter(|(text, _)| *text != "\n")
-                    .map(|(text, highlight_idx)| {
+                    .filter_map(|(range, highlight_idx)| {
+                        let text = self.content.get(range.clone())?;
                         let fg = highlight_idx
                             .map(|i| highlight_color(i, theme))
                             .unwrap_or(default_fg);
-                        Span::styled(text.clone(), Style::default().fg(fg).bg(bg_color))
+                        Some(Span::styled(text, Style::default().fg(fg).bg(bg_color)))
                     })
                     .collect()
             })

@@ -964,7 +964,15 @@ impl DiffViewState {
             // main cost for large commits / directory hovers.
             let file_count = file_diffs.len();
             let new_filename = format!("{} ({} files)", filename, file_count);
-            let mut lines = Vec::with_capacity(diff_output.len() / 32 + file_count);
+            // DiffLine is intentionally rich (two optional owned lines,
+            // inline segments, file metadata, etc.) and is much larger than a
+            // typical source line. Estimating capacity from bytes/32 therefore
+            // massively over-allocates for diffs with ordinary/long source
+            // lines: a ~60 MiB diff could reserve ~300 MiB for DiffLine slots
+            // before parsing a single line. Count input lines instead; each
+            // input line can produce at most one DiffLine, plus one synthetic
+            // file-header row per section.
+            let mut lines = Vec::with_capacity(diff_line_capacity(diff_output, file_count));
             let mut hunk_line_offsets = Vec::new();
             let mut section_meta: Vec<(&str, &str)> = Vec::with_capacity(file_count);
 
@@ -1146,7 +1154,7 @@ impl DiffViewState {
             self.filename = new_filename;
             self.old_content = String::new();
             self.new_content = String::new();
-            self.lines = Vec::with_capacity(diff_output.len() / 32 + file_count);
+            self.lines = Vec::with_capacity(diff_line_capacity(diff_output, file_count));
             if !same_file {
                 self.scroll_offset = 0;
                 self.horizontal_scroll = 0;
@@ -3521,11 +3529,11 @@ fn gutter_fg_colors(change_type: ChangeType, theme: &Theme) -> (Color, Color) {
 /// Build styled spans for one side of a diff line.
 #[allow(clippy::too_many_arguments)]
 fn build_content_spans<'a>(
-    line_data: Option<(usize, &str)>,
-    segments: &Option<Vec<InlineSegment>>,
+    line_data: Option<(usize, &'a str)>,
+    segments: &'a Option<Vec<InlineSegment>>,
     change_type: ChangeType,
     is_old_side: bool,
-    highlighter: &FileHighlighter,
+    highlighter: &'a FileHighlighter,
     bg: Color,
     theme: &Theme,
     max_width: usize,
@@ -3566,15 +3574,12 @@ fn build_content_spans<'a>(
         text
     };
 
-    vec![Span::styled(
-        display.to_string(),
-        Style::default().fg(fg).bg(bg),
-    )]
+    vec![Span::styled(display, Style::default().fg(fg).bg(bg))]
 }
 
 /// Build spans with word-level diff emphasis.
 fn build_word_diff_spans<'a>(
-    segments: &[InlineSegment],
+    segments: &'a [InlineSegment],
     is_old_side: bool,
     bg: Color,
     theme: &Theme,
@@ -3591,7 +3596,7 @@ fn build_word_diff_spans<'a>(
                     theme.diff_add_word
                 };
                 Span::styled(
-                    seg.text.clone(),
+                    seg.text.as_str(),
                     Style::default()
                         .bg(dim_unstaged_bg(emphasis_bg, staged, theme))
                         .fg(theme.text_strong)
@@ -3599,7 +3604,7 @@ fn build_word_diff_spans<'a>(
                 )
             } else {
                 Span::styled(
-                    seg.text.clone(),
+                    seg.text.as_str(),
                     Style::default().bg(bg).fg(theme.syntax_default),
                 )
             }
@@ -3838,6 +3843,22 @@ pub(crate) fn parse_multi_file_diff(diff: &str) -> Vec<(String, &str)> {
     sections
 }
 
+/// Upper bound for the number of DiffLines a unified diff can produce.
+///
+/// DiffLine is ~an order of magnitude larger than a source character, so a
+/// byte-based heuristic such as `diff.len() / 32` can reserve hundreds of MiB
+/// for a large commit. Each raw line produces at most one displayed line; add
+/// one synthetic file-header row per section and reserve from that instead.
+fn diff_line_capacity(diff: &str, file_count: usize) -> usize {
+    let input_lines = diff
+        .as_bytes()
+        .iter()
+        .filter(|&&byte| byte == b'\n')
+        .count()
+        .saturating_add(usize::from(!diff.is_empty()));
+    input_lines.saturating_add(file_count)
+}
+
 /// Build tree-sitter highlighters for many file sections in parallel.
 fn build_file_sections_parallel(section_meta: &[(&str, &str)]) -> Vec<FileSection> {
     let n = section_meta.len();
@@ -3859,40 +3880,40 @@ fn build_file_sections_parallel(section_meta: &[(&str, &str)]) -> Vec<FileSectio
         .min(n)
         .max(1);
     let chunk = (n + workers - 1) / workers;
-    let mut handles = Vec::with_capacity(workers);
-
-    for w in 0..workers {
-        let start = w * chunk;
-        if start >= n {
-            break;
-        }
-        let end = (start + chunk).min(n);
-        // Copy the string data the worker needs (bodies may be large but this
-        // avoids lifetime issues across threads and runs once per load).
-        let owned: Vec<(String, String)> = section_meta[start..end]
-            .iter()
-            .map(|(name, body)| ((*name).to_string(), (*body).to_string()))
-            .collect();
-        handles.push(std::thread::spawn(move || {
-            owned
-                .into_iter()
-                .map(|(name, body)| {
-                    let (old, new) = parse_unified_diff(&body);
-                    FileSection {
-                        old_highlighter: FileHighlighter::new(&old, &name),
-                        new_highlighter: FileHighlighter::new(&new, &name),
-                    }
-                })
-                .collect::<Vec<_>>()
-        }));
-    }
-
     let mut sections = Vec::with_capacity(n);
-    for handle in handles {
-        if let Ok(part) = handle.join() {
-            sections.extend(part);
+    // Scoped workers can borrow the raw per-file slices from the original
+    // diff. The old implementation cloned every file body into an owned
+    // String before spawning a worker, temporarily duplicating the entire
+    // multi-file diff during parsing.
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for w in 0..workers {
+            let start = w * chunk;
+            if start >= n {
+                break;
+            }
+            let end = (start + chunk).min(n);
+            let slice = &section_meta[start..end];
+            handles.push(scope.spawn(move || {
+                slice
+                    .iter()
+                    .map(|(name, body)| {
+                        let (old, new) = parse_unified_diff(body);
+                        FileSection {
+                            old_highlighter: FileHighlighter::new(&old, name),
+                            new_highlighter: FileHighlighter::new(&new, name),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            }));
         }
-    }
+
+        for handle in handles {
+            if let Ok(part) = handle.join() {
+                sections.extend(part);
+            }
+        }
+    });
     sections
 }
 

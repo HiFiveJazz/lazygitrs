@@ -58,11 +58,19 @@ pub fn compute_side_by_side(old: &str, new: &str, tab_width: usize) -> Vec<DiffL
                     i += 1;
                 }
 
-                // Pair deletions with insertions
-                let max_len = deletions.len().max(insertions.len());
-                for j in 0..max_len {
-                    let old_line = deletions.get(j).cloned();
-                    let new_line = insertions.get(j).cloned();
+                // Pair deletions with insertions. Consume the temporary
+                // vectors so the owned line strings move directly into the
+                // final DiffLines instead of being cloned first. Large hunks
+                // can contain tens of megabytes of text, so cloning here can
+                // otherwise briefly double their live memory.
+                let mut deletions = deletions.into_iter();
+                let mut insertions = insertions.into_iter();
+                loop {
+                    let old_line = deletions.next();
+                    let new_line = insertions.next();
+                    if old_line.is_none() && new_line.is_none() {
+                        break;
+                    }
 
                     let change_type = match (&old_line, &new_line) {
                         (Some(_), Some(_)) => ChangeType::Modified,
@@ -129,7 +137,16 @@ pub fn compute_side_by_side(old: &str, new: &str, tab_width: usize) -> Vec<DiffL
 /// concatenated old/new content (as produced by `parse_unified_diff`); use
 /// `build_hunk_line_offsets` to translate them to actual file line numbers.
 pub fn compute_side_by_side_from_unified_diff(diff: &str, tab_width: usize) -> Vec<DiffLine> {
-    let mut lines = Vec::new();
+    // At most one output DiffLine is produced per input line. Reserving from
+    // the actual line count avoids both repeated Vec growth and the much worse
+    // byte-based over-reservation that large diffs used to trigger elsewhere.
+    let input_lines = diff
+        .as_bytes()
+        .iter()
+        .filter(|&&byte| byte == b'\n')
+        .count()
+        .saturating_add(usize::from(!diff.is_empty()));
+    let mut lines = Vec::with_capacity(input_lines);
     let mut old_num = 1usize;
     let mut new_num = 1usize;
     let mut in_hunk = false;
@@ -141,10 +158,18 @@ pub fn compute_side_by_side_from_unified_diff(diff: &str, tab_width: usize) -> V
         ins: &mut Vec<(usize, String)>,
         out: &mut Vec<DiffLine>,
     ) {
-        let max_len = dels.len().max(ins.len());
-        for j in 0..max_len {
-            let old_line = dels.get(j).cloned();
-            let new_line = ins.get(j).cloned();
+        // Drain the pending vectors so their Strings are moved into the final
+        // DiffLines. The previous get(...).cloned() path duplicated every
+        // changed line until the pending vectors were cleared, which is very
+        // expensive for giant kernel commits.
+        let mut dels = dels.drain(..);
+        let mut ins = ins.drain(..);
+        loop {
+            let old_line = dels.next();
+            let new_line = ins.next();
+            if old_line.is_none() && new_line.is_none() {
+                break;
+            }
             let change_type = match (&old_line, &new_line) {
                 (Some(_), Some(_)) => ChangeType::Modified,
                 (Some(_), None) => ChangeType::Delete,
@@ -173,8 +198,6 @@ pub fn compute_side_by_side_from_unified_diff(diff: &str, tab_width: usize) -> V
                 section_index: 0,
             });
         }
-        dels.clear();
-        ins.clear();
     }
 
     for line in diff.lines() {

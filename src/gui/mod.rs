@@ -828,6 +828,29 @@ fn commit_diff_payload(git: &GitCommands, hash: &str, label_prefix: &str) -> Dif
     }
 }
 
+/// Interactive commit preview loader with a cancellation checkpoint between
+/// Git I/O and expensive parsing. Rapid j/k navigation can make a running Git
+/// command stale while it is producing stdout; in that case there is no value
+/// in turning a potentially huge diff into DiffLines/highlighters just for
+/// `spawn_diff_job` to discard it afterwards.
+fn commit_diff_payload_for_generation(
+    git: &GitCommands,
+    hash: &str,
+    label_prefix: &str,
+    generation_counter: &AtomicU64,
+    expected_generation: u64,
+) -> DiffPayload {
+    let Ok(diff) = git.diff_commit(hash) else {
+        return DiffPayload::Empty;
+    };
+    if generation_counter.load(Ordering::Relaxed) != expected_generation {
+        return DiffPayload::Empty;
+    }
+
+    let filename = format!("{}:{}", label_prefix, &hash[..7.min(hash.len())]);
+    DiffPayload::Parsed(DiffViewState::parse_diff_output(&filename, &diff, 4, false))
+}
+
 fn stash_diff_payload(git: &GitCommands, index: usize) -> DiffPayload {
     match git.stash_diff(index) {
         Ok(diff) if diff.is_empty() => DiffPayload::Empty,
@@ -5066,11 +5089,18 @@ impl Gui {
                     drop(model);
 
                     let git = Arc::clone(&self.git);
+                    let generation_counter = Arc::clone(&self.diff_generation);
 
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
                     self.queue_diff_job(generation, diff_key, move || {
-                        commit_diff_payload(&git, &hash, "commit")
+                        commit_diff_payload_for_generation(
+                            &git,
+                            &hash,
+                            "commit",
+                            &generation_counter,
+                            generation,
+                        )
                     });
                 } else {
                     drop(model);
@@ -5084,11 +5114,18 @@ impl Gui {
                     drop(model);
 
                     let git = Arc::clone(&self.git);
+                    let generation_counter = Arc::clone(&self.diff_generation);
 
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
                     self.queue_diff_job(generation, diff_key, move || {
-                        commit_diff_payload(&git, &hash, "reflog")
+                        commit_diff_payload_for_generation(
+                            &git,
+                            &hash,
+                            "reflog",
+                            &generation_counter,
+                            generation,
+                        )
                     });
                 } else {
                     drop(model);
@@ -5120,11 +5157,18 @@ impl Gui {
                     drop(model);
 
                     let git = Arc::clone(&self.git);
+                    let generation_counter = Arc::clone(&self.diff_generation);
 
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
                     self.queue_diff_job(generation, diff_key, move || {
-                        commit_diff_payload(&git, &hash, "commit")
+                        commit_diff_payload_for_generation(
+                            &git,
+                            &hash,
+                            "commit",
+                            &generation_counter,
+                            generation,
+                        )
                     });
                 } else {
                     drop(model);
