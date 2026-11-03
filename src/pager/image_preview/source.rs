@@ -1,5 +1,6 @@
 //! Bounded worktree/revision reads and decoding for image previews.
 
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::Path;
 
@@ -30,6 +31,9 @@ pub(crate) struct DecodedImage {
     pub(crate) format: Option<ImageFormat>,
     pub(crate) orig_width: u32,
     pub(crate) orig_height: u32,
+    /// Identical source bytes keep the same identity across index, worktree,
+    /// and revision reads, without retaining a second copy of the image.
+    pub(crate) fingerprint: u64,
 }
 
 impl DecodedImage {
@@ -67,6 +71,9 @@ pub(super) fn decode_bytes(bytes: &[u8]) -> Option<DecodedImage> {
     if bytes.is_empty() || bytes.len() > MAX_COMPRESSED_BYTES {
         return None;
     }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let fingerprint = hasher.finish();
     let cursor = std::io::Cursor::new(bytes);
     let mut reader = image::ImageReader::new(cursor).with_guessed_format().ok()?;
     let mut limits = image::Limits::default();
@@ -90,6 +97,7 @@ pub(super) fn decode_bytes(bytes: &[u8]) -> Option<DecodedImage> {
         format,
         orig_width: ow,
         orig_height: oh,
+        fingerprint,
     })
 }
 

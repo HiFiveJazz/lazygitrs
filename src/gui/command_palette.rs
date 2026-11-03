@@ -134,8 +134,8 @@ impl Gui {
                         "Stash options".into(),
                     ),
                     CommandEntry::keybinding(
-                        kb.files.view_reset_options.clone(),
-                        "Reset / nuke working tree".into(),
+                        kb.files.discard_all_unstaged.clone(),
+                        "Discard all unstaged changes".into(),
                     ),
                     CommandEntry::keybinding(
                         kb.files.toggle_tree_view.clone(),

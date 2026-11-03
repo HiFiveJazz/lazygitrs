@@ -57,6 +57,7 @@ struct PreviewSide {
     orig_width: u32,
     orig_height: u32,
     format: Option<ImageFormat>,
+    fingerprint: u64,
     thread: ThreadProtocol,
     rx: Receiver<ResizeResponse>,
     created: Instant,
@@ -77,6 +78,7 @@ impl PreviewSide {
         let orig_width = decoded.orig_width;
         let orig_height = decoded.orig_height;
         let format = decoded.format;
+        let fingerprint = decoded.fingerprint;
         let proto = picker.new_resize_protocol(decoded.image);
         let uses_placeholders = matches!(proto.protocol_type(), StatefulProtocolType::Kitty(_));
         let thread = ThreadProtocol::new(tx_req, Some(proto));
@@ -105,6 +107,7 @@ impl PreviewSide {
             orig_width,
             orig_height,
             format,
+            fingerprint,
             thread,
             rx: rx_resp,
             created: Instant::now(),
@@ -203,6 +206,51 @@ impl ImagePreview {
             n += s.estimated_bytes();
         }
         n + std::mem::size_of::<Self>()
+    }
+
+    /// Keep existing terminal image placements when a refreshed diff contains
+    /// identical image bytes. A new picker/resize worker would briefly clear
+    /// the Kitty placeholders, even on periodic refreshes with no file edits.
+    ///
+    /// Compare *content*, not a file path or a staged flag: stage/unstage and
+    /// amend can move an identical image between the before/after panes. A
+    /// changed image must still get a fresh protocol so we never show stale
+    /// pixels. No pixel buffers are cloned or retained by this handoff.
+    pub(crate) fn reuse_unchanged_from(&mut self, previous: &mut Self) {
+        if self.font_size != previous.font_size {
+            return;
+        }
+        let mut old = previous.old.take();
+        let mut new = previous.new.take();
+        for (is_old_pane, desired) in [(true, &mut self.old), (false, &mut self.new)] {
+            let Some(fresh) = desired.as_ref() else {
+                continue;
+            };
+            let fingerprint = fresh.fingerprint;
+            let placeholders = fresh.uses_placeholders;
+            let matches = |side: &PreviewSide| {
+                side.fingerprint == fingerprint && side.uses_placeholders == placeholders
+            };
+            let old_matches = old.as_ref().is_some_and(matches);
+            let new_matches = new.as_ref().is_some_and(matches);
+
+            // Prefer the corresponding pane, then permit a stage/unstage swap.
+            // Each previous protocol can be moved into at most one new pane.
+            let reused = match (is_old_pane, old_matches, new_matches) {
+                (true, true, _) => old.take(),
+                (true, false, true) => new.take(),
+                (false, _, true) => new.take(),
+                (false, true, false) => old.take(),
+                _ => None,
+            };
+            if let Some(reused) = reused {
+                *desired = Some(reused);
+            }
+        }
+        // Keep unmatched sides in the previous preview rather than dropping
+        // them prematurely; only protocols actually reused should move out.
+        previous.old = old;
+        previous.new = new;
     }
 
     pub fn uses_placeholders(&self) -> bool {
@@ -1729,6 +1777,113 @@ mod tests {
                 preview.new.as_ref().unwrap().orig_width
             );
         }
+    }
+
+    #[test]
+    fn refreshed_image_reuses_existing_protocol_and_only_replaces_changed_side() {
+        let picker = graphics_picker();
+        let red = colored_png([200, 30, 30], 32, 32);
+        let blue = colored_png([30, 30, 200], 32, 32);
+        let green = colored_png([30, 200, 30], 32, 32);
+        let make = |old: &[u8], new: &[u8]| {
+            ImagePreview::from_decoded(
+                Some(decode_bytes(old).unwrap()),
+                Some(decode_bytes(new).unwrap()),
+                &picker,
+            )
+            .unwrap()
+        };
+
+        let mut current = make(&red, &blue);
+        let old_created = current.old.as_ref().unwrap().created;
+        let new_created = current.new.as_ref().unwrap().created;
+        let mut refreshed = make(&red, &green);
+        let green_created = refreshed.new.as_ref().unwrap().created;
+        refreshed.reuse_unchanged_from(&mut current);
+
+        assert_eq!(refreshed.old.as_ref().unwrap().created, old_created);
+        assert_eq!(refreshed.new.as_ref().unwrap().created, green_created);
+        assert_ne!(refreshed.new.as_ref().unwrap().created, new_created);
+        assert!(current.old.is_none());
+        assert!(current.new.is_some(), "replaced side must not be reused");
+
+        // A refresh with the exact same bytes keeps *both* original image
+        // protocols; it must not restart the resize worker on every timer tick.
+        let mut same = make(&red, &green);
+        same.reuse_unchanged_from(&mut refreshed);
+        assert_eq!(same.old.as_ref().unwrap().created, old_created);
+        assert_eq!(same.new.as_ref().unwrap().created, green_created);
+    }
+
+    #[test]
+    fn identical_sides_reuse_their_corresponding_pane() {
+        let picker = graphics_picker();
+        let red = colored_png([200, 30, 30], 32, 32);
+        let make = || {
+            ImagePreview::from_decoded(
+                Some(decode_bytes(&red).unwrap()),
+                Some(decode_bytes(&red).unwrap()),
+                &picker,
+            )
+            .unwrap()
+        };
+        let mut previous = make();
+        let old_created = previous.old.as_ref().unwrap().created;
+        let new_created = previous.new.as_ref().unwrap().created;
+        let mut incoming = make();
+        incoming.reuse_unchanged_from(&mut previous);
+        assert_eq!(incoming.old.as_ref().unwrap().created, old_created);
+        assert_eq!(incoming.new.as_ref().unwrap().created, new_created);
+        assert!(previous.old.is_none() && previous.new.is_none());
+    }
+
+    #[test]
+    fn stage_unstage_image_reuses_protocol_even_if_panes_swap() {
+        let picker = graphics_picker();
+        let red = colored_png([200, 30, 30], 32, 32);
+        let blue = colored_png([30, 30, 200], 32, 32);
+        let mut previous = ImagePreview::from_decoded(
+            Some(decode_bytes(&red).unwrap()),
+            Some(decode_bytes(&blue).unwrap()),
+            &picker,
+        )
+        .unwrap();
+        let red_created = previous.old.as_ref().unwrap().created;
+        let blue_created = previous.new.as_ref().unwrap().created;
+
+        let mut incoming = ImagePreview::from_decoded(
+            Some(decode_bytes(&blue).unwrap()),
+            Some(decode_bytes(&red).unwrap()),
+            &picker,
+        )
+        .unwrap();
+        incoming.reuse_unchanged_from(&mut previous);
+        assert_eq!(incoming.old.as_ref().unwrap().created, blue_created);
+        assert_eq!(incoming.new.as_ref().unwrap().created, red_created);
+        assert!(previous.old.is_none() && previous.new.is_none());
+    }
+
+    #[test]
+    fn diff_view_apply_parsed_preserves_same_file_image_preview() {
+        use crate::pager::side_by_side::DiffViewState;
+        let picker = graphics_picker();
+        let image = colored_png([20, 60, 200], 32, 32);
+        let build = || {
+            let mut parsed = DiffViewState::parse_diff_output(
+                "img.png", "Binary files a/img.png and b/img.png differ\n", 4, true,
+            );
+            parsed.image_preview = ImagePreview::from_decoded(
+                None,
+                Some(decode_bytes(&image).unwrap()),
+                &picker,
+            );
+            parsed
+        };
+        let mut state = DiffViewState::new();
+        state.apply_parsed(build());
+        let created = state.image_preview.as_ref().unwrap().new.as_ref().unwrap().created;
+        state.apply_parsed(build());
+        assert_eq!(state.image_preview.as_ref().unwrap().new.as_ref().unwrap().created, created);
     }
 
     #[test]

@@ -2612,29 +2612,82 @@ fn tree_fold_is_explicit_and_enter_does_not_collapse_directories() {
 }
 
 #[test]
-fn shift_d_in_files_opens_reset_menu_with_nuke_option() {
-    let repo = TempRepo::new("files-reset-menu");
+fn shift_d_discards_only_unstaged_changes_after_confirmation() {
+    let repo = TempRepo::new("files-discard-unstaged");
     let mut gui = checkout_test_gui(&repo);
     gui.context_mgr.set_active(ContextId::Files);
+
+    // Simulate Space-staging some files, leaving a couple of new files
+    // unstaged, and modifying a staged file further in the worktree.
+    std::fs::write(repo.path().join("file"), "staged version").unwrap();
+    std::fs::write(repo.path().join("staged-new"), "keep staged addition").unwrap();
+    repo.git(&["add", "file", "staged-new"]);
+    std::fs::write(repo.path().join("file"), "unstaged version").unwrap();
+    std::fs::write(repo.path().join("untracked"), "discard me").unwrap();
+    std::fs::create_dir(repo.path().join("new-dir")).unwrap();
+    std::fs::write(repo.path().join("new-dir/other"), "discard too").unwrap();
+    std::fs::write(repo.path().join(".gitignore"), "ignored-file\n").unwrap();
+    repo.git(&["add", ".gitignore"]);
+    std::fs::write(repo.path().join("ignored-file"), "leave ignored alone").unwrap();
+
     let kb = gui.config.user_config.keybinding.clone();
-
     controller::files::handle_key(&mut gui, parse_key("D").unwrap(), &kb).unwrap();
-
-    let PopupState::Menu { title, items, .. } = &gui.popup else {
-        panic!("expected reset options menu");
+    let PopupState::Confirm { title, message, .. } = &gui.popup else {
+        panic!("D should confirm discarding only unstaged changes");
     };
-    assert_eq!(title, "Reset working tree");
-    assert!(items.iter().any(|item| item.label == "Nuke working tree"));
-    assert!(
-        items
-            .iter()
-            .any(|item| item.label == "Discard all unstaged changes")
+    assert_eq!(title, "Discard all unstaged changes");
+    assert!(message.contains("including deleting untracked files and directories"));
+    assert!(message.contains("Staged changes and ignored files will be preserved"));
+
+    // Confirm by the same key path used by the live UI, then wait for the
+    // existing background-mutation worker to finish.
+    gui.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).unwrap();
+    assert_eq!(gui.background_mutation_label.as_deref(), Some("Discard unstaged changes"));
+    for _ in 0..100 {
+        gui.receive_ui_jobs();
+        if gui.background_mutation_label.is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(gui.background_mutation_label.is_none(), "discard worker completed");
+    assert_eq!(std::fs::read_to_string(repo.path().join("file")).unwrap(), "staged version");
+    assert!(repo.git(&["diff", "--", "file"]).is_empty());
+    assert!(!repo.git(&["diff", "--cached", "--", "file"]).is_empty());
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("staged-new")).unwrap(),
+        "keep staged addition"
     );
-    assert!(
-        items
-            .iter()
-            .any(|item| item.label == "Discard untracked files")
+    assert!(!repo.git(&["diff", "--cached", "--", "staged-new"]).is_empty());
+    assert!(!repo.path().join("untracked").exists());
+    assert!(!repo.path().join("new-dir").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("ignored-file")).unwrap(),
+        "leave ignored alone"
     );
+}
+
+#[test]
+fn discard_all_unstaged_removes_untracked_from_empty_index() {
+    let repo = TempRepo::new("discard-untracked-only");
+    std::fs::write(repo.path().join("not-staged"), "delete me").unwrap();
+    let git = crate::git::GitCommands::new(repo.path()).unwrap();
+    git.discard_all_unstaged_changes().unwrap();
+    assert!(!repo.path().join("not-staged").exists());
+}
+
+#[test]
+fn shift_d_cancel_does_not_discard_changes() {
+    let repo = TempRepo::new("files-discard-cancel");
+    let mut gui = checkout_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    std::fs::write(repo.path().join("file"), "do not discard").unwrap();
+
+    let kb = gui.config.user_config.keybinding.clone();
+    controller::files::handle_key(&mut gui, parse_key("D").unwrap(), &kb).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+    assert!(matches!(gui.popup, PopupState::None));
+    assert_eq!(std::fs::read_to_string(repo.path().join("file")).unwrap(), "do not discard");
 }
 
 #[test]

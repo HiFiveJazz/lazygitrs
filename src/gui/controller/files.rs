@@ -69,8 +69,8 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return discard_file(gui);
     }
 
-    if matches_key(key, &keybindings.files.view_reset_options) {
-        return open_reset_options(gui);
+    if matches_key(key, &keybindings.files.discard_all_unstaged) {
+        return discard_all_unstaged(gui);
     }
 
     if matches_key(key, &keybindings.files.ignore_file) {
@@ -868,62 +868,25 @@ fn stash_changes(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
-fn open_reset_options(gui: &mut Gui) -> Result<()> {
-    gui.popup = PopupState::Menu {
-        title: "Reset working tree".to_string(),
-        items: vec![
-            MenuItem {
-                label: "Nuke working tree".to_string(),
-                description: "git reset --hard HEAD && git clean -fd".to_string(),
-                key: Some("x".to_string()),
-                action: Some(Box::new(|gui| {
-                    gui.popup = PopupState::Confirm {
-                        title: "Nuke working tree".to_string(),
-                        message: "Discard ALL staged and unstaged changes and delete all untracked files/directories?\n\nIgnored files are kept. Dirty submodules are reset after their changes are stashed.".to_string(),
-                        on_confirm: Box::new(|gui| {
-                            gui.start_background_mutation("Nuke working tree", |git| {
-                                git.nuke_working_tree()
-                            });
-                            Ok(())
-                        }),
-                    };
-                    Ok(())
-                })),
-            },
-            MenuItem {
-                label: "Discard all unstaged changes".to_string(),
-                description: "git checkout -- .".to_string(),
-                key: Some("u".to_string()),
-                action: Some(Box::new(|gui| {
-                    gui.start_background_mutation("Discard unstaged changes", |git| {
-                        git.discard_all_unstaged_changes()
-                    });
-                    Ok(())
-                })),
-            },
-            MenuItem {
-                label: "Discard untracked files".to_string(),
-                description: "git clean -fd".to_string(),
-                key: Some("c".to_string()),
-                action: Some(Box::new(|gui| {
-                    gui.popup = PopupState::Confirm {
-                        title: "Discard untracked files".to_string(),
-                        message: "Delete all untracked, non-ignored files and directories?"
-                            .to_string(),
-                        on_confirm: Box::new(|gui| {
-                            gui.start_background_mutation("Discard untracked files", |git| {
-                                git.remove_untracked_files()
-                            });
-                            Ok(())
-                        }),
-                    };
-                    Ok(())
-                })),
-            },
-        ],
-        selected: 0,
-        loading_index: None,
-    };
+fn discard_all_unstaged(gui: &mut Gui) -> Result<()> {
+    // Restore tracked files from the index and delete untracked files; never
+    // reset HEAD or the index, so all staged changes stay intact.
+    if gui.config.user_config.gui.skip_discard_change_warning {
+        gui.start_background_mutation("Discard unstaged changes", |git| {
+            git.discard_all_unstaged_changes()
+        });
+    } else {
+        gui.popup = PopupState::Confirm {
+            title: "Discard all unstaged changes".to_string(),
+            message: "Discard ALL unstaged changes, including deleting untracked files and directories?\n\nStaged changes and ignored files will be preserved.".to_string(),
+            on_confirm: Box::new(|gui| {
+                gui.start_background_mutation("Discard unstaged changes", |git| {
+                    git.discard_all_unstaged_changes()
+                });
+                Ok(())
+            }),
+        };
+    }
     Ok(())
 }
 

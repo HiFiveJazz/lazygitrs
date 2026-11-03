@@ -274,13 +274,21 @@ impl GitCommands {
         Ok(())
     }
 
-    /// Discard unstaged changes to tracked files, leaving the index intact.
-    /// This mirrors lazygit's reset-options action (`git checkout -- .`).
+    /// Discard every unstaged change without changing the index.
+    ///
+    /// Restore tracked files from the index (not HEAD), then remove untracked,
+    /// non-ignored paths. This preserves staged modifications and staged new
+    /// files while also removing new files that the user chose not to stage.
     pub fn discard_all_unstaged_changes(&self) -> Result<()> {
-        self.git()
-            .args(&["checkout", "--", "."])
-            .run_expecting_success()?;
-        Ok(())
+        // `checkout -- .` fails when the index has no matching paths (e.g. a
+        // repository containing only untracked files). Skip it when there are
+        // no unstaged tracked changes; clean must still run in that case.
+        if !self.git().args(&["diff", "--quiet", "--"]).run()?.success {
+            self.git()
+                .args(&["checkout", "--", "."])
+                .run_expecting_success()?;
+        }
+        self.remove_untracked_files()
     }
 
     /// Delete all untracked, non-ignored files and directories.

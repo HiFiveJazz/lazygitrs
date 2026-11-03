@@ -1023,10 +1023,16 @@ impl DiffViewState {
     }
 
     /// Apply a pre-parsed diff result, preserving scroll position for same-file reloads.
-    pub fn apply_parsed(&mut self, parsed: ParsedDiff) {
+    pub fn apply_parsed(&mut self, mut parsed: ParsedDiff) {
+        let same_file = self.filename == parsed.filename;
+        if same_file
+            && let (Some(previous), Some(incoming)) =
+                (self.image_preview.as_mut(), parsed.image_preview.as_mut())
+        {
+            incoming.reuse_unchanged_from(previous);
+        }
         self.image_preview = parsed.image_preview;
         self.inline_images = parsed.inline_images;
-        let same_file = self.filename == parsed.filename;
         let prev_selected_revert_hunk = self.selected_revert_hunk;
         let prev_hovered_revert_hunk = self.hovered_revert_hunk;
         self.filename = parsed.filename;
