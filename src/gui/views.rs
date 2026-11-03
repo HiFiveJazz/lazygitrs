@@ -460,25 +460,9 @@ pub fn render(
         let rect = fl.side_panels[i];
         let ctx_id = ctx_mgr.active_context_for_window(*window);
         let is_active = ctx_mgr.active_window() == *window;
-        // While browsing commits, keep the inactive Branches panel visually
-        // anchored to the checked-out branch. Its remembered interactive
-        // selection is left untouched, so returning to the Branches panel can
-        // still restore where the user was browsing.
-        let selected = if *window == SideWindow::Branches
-            && ctx_id == ContextId::Branches
-            && ctx_mgr.active_window() == SideWindow::Commits
-        {
-            model
-                .branches
-                .iter()
-                .position(|branch| {
-                    !model.head_branch_name.is_empty() && branch.name == model.head_branch_name
-                })
-                .or_else(|| model.branches.iter().position(|branch| branch.head))
-                .unwrap_or_else(|| ctx_mgr.selected(ctx_id))
-        } else {
-            ctx_mgr.selected(ctx_id)
-        };
+        // An inactive Branches panel should show HEAD, not whichever other
+        // branch the user last browsed. Keep its interactive selection intact.
+        let selected = sidebar_selected_index(*window, ctx_id, ctx_mgr, model);
 
         let border_style = if is_active && !diff_focused {
             theme.active_border
@@ -1419,6 +1403,92 @@ mod tests {
         assert_eq!(email_recipient_row_allocation(6, 6, 12), (6, 6));
     }
 
+    fn example_branches_with_stale_head_flag() -> crate::model::Model {
+        let branch = |name: &str, head: bool| crate::model::Branch {
+            name: name.to_string(),
+            hash: String::new(),
+            recency: String::new(),
+            commit_time: 0,
+            pushables: String::new(),
+            pullables: String::new(),
+            upstream: None,
+            head,
+        };
+        crate::model::Model {
+            repo_name: "lazygitrs".into(),
+            head_branch_name: "main".into(),
+            branches: vec![branch("main", false), branch("list/neoscroll", true)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn inactive_branches_follow_head_in_files_status_stash_and_commits() {
+        use super::{ContextId, ContextManager, SideWindow, sidebar_selected_index};
+
+        let model = example_branches_with_stale_head_flag();
+        let mut contexts = ContextManager::new();
+        contexts.set_active(ContextId::Branches);
+        contexts.set_selection(1); // Browsing list/neoscroll, not checking it out.
+        assert_eq!(
+            sidebar_selected_index(SideWindow::Branches, ContextId::Branches, &contexts, &model),
+            1
+        );
+
+        for active in [
+            ContextId::Files,
+            ContextId::Status,
+            ContextId::Stash,
+            ContextId::Commits,
+        ] {
+            contexts.set_active(active);
+            assert_eq!(
+                sidebar_selected_index(SideWindow::Branches, ContextId::Branches, &contexts, &model),
+                0,
+                "{active:?} should display the checked-out branch"
+            );
+            assert_eq!(contexts.selected(ContextId::Branches), 1);
+        }
+
+        contexts.set_active(ContextId::Branches);
+        assert_eq!(
+            sidebar_selected_index(SideWindow::Branches, ContextId::Branches, &contexts, &model),
+            1,
+            "returning to Branches must restore the browsed branch"
+        );
+    }
+
+    #[test]
+    fn status_uses_actual_head_name_not_stale_branch_flags() {
+        let model = example_branches_with_stale_head_flag();
+        let line = super::render_status_sidebar(&model, &Default::default(), 80, &Theme::default());
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("lazygitrs → main"), "{text}");
+        assert!(!text.contains("list/neoscroll"), "{text}");
+        let status_screen = render_tab(&model, super::ContextId::Status, super::ScreenMode::Normal);
+        assert!(
+            status_screen.iter().any(|row| row.contains("Branch: main")),
+            "full status must also use the checked-out branch"
+        );
+
+        let detached = crate::model::Model {
+            head_branch_name: String::new(),
+            ..model
+        };
+        let line =
+            super::render_status_sidebar(&detached, &Default::default(), 80, &Theme::default());
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("HEAD (no branch)"), "{text}");
+    }
+
     fn render_tab(
         model: &crate::model::Model,
         context: super::ContextId,
@@ -2248,6 +2318,31 @@ fn build_window_title<'a>(
     Line::from(spans)
 }
 
+/// Display selection for a sidebar window. An inactive local Branches panel
+/// follows HEAD regardless of which other panel has focus, but its remembered
+/// selection remains unchanged for when the user returns to Branches.
+fn sidebar_selected_index(
+    window: SideWindow,
+    ctx: ContextId,
+    ctx_mgr: &ContextManager,
+    model: &Model,
+) -> usize {
+    if window == SideWindow::Branches
+        && ctx == ContextId::Branches
+        && ctx_mgr.active_window() != SideWindow::Branches
+    {
+        model
+            .branches
+            .iter()
+            .position(|branch| {
+                !model.head_branch_name.is_empty() && branch.name == model.head_branch_name
+            })
+            .unwrap_or_else(|| ctx_mgr.selected(ctx))
+    } else {
+        ctx_mgr.selected(ctx)
+    }
+}
+
 /// Compact 1-line status for the sidebar: "reponame → branch          +N -N"
 fn render_status_sidebar<'a>(
     model: &Model,
@@ -2266,14 +2361,18 @@ fn render_status_sidebar<'a>(
         None
     };
 
-    let head_branch = model.branches.iter().find(|b| b.head);
-    let branch_name = head_branch.map(|b| b.name.clone()).unwrap_or_else(|| {
-        if model.head_branch_name.is_empty() {
-            "HEAD (no branch)".to_string()
-        } else {
-            model.head_branch_name.clone()
-        }
-    });
+    // HEAD's symbolic name is the source of truth. A branch metadata refresh
+    // can arrive out of order after checkout, leaving its cached `head` flag
+    // briefly pointing at the previously checked-out branch.
+    let head_branch = model
+        .branches
+        .iter()
+        .find(|b| !model.head_branch_name.is_empty() && b.name == model.head_branch_name);
+    let branch_name = if model.head_branch_name.is_empty() {
+        "HEAD (no branch)".to_string()
+    } else {
+        model.head_branch_name.clone()
+    };
     let ahead_behind = head_branch.and_then(|b| b.ahead_behind());
 
     let repo_name = model.repo_name.clone();
@@ -2440,18 +2539,11 @@ fn render_status_main<'a>(
     theme: &crate::config::Theme,
     block: Block<'a>,
 ) {
-    let branch_name = model
-        .branches
-        .iter()
-        .find(|b| b.head)
-        .map(|b| b.name.as_str())
-        .unwrap_or_else(|| {
-            if model.head_branch_name.is_empty() {
-                "HEAD (no branch)"
-            } else {
-                model.head_branch_name.as_str()
-            }
-        });
+    let branch_name = if model.head_branch_name.is_empty() {
+        "HEAD (no branch)"
+    } else {
+        model.head_branch_name.as_str()
+    };
 
     let logo = include_str!("../../logo.txt");
     let mut lines: Vec<Line> = logo

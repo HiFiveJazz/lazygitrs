@@ -18,13 +18,17 @@ pub fn render_branch_list<'a>(
         .branches
         .iter()
         .map(|branch| {
-            let name_style = if branch.head {
+            // `head_branch_name` is updated at checkout. A concurrent branch
+            // metadata refresh can still carry the previous HEAD marker.
+            let is_head = !model.head_branch_name.is_empty()
+                && branch.name == model.head_branch_name;
+            let name_style = if is_head {
                 theme.branch_head
             } else {
                 theme.branch_local
             };
 
-            let head_marker = if branch.head { "* " } else { "  " };
+            let head_marker = if is_head { "* " } else { "  " };
 
             let mut spans = vec![
                 Span::styled(head_marker.to_string(), name_style),
@@ -54,7 +58,7 @@ pub fn render_branch_list<'a>(
             }
 
             // Remote operation indicator on head branch (e.g. "Pushing ✻" or "✓" on success)
-            if branch.head {
+            if is_head {
                 if let Some(label) = remote_op_label {
                     let spinner = SPINNER_CHARS[(spinner_frame / 8) % SPINNER_CHARS.len()];
                     spans.push(Span::styled(
@@ -70,7 +74,7 @@ pub fn render_branch_list<'a>(
             }
 
             // Ahead/behind indicator (skip when remote op is active on head branch)
-            if !(branch.head && remote_op_label.is_some()) {
+            if !(is_head && remote_op_label.is_some()) {
                 if let Some((ahead, behind)) = branch.ahead_behind() {
                     let indicator = match (ahead > 0, behind > 0) {
                         (true, true) => format!(" ↑{}↓{}", ahead, behind),
@@ -90,4 +94,42 @@ pub fn render_branch_list<'a>(
             ListItem::new(Line::from(spans))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Branch;
+
+    #[test]
+    fn branch_marker_follows_head_name_even_if_cached_flag_is_stale() {
+        let make_branch = |name: &str, head: bool| Branch {
+            name: name.into(),
+            hash: String::new(),
+            recency: String::new(),
+            commit_time: 0,
+            pushables: String::new(),
+            pullables: String::new(),
+            upstream: None,
+            head,
+        };
+        let model = Model {
+            head_branch_name: "main".into(),
+            branches: vec![make_branch("main", false), make_branch("list/neoscroll", true)],
+            ..Default::default()
+        };
+        let rows = render_branch_list(&model, &Theme::default(), None, 0, false);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 3)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    ratatui::widgets::List::new(rows),
+                    ratatui::layout::Rect::new(0, 0, 40, 3),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "*");
+        assert_eq!(buffer.cell((0, 1)).unwrap().symbol(), " ");
+    }
 }
