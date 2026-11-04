@@ -410,7 +410,7 @@ fn handle_commit_files_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
     }
     let keybindings = &gui.config.user_config.keybinding;
 
-    // Toggle tree view (backtick) — keep in sync with Files / Commit Files and persist
+    // Toggle tree view (t) — keep in sync with Files / Commit Files and persist
     if matches_key(key, &keybindings.files.toggle_tree_view) {
         gui.diff_mode.show_tree = !gui.diff_mode.show_tree;
         gui.show_file_tree = gui.diff_mode.show_tree;
@@ -1116,7 +1116,10 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
                 "<esc>".into(),
                 "Back from diff / Restore comparison files".into(),
             ),
-            CommandEntry::keybinding("`".into(), "Toggle file tree view".into()),
+            CommandEntry::keybinding(
+                gui.config.user_config.keybinding.files.toggle_tree_view.clone(),
+                "Toggle file tree view".into(),
+            ),
             CommandEntry::keybinding(
                 "j/k".into(),
                 "Navigate files or commits / Scroll diff".into(),

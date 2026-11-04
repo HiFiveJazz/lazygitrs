@@ -265,7 +265,7 @@ impl Default for FilesKeybinding {
             stash_all_changes: "s".into(),
             view_stash_options: "S".into(),
             discard_all_unstaged: "D".into(),
-            toggle_tree_view: "`".into(),
+            toggle_tree_view: "t".into(),
             fetch: "f".into(),
             ignore_file: "i".into(),
         }
@@ -368,16 +368,16 @@ impl Default for CommitsKeybinding {
             mark_commit_as_fixup: "f".into(),
             create_fixup_commit: "F".into(),
             squash_above_commits: "S".into(),
-            move_down_commit: "}".into(),
-            move_up_commit: "{".into(),
-            amend_to_commit: "A".into(),
+            move_down_commit: "D".into(),
+            move_up_commit: "U".into(),
+            amend_to_commit: "a".into(),
             pick_commit: "d".into(),
             patch_options: "p".into(),
-            revert_commit: "t".into(),
+            revert_commit: "x".into(),
             cherry_pick_copy: "C".into(),
             paste_commits: "V".into(),
             tag_commit: "T".into(),
-            checkout_commit: "<space>".into(),
+            checkout_commit: "c".into(),
             reset_cherry_pick: "<c-q>".into(),
             open_log_menu: "<c-s>".into(),
             view_bisect_options: "b".into(),
@@ -489,8 +489,12 @@ mod tests {
         let config = KeybindingConfig::default();
         assert_eq!(config.commits.pick_commit, "d");
         assert_eq!(config.commits.patch_options, "p");
-        assert_eq!(config.commits.move_up_commit, "{");
-        assert_eq!(config.commits.move_down_commit, "}");
+        assert_eq!(config.commits.move_up_commit, "U");
+        assert_eq!(config.commits.move_down_commit, "D");
+        assert_eq!(config.commits.checkout_commit, "c");
+        assert_eq!(config.commits.amend_to_commit, "a");
+        assert_eq!(config.commits.revert_commit, "x");
+        assert_eq!(config.files.toggle_tree_view, "t");
         assert_eq!(config.universal.scroll_up_main_alt1, "K");
         assert_eq!(config.universal.scroll_down_main_alt1, "J");
         assert_eq!(config.files.discard_all_unstaged, "D");

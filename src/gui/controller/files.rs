@@ -766,7 +766,15 @@ fn open_in_default_program(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
+fn has_files_to_stash(gui: &Gui) -> bool {
+    !gui.model.lock().unwrap().files.is_empty()
+}
+
 fn open_stash_options(gui: &mut Gui) -> Result<()> {
+    if !has_files_to_stash(gui) {
+        gui.show_action_toast("No changes to stash");
+        return Ok(());
+    }
     gui.popup = PopupState::Menu {
         title: "Stash options".to_string(),
         items: vec![
@@ -852,6 +860,10 @@ fn open_stash_message_prompt(gui: &mut Gui, kind: StashKind) {
 }
 
 fn stash_changes(gui: &mut Gui) -> Result<()> {
+    if !has_files_to_stash(gui) {
+        gui.show_action_toast("No changes to stash");
+        return Ok(());
+    }
     gui.popup = PopupState::Input {
         title: "Stash message (leave empty for default)".to_string(),
         textarea: make_textarea(""),

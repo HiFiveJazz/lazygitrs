@@ -469,24 +469,14 @@ impl Gui {
                     return;
                 }
                 self.diff_view.selection = None;
-                let in_diff = self.diff_focused
-                    || (self.screen_mode != ScreenMode::Full
-                        && self.is_in_main_panel(mouse.column, mouse.row));
+                let in_diff = self.is_in_main_panel(mouse.column, mouse.row)
+                    && (self.screen_mode != ScreenMode::Full || self.diff_focused);
                 if mouse.modifiers.contains(KeyModifiers::SHIFT) && in_diff {
                     self.diff_view.scroll_left(4);
                 } else if in_diff {
                     self.diff_view.scroll_up(3);
                 } else {
-                    // Viewport-only scroll: move scroll offset without changing selection
-                    let active_ctx = self.context_mgr.active();
-                    let model = self.model.lock().unwrap();
-                    let list_len = self.context_mgr.list_len(&model);
-                    drop(model);
-                    let visible_height = self.sidebar_visible_height();
-                    let mut offset = self.context_mgr.scroll_offset(active_ctx);
-                    scroll::scroll_viewport(&mut offset, -3, list_len, visible_height);
-                    self.context_mgr.set_scroll_offset(active_ctx, offset);
-                    self.context_mgr.viewport_manually_scrolled = true;
+                    self.scroll_sidebar_wheel(-3);
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -495,24 +485,14 @@ impl Gui {
                     return;
                 }
                 self.diff_view.selection = None;
-                let in_diff = self.diff_focused
-                    || (self.screen_mode != ScreenMode::Full
-                        && self.is_in_main_panel(mouse.column, mouse.row));
+                let in_diff = self.is_in_main_panel(mouse.column, mouse.row)
+                    && (self.screen_mode != ScreenMode::Full || self.diff_focused);
                 if mouse.modifiers.contains(KeyModifiers::SHIFT) && in_diff {
                     self.diff_view.scroll_right(4);
                 } else if in_diff {
                     self.diff_view.scroll_down(3);
                 } else {
-                    // Viewport-only scroll: move scroll offset without changing selection
-                    let active_ctx = self.context_mgr.active();
-                    let model = self.model.lock().unwrap();
-                    let list_len = self.context_mgr.list_len(&model);
-                    drop(model);
-                    let visible_height = self.sidebar_visible_height();
-                    let mut offset = self.context_mgr.scroll_offset(active_ctx);
-                    scroll::scroll_viewport(&mut offset, 3, list_len, visible_height);
-                    self.context_mgr.set_scroll_offset(active_ctx, offset);
-                    self.context_mgr.viewport_manually_scrolled = true;
+                    self.scroll_sidebar_wheel(3);
                 }
             }
             MouseEventKind::ScrollLeft => {
@@ -538,6 +518,27 @@ impl Gui {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Wheel/touchpad gestures navigate commit rows (and trigger normal
+    /// commit pagination) rather than scrolling a viewport with a stale cursor.
+    /// Other sidebar lists keep their viewport-only scroll behavior.
+    fn scroll_sidebar_wheel(&mut self, delta: isize) {
+        let active_ctx = self.context_mgr.active();
+        if matches!(active_ctx, ContextId::Commits | ContextId::BranchCommits) {
+            let model = self.model.lock().unwrap();
+            self.context_mgr.move_selection(delta, &model);
+            self.context_mgr.viewport_manually_scrolled = false;
+        } else {
+            let model = self.model.lock().unwrap();
+            let list_len = self.context_mgr.list_len(&model);
+            drop(model);
+            let visible_height = self.sidebar_visible_height();
+            let mut offset = self.context_mgr.scroll_offset(active_ctx);
+            scroll::scroll_viewport(&mut offset, delta, list_len, visible_height);
+            self.context_mgr.set_scroll_offset(active_ctx, offset);
+            self.context_mgr.viewport_manually_scrolled = true;
         }
     }
 
@@ -1158,7 +1159,7 @@ impl Gui {
     }
 
     /// True when the active context is one where commit-details makes sense
-    /// (drives both the `'` toggle and layout-time `show_details`).
+    /// (drives the commit-details toggle and layout-time `show_details`).
     pub(super) fn context_has_commit_details(&self) -> bool {
         matches!(
             self.context_mgr.active(),

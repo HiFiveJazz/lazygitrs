@@ -5,6 +5,72 @@
 
 use super::*;
 
+/// Group related commands without embedding a fragile hand-maintained order
+/// in each context. Sort within each group by key, then order groups by their
+/// first displayed key (case-insensitive); same-key commands stay adjacent.
+fn organize_palette_entries(entries: &mut Vec<CommandEntry>) {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<&'static str, Vec<CommandEntry>> = BTreeMap::new();
+    for entry in std::mem::take(entries) {
+        let label = entry.description.to_ascii_lowercase();
+        let group = if label.contains("commit details") {
+            "details"
+        } else if label.contains("move commit") {
+            "commit_reorder"
+        } else if label.contains("stash") {
+            "stash"
+        } else if label.contains("hunk") || label.contains("revert block") {
+            "hunks"
+        } else if label.contains("commit") || label.contains("cherry-pick")
+            || label.contains("fixup") || label.contains("squash") || label.contains("rebase")
+            || label.contains("bisect") {
+            "commits"
+        } else if label.contains("branch") || label.contains("upstream")
+            || label.contains("merge") || label.contains("checkout") {
+            "branches"
+        } else if label.contains("push") || label.contains("pull")
+            || label.contains("fetch") || label.contains("remote") {
+            "remotes"
+        } else if label.contains("search") || label.contains("filter")
+            || label.contains("grep") {
+            "search"
+        } else if label.contains("diff") || label.contains("patch")
+            || label.contains("stage") || label.contains("discard") {
+            "changes"
+        } else if label.contains("scroll") || label.contains("page")
+            || label.contains("item") || label.contains("go to") || label.contains("jump") {
+            "navigation"
+        } else if label.contains("panel") || label.contains("sidebar")
+            || label.contains("screen") || label.contains("view") {
+            "layout"
+        } else if label.contains("file") || label.contains("tree")
+            || label.contains("directory") || label.contains("editor") {
+            "files"
+        } else if label.contains("copy") || label.contains("clipboard") {
+            "clipboard"
+        } else {
+            "other"
+        };
+        groups.entry(group).or_default().push(entry);
+    }
+    let mut groups: Vec<_> = groups.into_values().collect();
+    for group in &mut groups {
+        group.sort_by_key(|entry| {
+            (
+                entry.key.to_ascii_lowercase(),
+                entry.description.to_ascii_lowercase(),
+            )
+        });
+    }
+    groups.sort_by_key(|group| {
+        group
+            .first()
+            .map(|entry| entry.key.to_ascii_lowercase())
+            .unwrap_or_default()
+    });
+    *entries = groups.into_iter().flatten().collect();
+}
+
 impl Gui {
     pub(super) fn show_command_palette(&mut self) {
         let kb = &self.config.user_config.keybinding;
@@ -49,13 +115,32 @@ impl Gui {
                     kb.universal.scroll_down_main_alt1.clone(),
                     "Scroll preview down".into(),
                 ),
+                CommandEntry::keybinding(
+                    kb.universal.shrink_side_panel.clone(),
+                    "Shrink sidebar".into(),
+                ),
+                CommandEntry::keybinding(
+                    kb.universal.expand_side_panel.clone(),
+                    "Expand sidebar".into(),
+                ),
+                CommandEntry::keybinding(
+                    kb.universal.side_panel_full.clone(),
+                    "Maximize sidebar".into(),
+                ),
+                CommandEntry::keybinding(
+                    kb.universal.main_panel_full.clone(),
+                    "Maximize preview".into(),
+                ),
+                CommandEntry::keybinding(
+                    kb.universal.reset_side_panel.clone(),
+                    "Reset sidebar size".into(),
+                ),
                 CommandEntry::keybinding(kb.universal.scroll_left.clone(), "Scroll left".into()),
                 CommandEntry::keybinding(kb.universal.scroll_right.clone(), "Scroll right".into()),
                 CommandEntry::keybinding(kb.universal.undo.clone(), "Undo".into()),
                 CommandEntry::keybinding(kb.universal.redo.clone(), "Redo".into()),
                 CommandEntry::keybinding(kb.universal.refresh.clone(), "Refresh".into()),
                 CommandEntry::keybinding(kb.universal.push_files.clone(), "Push".into()),
-                CommandEntry::keybinding(kb.universal.pull_files.clone(), "Pull".into()),
                 CommandEntry::keybinding(
                     kb.universal.next_screen_mode.clone(),
                     "Enlarge panel".into(),
@@ -163,6 +248,10 @@ impl Gui {
                         "Undo last revert (session)".into(),
                     ),
                     CommandEntry::keybinding("<c-f>".into(), "Grep diff contents".into()),
+                    CommandEntry::keybinding(
+                        kb.commits.open_log_menu.clone(),
+                        "Filter files".into(),
+                    ),
                 ],
             },
             ContextId::Worktrees => CommandSection {
@@ -189,7 +278,12 @@ impl Gui {
                 entries: vec![
                     CommandEntry::keybinding("<enter>".into(), "View branch commits".into()),
                     CommandEntry::keybinding("<space>".into(), "Checkout branch".into()),
+                    CommandEntry::keybinding(kb.universal.pull_files.clone(), "Pull".into()),
                     CommandEntry::keybinding("c".into(), "Checkout ref".into()),
+                    CommandEntry::keybinding(
+                        kb.commits.open_log_menu.clone(),
+                        "Filter commits".into(),
+                    ),
                     CommandEntry::keybinding("-".into(), "Checkout previous branch".into()),
                     CommandEntry::keybinding("n".into(), "New branch".into()),
                     CommandEntry::keybinding("d".into(), "Delete branch".into()),
@@ -218,25 +312,40 @@ impl Gui {
                 ],
             },
             ContextId::BranchCommits | ContextId::BranchCommitFiles => CommandSection {
-                title: "Branch Commits".into(),
-                entries: {
-                    let mut entries = vec![
+                title: if active == ContextId::BranchCommitFiles {
+                    "Branch Commit Files".into()
+                } else {
+                    "Branch Commits".into()
+                },
+                entries: if active == ContextId::BranchCommitFiles {
+                    vec![
+                        CommandEntry::keybinding("<enter>".into(), "Focus file diff".into()),
+                        CommandEntry::keybinding("<esc>".into(), "Back to branch commits".into()),
+                        CommandEntry::keybinding("<c-f>".into(), "Grep diff contents".into()),
+                        CommandEntry::keybinding(
+                        kb.commits.open_log_menu.clone(),
+                        "Filter files".into(),
+                    ),
+                        CommandEntry::keybinding(kb.universal.edit.clone(), "Edit file".into()),
+                        CommandEntry::keybinding(kb.universal.open_file.clone(), "Open file".into()),
+                        CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
+                        CommandEntry::keybinding(kb.files.toggle_tree_view.clone(), "Toggle tree view".into()),
+                        CommandEntry::keybinding(kb.universal.toggle_diff_view_layout.clone(), "Toggle unified / side-by-side view".into()),
+                        CommandEntry::keybinding("T".into(), "Toggle commit details panel".into()),
+                    ]
+                } else {
+                    vec![
                         CommandEntry::keybinding("<enter>".into(), "View commit files".into()),
                         CommandEntry::keybinding("<esc>".into(), "Back to branches".into()),
+                        CommandEntry::keybinding("o".into(), "Open commit in browser".into()),
+                        CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
                         CommandEntry::keybinding(
-                            kb.universal.toggle_diff_view_layout.clone(),
-                            "Toggle unified / side-by-side view".into(),
-                        ),
-                        CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
-                    ];
-                    // Grep only applies to the files list, not the commits list.
-                    if active == ContextId::BranchCommitFiles {
-                        entries.push(CommandEntry::keybinding(
-                            "<c-f>".into(),
-                            "Grep diff contents".into(),
-                        ));
-                    }
-                    entries
+                        kb.commits.open_log_menu.clone(),
+                        "Filter commits".into(),
+                    ),
+                        CommandEntry::keybinding(kb.universal.toggle_diff_view_layout.clone(), "Toggle unified / side-by-side view".into()),
+                        CommandEntry::keybinding("t".into(), "Toggle commit details panel".into()),
+                    ]
                 },
             },
             ContextId::Commits => {
@@ -312,7 +421,13 @@ impl Gui {
                         kb.commits.open_log_menu.clone(),
                         "Filter commits".into(),
                     ),
-                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("<c-l>".into(), "Filter commits (alt)".into()),
+                    CommandEntry::keybinding("e".into(), "Edit commit (rebase)".into()),
+                    CommandEntry::keybinding(
+                        kb.commits.reset_cherry_pick.clone(),
+                        "Clear cherry-pick clipboard".into(),
+                    ),
+                    CommandEntry::keybinding("t".into(), "Toggle commit details panel".into()),
                 ];
                 if !self.cherry_pick_clipboard.is_empty() {
                     entries.insert(
@@ -346,6 +461,10 @@ impl Gui {
                     ),
                     CommandEntry::keybinding("<esc>".into(), "Back to commits".into()),
                     CommandEntry::keybinding("<c-f>".into(), "Grep diff contents".into()),
+                    CommandEntry::keybinding(
+                        kb.commits.open_log_menu.clone(),
+                        "Filter files".into(),
+                    ),
                     CommandEntry::keybinding(kb.universal.edit.clone(), "Edit file".into()),
                     CommandEntry::keybinding(kb.universal.open_file.clone(), "Open file".into()),
                     CommandEntry::keybinding(
@@ -357,12 +476,13 @@ impl Gui {
                         "Toggle tree view".into(),
                     ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
-                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("T".into(), "Toggle commit details panel".into()),
                 ],
             },
             ContextId::Reflog => CommandSection {
                 title: "Reflog".into(),
                 entries: vec![
+                    CommandEntry::keybinding("o".into(), "Open commit in browser".into()),
                     CommandEntry::keybinding("<enter>".into(), "View commit files".into()),
                     CommandEntry::keybinding(
                         kb.universal.toggle_diff_view_layout.clone(),
@@ -381,7 +501,7 @@ impl Gui {
                         "Copy (cherry-pick)".into(),
                     ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
-                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("t".into(), "Toggle commit details panel".into()),
                 ],
             },
             ContextId::Stash => CommandSection {
@@ -401,6 +521,11 @@ impl Gui {
             ContextId::StashFiles => CommandSection {
                 title: "Stash Files".into(),
                 entries: vec![
+                    CommandEntry::keybinding("T".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding(
+                        kb.commits.open_log_menu.clone(),
+                        "Filter files".into(),
+                    ),
                     CommandEntry::keybinding(
                         "<enter>".into(),
                         "Focus file / directory diff".into(),
@@ -459,6 +584,7 @@ impl Gui {
                 title: "Status".into(),
                 entries: vec![
                     CommandEntry::keybinding("<enter>".into(), "Recent repos".into()),
+                    CommandEntry::keybinding(kb.universal.pull_files.clone(), "Pull".into()),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
                     CommandEntry::keybinding("o".into(), "Open in browser menu".into()),
                 ],
@@ -470,6 +596,9 @@ impl Gui {
             sections.insert(1, controller::tree::command_section(kb, true));
         }
 
+        for section in &mut sections {
+            organize_palette_entries(&mut section.entries);
+        }
         self.popup = PopupState::CommandPalette {
             sections,
             selected: 0,

@@ -88,8 +88,9 @@ fn context_claims_global_repo_key(
     key: KeyEvent,
     kb: &crate::config::KeybindingConfig,
 ) -> bool {
-    matches!(active, ContextId::Commits) && matches_key(key, &kb.commits.patch_options)
-        || matches!(active, ContextId::Tags) && key.code == KeyCode::Char('P')
+    matches!(active, ContextId::Tags) && key.code == KeyCode::Char('P')
+        || matches_key(key, &kb.universal.pull_files)
+            && !matches!(active, ContextId::Status | ContextId::Branches | ContextId::Remotes)
 }
 
 /// Return whether a streamed model update can change the preview for the
@@ -1195,8 +1196,7 @@ pub struct Gui {
     /// Hash the current `commit_details_scroll` value corresponds to.  When
     /// render sees a different hash, it resets the scroll.
     pub commit_details_scroll_hash: String,
-    /// Whether the commit-details box is visible.  Toggled with `.` in any
-    /// commit-related context.
+    /// Whether commit details are visible. `t` in commit lists; `T` in file subviews.
     pub show_commit_details: bool,
 }
 
@@ -4838,11 +4838,8 @@ impl Gui {
     fn try_handle_global_repo_keys(&mut self, key: KeyEvent) -> Result<bool> {
         let kb = self.config.user_config.keybinding.clone();
 
-        // Context-specific bindings take precedence over universal push/pull.
-        // In particular, the commits view uses `p` for Patch actions, while
-        // universal pull also defaults to `p`. Let the commits controller see
-        // that key instead of consuming it here. Likewise, `P` in Tags pushes
-        // the selected tag rather than the current branch.
+        // Push is universal (except in Tags); Pull is local to Status,
+        // Branches, and Remotes. In Commits, `p` belongs to patch actions.
         if context_claims_global_repo_key(self.context_mgr.active(), key, &kb) {
             return Ok(false);
         }

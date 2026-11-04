@@ -3,11 +3,109 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 
 #[test]
+fn pull_is_only_available_in_status_branches_and_remotes() {
+    let kb = crate::config::KeybindingConfig::default();
+    let pull = crate::config::keybindings::parse_key(&kb.universal.pull_files).unwrap();
+    for ctx in [ContextId::Status, ContextId::Branches, ContextId::Remotes] {
+        assert!(!context_claims_global_repo_key(ctx, pull, &kb), "{ctx:?}");
+    }
+    for ctx in [ContextId::Files, ContextId::Commits, ContextId::Stash,
+                ContextId::Reflog, ContextId::CommitFiles, ContextId::Tags] {
+        assert!(context_claims_global_repo_key(ctx, pull, &kb), "{ctx:?}");
+    }
+}
+
+#[test]
+fn remapped_keys_and_scoped_pull_match_command_palette() {
+    let repo = TempRepo::new("palette-defaults");
+    let mut gui = tree_test_gui(&repo);
+    let cases = [
+        (ContextId::Files, vec![("Toggle tree view", "t")]),
+        (ContextId::CommitFiles, vec![("Toggle tree view", "t"), ("Toggle commit details panel", "T")]),
+        (ContextId::StashFiles, vec![("Toggle tree view", "t"), ("Toggle commit details panel", "T")]),
+        (ContextId::Commits, vec![
+            ("Checkout commit", "c"), ("Revert commit", "x"),
+            ("Amend to commit", "a"), ("Move commit up", "U"),
+            ("Move commit down", "D"), ("Patch actions", "p"),
+            ("Toggle commit details panel", "t"),
+            ("Edit commit (rebase)", "e"),
+        ]),
+        (ContextId::Status, vec![("Pull", "p")]),
+        (ContextId::Branches, vec![("Pull", "p")]),
+        (ContextId::Remotes, vec![("Pull", "p")]),
+    ];
+    for (ctx, expected) in cases {
+        gui.context_mgr.set_active(ctx);
+        gui.show_command_palette();
+        let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+            panic!("expected palette");
+        };
+        let local = &sections[0].entries;
+        let universal = &sections.iter().find(|s| s.title == "Universal").unwrap().entries;
+        assert!(!universal.iter().any(|e| e.description == "Pull"), "{ctx:?}");
+        for (description, key) in expected {
+            assert!(local.iter().any(|e| e.description == description && e.key == key),
+                "{ctx:?} {description}: {key}");
+        }
+        if ctx == ContextId::Commits {
+            assert!(!local.iter().any(|e| e.description == "Pull"));
+            let up = local.iter().position(|e| e.description == "Move commit up").unwrap();
+            let down = local.iter().position(|e| e.description == "Move commit down").unwrap();
+            assert_eq!(up.abs_diff(down), 1, "reorder commands should stay grouped");
+        }
+    }
+}
+
+#[test]
+fn files_empty_stash_keys_notify_without_opening_prompt() {
+    let repo = TempRepo::new("empty-stash-keys");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.model.lock().unwrap().files.clear();
+    for key in ['s', 'S'] {
+        gui.popup = PopupState::None;
+        gui.action_toast = None;
+        gui.handle_key(KeyEvent::new(KeyCode::Char(key),
+            if key.is_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE }))
+            .unwrap();
+        assert!(gui.popup == PopupState::None);
+        assert_eq!(gui.action_toast.as_ref().map(|x| x.0.as_str()), Some("No changes to stash"));
+    }
+}
+
+#[test]
+fn touchpad_wheel_moves_commit_selection_when_scrolling_sidebar() {
+    use crossterm::event::MouseEventKind;
+    let repo = TempRepo::new("commit-wheel");
+    let mut gui = tree_test_gui(&repo);
+    gui.model.lock().unwrap().commits = gui.git.load_commits(30).unwrap();
+    assert!(gui.model.lock().unwrap().commits.len() >= 3);
+    Arc::get_mut(&mut gui.config).unwrap().user_config.gui.mouse_events = true;
+    gui.layout.update_size(120, 42);
+    gui.context_mgr.set_active(ContextId::Commits);
+    gui.context_mgr.set_selection(0);
+    gui.context_mgr.viewport_manually_scrolled = true;
+    let panel = gui.compute_current_frame_layout().side_panels[3];
+    let mouse_at = |kind| MouseEvent {
+        kind,
+        column: panel.x + 1,
+        row: panel.y + 1,
+        modifiers: KeyModifiers::NONE,
+    };
+    gui.handle_mouse(mouse_at(MouseEventKind::ScrollDown));
+    assert_eq!(gui.context_mgr.selected_active(), 2);
+    assert!(!gui.context_mgr.viewport_manually_scrolled);
+    gui.handle_mouse(mouse_at(MouseEventKind::ScrollUp));
+    assert_eq!(gui.context_mgr.selected_active(), 0);
+}
+
+#[test]
 fn contextual_commit_patch_wins_over_global_pull() {
     let kb = crate::config::KeybindingConfig::default();
     let key = crate::config::keybindings::parse_key(&kb.commits.patch_options).unwrap();
     assert!(context_claims_global_repo_key(ContextId::Commits, key, &kb));
-    assert!(!context_claims_global_repo_key(ContextId::Files, key, &kb));
+    assert!(context_claims_global_repo_key(ContextId::Files, key, &kb));
 }
 
 #[test]
@@ -2205,7 +2303,7 @@ fn tree_commit_details_conflict_is_limited_to_active_tree_bindings() {
         .unwrap();
     assert_eq!(gui.show_commit_details, details);
     gui.show_commit_file_tree = false;
-    gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+    gui.handle_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT))
         .unwrap();
     assert_ne!(gui.show_commit_details, details);
 }
@@ -2220,7 +2318,7 @@ fn tree_default_child_key_preserves_commit_details_toggle() {
             gui.context_mgr.set_selection(0);
             gui.show_commit_file_tree = tree;
             let details = gui.show_commit_details;
-            gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+            gui.handle_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT))
                 .unwrap();
             assert_ne!(gui.show_commit_details, details, "{ctx:?} {tree}");
             assert_eq!(gui.context_mgr.selected_active(), 0);
@@ -2233,8 +2331,8 @@ fn tree_default_child_key_preserves_commit_details_toggle() {
 }
 
 #[test]
-fn apostrophe_toggles_details_and_is_documented_in_commit_context_help() {
-    let repo = TempRepo::new("apostrophe-details-help");
+fn commit_details_toggle_is_documented_and_does_not_steal_file_tree_t() {
+    let repo = TempRepo::new("commit-details-help");
     let mut gui = tree_test_gui(&repo);
     for ctx in [
         ContextId::Commits,
@@ -2246,24 +2344,30 @@ fn apostrophe_toggles_details_and_is_documented_in_commit_context_help() {
     ] {
         gui.popup = PopupState::None;
         gui.context_mgr.set_active(ctx);
+        let file_view = matches!(ctx,
+            ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles);
+        let (code, modifiers, expected) = if file_view {
+            ('T', KeyModifiers::SHIFT, "T")
+        } else {
+            ('t', KeyModifiers::NONE, "t")
+        };
         let details = gui.show_commit_details;
-        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
-            .unwrap();
+        gui.handle_key(KeyEvent::new(KeyCode::Char(code), modifiers)).unwrap();
         assert_ne!(gui.show_commit_details, details, "{ctx:?}");
-        gui.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT))
-            .unwrap();
+        gui.show_command_palette();
         let PopupState::CommandPalette { sections, .. } = &gui.popup else {
             panic!("expected help palette");
         };
-        let details_entries: Vec<_> = sections
+        let entry = sections
             .iter()
             .flat_map(|s| &s.entries)
-            .filter(|e| e.description == "Toggle commit details panel")
-            .collect();
-        // Stash-file help did not previously include a details entry.
-        if ctx != ContextId::StashFiles {
-            assert_eq!(details_entries.len(), 1, "{ctx:?}");
-            assert_eq!(details_entries[0].key, "'", "{ctx:?}");
+            .find(|e| e.description == "Toggle commit details panel")
+            .unwrap();
+        assert_eq!(entry.key, expected, "{ctx:?}");
+        if file_view {
+            assert!(sections.iter().flat_map(|s| &s.entries).any(|e| {
+                e.key == "t" && e.description == "Toggle tree view"
+            }));
         }
     }
 }
@@ -2367,13 +2471,13 @@ fn tree_fold_binding_does_not_override_flat_list_actions() {
         gui.context_mgr.set_active(ctx);
         gui.show_file_tree = false;
         gui.show_commit_file_tree = false;
-        gui.handle_key(KeyEvent::new(KeyCode::Char('`'), KeyModifiers::NONE))
+        gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE))
             .unwrap();
         assert!(gui.active_file_tree(), "{ctx:?}");
     }
     gui.diff_mode.enter(false);
     gui.diff_mode.set_focus(DiffModeFocus::CommitFiles);
-    gui.handle_key(KeyEvent::new(KeyCode::Char('`'), KeyModifiers::NONE))
+    gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE))
         .unwrap();
     assert!(gui.diff_mode.show_tree);
 }

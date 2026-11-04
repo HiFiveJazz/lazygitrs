@@ -445,10 +445,17 @@ impl Gui {
             return Ok(());
         }
 
-        // `'` toggles the commit-details box when in any commit-related
-        // context.  Kept outside per-context controllers so the binding is
-        // consistent across Commits / BranchCommits / Reflog / CommitFiles.
-        if key.code == KeyCode::Char('\'') && self.context_has_commit_details() {
+        // `t` toggles commit details in commit lists; `T` does so in file
+        // subviews because lowercase `t` toggles the tree there. Both are
+        // handled here so these bindings stay consistent across controllers.
+        let details_key = if matches!(self.context_mgr.active(),
+            ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles)
+        {
+            'T' // `t` is reserved for the file tree in these subviews.
+        } else {
+            't'
+        };
+        if plain_char_key(key, details_key) && self.context_has_commit_details() {
             self.show_commit_details = !self.show_commit_details;
             self.persist_commit_details_visibility();
             return Ok(());

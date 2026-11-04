@@ -67,13 +67,25 @@ impl UserConfig {
             self.keybinding.universal.scroll_down_main_alt1 = "J".to_string();
         }
 
-        // Likewise, migrate historical J/K commit-reorder bindings so they
-        // cannot steal the new preview-scroll keys.
-        if self.keybinding.commits.move_up_commit == "K" {
-            self.keybinding.commits.move_up_commit = "{".to_string();
+        // Previous releases stored these as defaults in config.yml. Migrate
+        // only old default values; explicitly remapped keys stay unchanged.
+        if matches!(self.keybinding.commits.move_up_commit.as_str(), "K" | "{") {
+            self.keybinding.commits.move_up_commit = "U".to_string();
         }
-        if self.keybinding.commits.move_down_commit == "J" {
-            self.keybinding.commits.move_down_commit = "}".to_string();
+        if matches!(self.keybinding.commits.move_down_commit.as_str(), "J" | "}") {
+            self.keybinding.commits.move_down_commit = "D".to_string();
+        }
+        if self.keybinding.commits.checkout_commit == "<space>" {
+            self.keybinding.commits.checkout_commit = "c".to_string();
+        }
+        if self.keybinding.commits.revert_commit == "t" {
+            self.keybinding.commits.revert_commit = "x".to_string();
+        }
+        if self.keybinding.commits.amend_to_commit == "A" {
+            self.keybinding.commits.amend_to_commit = "a".to_string();
+        }
+        if self.keybinding.files.toggle_tree_view == "`" {
+            self.keybinding.files.toggle_tree_view = "t".to_string();
         }
     }
 
@@ -618,12 +630,39 @@ mod keybinding_migration_tests {
     }
 
     #[test]
+    fn old_default_bindings_migrate_but_custom_keys_are_preserved() {
+        let mut legacy = UserConfig::default();
+        legacy.keybinding.files.toggle_tree_view = "`".into();
+        legacy.keybinding.commits.checkout_commit = "<space>".into();
+        legacy.keybinding.commits.amend_to_commit = "A".into();
+        legacy.keybinding.commits.revert_commit = "t".into();
+        legacy.keybinding.commits.move_up_commit = "{".into();
+        legacy.keybinding.commits.move_down_commit = "}".into();
+        legacy.normalize_legacy_keybindings();
+        assert_eq!(legacy.keybinding.files.toggle_tree_view, "t");
+        assert_eq!(legacy.keybinding.commits.checkout_commit, "c");
+        assert_eq!(legacy.keybinding.commits.amend_to_commit, "a");
+        assert_eq!(legacy.keybinding.commits.revert_commit, "x");
+        assert_eq!(legacy.keybinding.commits.move_up_commit, "U");
+        assert_eq!(legacy.keybinding.commits.move_down_commit, "D");
+
+        let mut custom = UserConfig::default();
+        custom.keybinding.files.toggle_tree_view = "v".into();
+        custom.keybinding.commits.checkout_commit = "h".into();
+        custom.keybinding.commits.move_up_commit = "b".into();
+        custom.normalize_legacy_keybindings();
+        assert_eq!(custom.keybinding.files.toggle_tree_view, "v");
+        assert_eq!(custom.keybinding.commits.checkout_commit, "h");
+        assert_eq!(custom.keybinding.commits.move_up_commit, "b");
+    }
+
+    #[test]
     fn legacy_commit_reorder_bindings_do_not_steal_preview_keys() {
         let mut config = UserConfig::default();
         config.keybinding.commits.move_up_commit = "K".to_string();
         config.keybinding.commits.move_down_commit = "J".to_string();
         config.normalize_legacy_keybindings();
-        assert_eq!(config.keybinding.commits.move_up_commit, "{");
-        assert_eq!(config.keybinding.commits.move_down_commit, "}");
+        assert_eq!(config.keybinding.commits.move_up_commit, "U");
+        assert_eq!(config.keybinding.commits.move_down_commit, "D");
     }
 }
