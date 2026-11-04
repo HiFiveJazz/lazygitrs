@@ -75,6 +75,15 @@ impl GitCommands {
         Ok(())
     }
 
+    /// Carry local edits across a checkout, allowing Git to report any merges
+    /// it cannot resolve rather than silently discarding modifications.
+    pub fn checkout_branch_with_merge(&self, name: &str) -> Result<()> {
+        self.git()
+            .args(&["checkout", "--merge", name])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
     pub fn create_branch(&self, name: &str) -> Result<()> {
         self.git()
             .args(&["checkout", "-b", name])

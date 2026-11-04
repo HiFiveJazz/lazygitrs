@@ -315,7 +315,19 @@ impl Gui {
         // Go to top is handled above (it may be a multi-key `gg`).
         if matches_key(key, &keybindings.universal.goto_bottom) {
             let model = self.model.lock().unwrap();
-            let len = self.context_mgr.list_len(&model);
+            // The visible Files rows are controlled by `show_file_tree`.  A
+            // cached list-length override may temporarily describe the other
+            // view (for example after restoring view state), so do not jump
+            // past the last visible file when using `G`.
+            let len = if self.context_mgr.active() == ContextId::Files {
+                if self.show_file_tree {
+                    self.file_tree_nodes.len()
+                } else {
+                    model.files.len()
+                }
+            } else {
+                self.context_mgr.list_len(&model)
+            };
             if len > 0 {
                 self.context_mgr.set_selection(len - 1);
             }

@@ -963,6 +963,41 @@ pub(crate) fn render_popup(
                 frame.render_widget(summary_textarea, inner);
             }
         }
+        PopupState::BranchSwitchConflict { source, target, paths, selected } => {
+            let Some(rect) = branch_switch_popup_geometry(area) else { return; };
+            frame.render_widget(Clear, rect);
+            let block = Block::default()
+                .title(" Branch switch blocked ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent));
+            frame.render_widget(block, rect);
+            let inner = rect.inner(ratatui::layout::Margin { horizontal: 2, vertical: 1 });
+            let normal = Style::default().fg(theme.text);
+            let dim = Style::default().fg(theme.text_dimmed);
+            let key = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+            let highlight = Style::default().bg(theme.selected_bg).add_modifier(Modifier::BOLD);
+            let options = [
+                ("c", "Commit all changes and switch", "Stage all tracked/untracked files, then open a commit on the current branch"),
+                ("s", "Stash and switch", "Save staged, unstaged and untracked changes in a retained stash"),
+                ("m", "Move changes and switch", "Try git checkout --merge; conflicts may require resolution"),
+                ("d", "Discard changes and switch", "Delete staged, unstaged and untracked changes (requires confirmation)"),
+                ("v", "View conflicting files", "Inspect affected files in the Files preview"),
+            ];
+            let mut lines = vec![
+                Line::from(Span::styled(format!("{}  →  {}", if source.is_empty() { "HEAD" } else { source }, target), normal.add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(Span::styled(format!("Git would overwrite local edits ({} listed files).", paths.len()), normal)),
+                Line::from(""),
+            ];
+            for (i, (shortcut, label, description)) in options.iter().enumerate() {
+                let line = Line::from(vec![Span::styled(format!(" {shortcut} "), key), Span::styled(*label, normal)]);
+                lines.push(if *selected == i { line.style(highlight) } else { line });
+                lines.push(Line::from(Span::styled(format!("    {description}"), dim)));
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(vec![Span::styled(" Esc ", key), Span::styled("cancel — no changes made", dim)]));
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
         PopupState::PullDivergence {
             branch,
             upstream,

@@ -4176,6 +4176,23 @@ fn email_recipient_row_allocation(to_len: usize, cc_len: usize, budget: usize) -
     (to_rows.max(1), cc_rows.max(1))
 }
 
+fn branch_switch_popup_geometry(area: Rect) -> Option<Rect> {
+    let width = (area.width.saturating_mul(82) / 100)
+        .min(100)
+        .max(56)
+        .min(area.width);
+    if width < 36 || area.height < 12 {
+        return None;
+    }
+    let height = 24u16.min(area.height.saturating_sub(2));
+    Some(Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    ))
+}
+
 fn pull_divergence_popup_geometry(area: Rect) -> Option<Rect> {
     let width = (area.width.saturating_mul(82) / 100)
         .min(96)

@@ -334,6 +334,13 @@ impl GitCommands {
         self.remove_untracked_files()
     }
 
+    /// Destructive branch-switch choice. Leave ignored files untouched; the
+    /// caller is responsible for a separate confirmation before invoking this.
+    pub fn discard_all_for_branch_switch(&self) -> Result<()> {
+        self.git().args(&["reset", "--hard", "HEAD"]).run_expecting_success()?;
+        self.remove_untracked_files()
+    }
+
     /// Discard every index/worktree change represented by one Files-panel row.
     ///
     /// Keep the complete [`File`] instead of collapsing it to `(path, added)`:

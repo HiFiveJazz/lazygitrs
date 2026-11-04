@@ -1161,6 +1161,12 @@ pub struct Gui {
     action_toast: Option<(String, Instant)>,
     /// Branch name from checkout-by-name; used to offer create-on-miss when checkout fails.
     pub(crate) pending_checkout_by_name: Option<String>,
+    /// True for a user-selected recovery strategy, which must not retry the
+    /// same conflict popup after an unsuccessful or partially applied checkout.
+    pub(crate) pending_checkout_assisted: bool,
+    /// Chosen from the checkout-conflicts picker; focus it after the async
+    /// status refresh, since the cached Files list can be stale at failure time.
+    pub(crate) pending_conflict_inspect_file: Option<String>,
     /// Editor to run after suspending the TUI (hx/nvim/vim).
     pending_editor_launch: Option<crate::config::user_config::EditorLaunch>,
     /// Copied commit hashes for cherry-pick paste (newest first).
@@ -1660,6 +1666,8 @@ impl Gui {
             remote_op_success_at: None,
             action_toast: None,
             pending_checkout_by_name: None,
+            pending_checkout_assisted: false,
+            pending_conflict_inspect_file: None,
             pending_editor_launch: None,
             cherry_pick_clipboard: Vec::new(),
             range_select_anchor: None,
@@ -3211,6 +3219,7 @@ impl Gui {
                         )
                     );
                     let was_checkout = self.pending_checkout_by_name.take().is_some();
+                    self.pending_checkout_assisted = false;
                     let confirmed_checkout_head = if was_checkout {
                         completion.head.clone()
                     } else {
@@ -3366,34 +3375,36 @@ impl Gui {
                     }
                 }
                 Err(e) => {
-                    let failed_checkout = self.pending_checkout_by_name.is_some();
+                    let target = self.pending_checkout_by_name.take();
+                    let failed_checkout = target.is_some();
+                    let assisted = std::mem::take(&mut self.pending_checkout_assisted);
                     // AI generation may have restored the editor just before
-                    // a queued remote error arrives. Keep that draft when the
-                    // error needs to take over the popup.
+                    // a queued remote error arrives. Preserve that draft.
                     if matches!(self.popup, PopupState::CommitInput { .. }) {
                         self.saved_commit_popup =
                             Some(std::mem::replace(&mut self.popup, PopupState::None));
                     }
-                    let err = format!("{}", e);
-                    if let Some(name) = self
-                        .pending_checkout_by_name
-                        .take()
-                        .filter(|_| is_checkout_ref_not_found(&err))
-                    {
+                    let err = format!("{:#}", e);
+                    if let Some(name) = target.as_ref().filter(|_| is_checkout_ref_not_found(&err)).cloned() {
                         self.popup = PopupState::Confirm {
                             title: "Branch not found".to_string(),
-                            message: format!(
-                                "Branch not found. Create a new branch named {}?",
-                                name
-                            ),
+                            message: format!("Branch not found. Create a new branch named {}?", name),
                             on_confirm: Box::new(move |gui| {
                                 gui.git.create_branch(&name)?;
                                 gui.needs_refresh = true;
                                 Ok(())
                             }),
                         };
+                    } else if let Some(target) = target.as_ref().filter(|_| !assisted && controller::branches::is_checkout_worktree_conflict(&err)).cloned() {
+                        let source = self.model.lock().unwrap().head_branch_name.clone();
+                        self.needs_files_refresh = true;
+                        self.popup = PopupState::BranchSwitchConflict {
+                            source,
+                            target,
+                            paths: controller::branches::checkout_conflicting_paths(&err),
+                            selected: 0,
+                        };
                     } else {
-                        self.pending_checkout_by_name = None;
                         self.popup = PopupState::Message {
                             title: "Error".to_string(),
                             message: err,
@@ -3402,6 +3413,12 @@ impl Gui {
                     }
                     if failed_checkout {
                         self.recover_refresh_after_failed_checkout();
+                        // Assisted checkout may commit/stash/discard before an
+                        // unsuccessful checkout, or --merge may move HEAD and
+                        // leave conflicts. Always re-read the repository.
+                        if assisted {
+                            self.needs_refresh = true;
+                        }
                     }
                     if matches!(kind, RemoteOpKind::PullIntegrate) {
                         self.needs_refresh = true;
@@ -3759,6 +3776,24 @@ impl Gui {
         }
     }
 
+    fn focus_conflicting_file_after_refresh(&mut self) {
+        let Some(path) = self.pending_conflict_inspect_file.take() else { return; };
+        let idx = self.model.lock().unwrap().files.iter().position(|file| file.name == path);
+        let Some(idx) = idx else {
+            self.show_action_toast(format!("Cannot find {path} in Files"));
+            return;
+        };
+        let row = if self.show_file_tree {
+            self.file_tree_nodes
+                .iter()
+                .position(|node| node.file_index == Some(idx))
+                .unwrap_or(idx)
+        } else { idx };
+        self.context_mgr.set_active(ContextId::Files);
+        self.context_mgr.set_selection(row);
+        self.needs_diff_refresh = true;
+    }
+
     /// Apply a completed status-only files refresh.
     fn receive_files_refresh(&mut self) {
         let Some(rx) = self.files_refresh_rx.as_ref() else {
@@ -3784,6 +3819,7 @@ impl Gui {
                 if self.needs_files_refresh {
                     self.start_files_refresh_async();
                 } else {
+                    self.focus_conflicting_file_after_refresh();
                     self.needs_diff_refresh = true;
                 }
             }

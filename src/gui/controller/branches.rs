@@ -1,9 +1,12 @@
 use super::matches_key;
 use crate::config::KeybindingConfig;
-use crate::gui::popup::{MenuItem, MessageKind, PopupState, make_textarea};
+use crate::gui::popup::{
+    CommitInputFocus, CommitInputKind, CommitInputMode, MenuItem, MessageKind, PopupState,
+    make_commit_body_textarea, make_commit_summary_textarea, make_textarea,
+};
 use crate::gui::{Gui, RemoteOpKind};
 use crate::os::platform::Platform;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
@@ -159,23 +162,171 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
+/// Local changes that Git explicitly says would be overwritten by a checkout.
+/// Do not intercept other failures (missing refs, hooks, permissions, conflicts).
+pub(crate) fn is_checkout_worktree_conflict(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("would be overwritten by checkout:")
+        || error.contains("would be overwritten by merge:")
+}
+
+/// Extract Git's indented path list, without treating the following advice or
+/// "Aborting" line as paths. Git may emit two lists (tracked and untracked).
+pub(crate) fn checkout_conflicting_paths(error: &str) -> Vec<String> {
+    let mut collecting = false;
+    let mut paths = Vec::new();
+    for line in error.lines() {
+        let trimmed = line.trim();
+        if line.to_ascii_lowercase().contains("would be overwritten by checkout:")
+            || line.to_ascii_lowercase().contains("would be overwritten by merge:")
+        {
+            collecting = true;
+            continue;
+        }
+        if collecting {
+            if (line.starts_with('\t') || line.starts_with("    ")) && !trimmed.is_empty() {
+                if !paths.iter().any(|path| path == trimmed) {
+                    paths.push(trimmed.to_string());
+                }
+            } else if !trimmed.is_empty() {
+                collecting = false;
+            }
+        }
+    }
+    paths
+}
+
 fn start_async_checkout(gui: &mut Gui, name: String) {
-    if gui.remote_op_label.is_some() {
+    start_checkout_op(gui, name, false, "Checking out", |git, target| {
+        git.checkout_branch(target)
+    });
+}
+
+/// All branch-switch strategies use the same async checkout lifecycle. Only
+/// plain checkout offers the conflict popup; an assisted checkout failure may
+/// have already changed HEAD or the index and must be reported for inspection.
+fn start_checkout_op<F>(gui: &mut Gui, target: String, assisted: bool, title: &str, op: F)
+where
+    F: FnOnce(&crate::git::GitCommands, &str) -> Result<()> + Send + 'static,
+{
+    if gui.remote_op_label.is_some()
+        || gui.pending_checkout_by_name.is_some()
+        || gui.pending_remote_op.is_some()
+    {
         return;
     }
+    gui.pending_checkout_assisted = assisted;
+    gui.pending_checkout_by_name = Some(target.clone());
+    gui.start_remote_op(RemoteOpKind::Other, title, "", move |git| op(git, &target));
+}
 
-    // Keep HEAD sourced from Git: a rejected checkout must not change the
-    // displayed branch. Successful completion triggers the normal model refresh.
-    gui.pending_checkout_by_name = Some(name.clone());
-    gui.start_remote_op(
-        RemoteOpKind::Other,
-        "Checking out",
-        &format!("Checking out {}", name),
-        move |git| {
-            git.checkout_branch(&name)?;
-            Ok(())
-        },
-    );
+pub(crate) fn resolve_checkout_conflict(
+    gui: &mut Gui,
+    action: usize,
+    source: String,
+    target: String,
+    paths: Vec<String>,
+) -> Result<()> {
+    match action {
+        0 => {
+            // Open the normal commit editor before mutating the index. Canceling
+            // this editor leaves every staged and unstaged file exactly as it was.
+            gui.popup = PopupState::CommitInput {
+                kind: CommitInputKind::Commit,
+                summary_textarea: make_commit_summary_textarea(),
+                body_textarea: make_commit_body_textarea(),
+                body_state: crate::gui::popup::BodySoftWrap::new(),
+                focus: CommitInputFocus::Summary,
+                mode: CommitInputMode::Insert,
+                pending_command: Default::default(),
+                visual_line_anchor: None,
+                undo_stack: Vec::new(),
+                show_help: false,
+                body_scroll_remaining: 0,
+                body_scroll_top: 0,
+                on_confirm: Box::new(move |gui, message| {
+                    if !message.trim().is_empty() {
+                        let message = message.to_string();
+                        start_checkout_op(gui, target.clone(), true, "Committing and switching", move |git, target| {
+                            // Stage and commit ONLY after the user submits the editor.
+                            git.stage_all()?;
+                            git.create_commit(&message, false)?;
+                            // If hooks leave extra changes, checkout retains Git's guard.
+                            git.checkout_branch(target).with_context(|| format!(
+                                "Commit saved on the source branch, but could not switch to {target}"
+                            ))
+                        });
+                    }
+                    Ok(())
+                }),
+            };
+        }
+        1 => {
+            let label = format!("lazygitrs: before switching {source} -> {target}");
+            start_checkout_op(gui, target, true, "Stashing and switching", move |git, target| {
+                // Keep the stash; never drop/pop it automatically. Include untracked.
+                git.stash_include_untracked(&label)?;
+                git.checkout_branch(target).context(
+                    "Changes were saved in a retained stash, but checkout failed"
+                )
+            });
+        }
+        2 => start_checkout_op(gui, target, true, "Moving changes and switching", |git, target| {
+            git.checkout_branch_with_merge(target).context(
+                "Merge checkout did not complete cleanly; inspect the current branch and conflicts"
+            )
+        }),
+        3 => {
+            gui.popup = PopupState::Confirm {
+                title: "Discard changes and switch?".to_string(),
+                message: format!(
+                    "Discard ALL staged and unstaged changes and untracked files on {source}, then switch to {target}?\n\nThis cannot be undone. Ignored files will be kept."
+                ),
+                on_confirm: Box::new(move |gui| {
+                    start_checkout_op(gui, target.clone(), true, "Discarding and switching", |git, target| {
+                        git.discard_all_for_branch_switch()?;
+                        git.checkout_branch(target).context(
+                            "Working tree was discarded, but checkout failed"
+                        )
+                    });
+                    Ok(())
+                }),
+            };
+        }
+        4 => {
+            use crate::gui::popup::{ListPickerCore, ListPickerItem, make_command_palette_search_textarea};
+            if paths.is_empty() {
+                gui.popup = PopupState::Message {
+                    title: "Conflicting files".to_string(),
+                    message: "Git did not provide an individual file list.".to_string(),
+                    kind: MessageKind::Info,
+                };
+                return Ok(());
+            }
+            gui.popup = PopupState::RefPicker {
+                title: "Conflicting files (Enter to inspect in Files)".to_string(),
+                core: ListPickerCore {
+                    items: paths.into_iter().map(|name| ListPickerItem {
+                        label: name.clone(),
+                        value: name,
+                        category: "Conflicts".to_string(),
+                        description: None,
+                    }).collect(),
+                    selected: 0,
+                    search_textarea: make_command_palette_search_textarea(),
+                    scroll_offset: 0,
+                },
+                on_confirm: Box::new(|gui, path| {
+                    gui.context_mgr.set_active(crate::gui::context::ContextId::Files);
+                    gui.pending_conflict_inspect_file = Some(path.to_string());
+                    gui.needs_files_refresh = true;
+                    Ok(())
+                }),
+            };
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn new_branch(gui: &mut Gui) -> Result<()> {

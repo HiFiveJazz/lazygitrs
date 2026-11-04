@@ -31,6 +31,14 @@ impl Gui {
             }
             PopupState::EmailPatch { .. } => return,
             PopupState::PullDivergence { .. } => return,
+            PopupState::BranchSwitchConflict { selected, .. } => {
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => *selected = (*selected + 1).min(4),
+                    MouseEventKind::ScrollUp => *selected = selected.saturating_sub(1),
+                    _ => {}
+                }
+                return;
+            },
             PopupState::CommandOutput {
                 message, scroll, ..
             } => {

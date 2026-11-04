@@ -747,6 +747,38 @@ impl Gui {
                     }
                 }
             }
+            PopupState::BranchSwitchConflict { source, target, paths, selected } => {
+                let source = source.clone();
+                let target = target.clone();
+                let paths = paths.clone();
+                let selected = *selected;
+                let action = match key.code {
+                    KeyCode::Esc => { self.popup = PopupState::None; return Ok(()); }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if let PopupState::BranchSwitchConflict { selected, .. } = &mut self.popup {
+                            *selected = (*selected + 1).min(4);
+                        }
+                        return Ok(());
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if let PopupState::BranchSwitchConflict { selected, .. } = &mut self.popup {
+                            *selected = selected.saturating_sub(1);
+                        }
+                        return Ok(());
+                    }
+                    KeyCode::Enter => Some(selected),
+                    KeyCode::Char('c') => Some(0),
+                    KeyCode::Char('s') => Some(1),
+                    KeyCode::Char('m') => Some(2),
+                    KeyCode::Char('d') => Some(3),
+                    KeyCode::Char('v') => Some(4),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    self.popup = PopupState::None;
+                    controller::branches::resolve_checkout_conflict(self, action, source, target, paths)?;
+                }
+            }
             PopupState::PullDivergence {
                 upstream,
                 ahead,

@@ -1456,8 +1456,9 @@ fn failed_checkout_preserves_head_after_error_dismissal_and_retry() {
             wait_for_test_checkout(&mut gui);
             assert!(matches!(
                 &gui.popup,
-                PopupState::Message { message, kind: MessageKind::Error, .. }
-                    if message.contains("would be overwritten by checkout")
+                PopupState::BranchSwitchConflict { source, target, paths, .. }
+                    if source == "feature" && target == "main"
+                        && paths.len() == 1 && paths[0] == "file"
             ));
             assert_checkout_head(&gui, "feature", &head);
             assert!(gui.pending_checkout_by_name.is_none());
@@ -4068,4 +4069,129 @@ fn startup_head_does_not_override_navigation() {
     assert_eq!(gui.context_mgr.active(), ContextId::Files);
     gui.select_startup_head().unwrap();
     assert_eq!(gui.context_mgr.active(), ContextId::Files);
+}
+
+#[test]
+fn checkout_conflict_parser_only_recognizes_overwrite_and_collects_paths() {
+    use controller::branches::{checkout_conflicting_paths, is_checkout_worktree_conflict};
+    let stderr = "error: Your local changes to the following files would be overwritten by checkout:\n\tsrc/main.rs\n\tsrc/config.rs\nPlease commit your changes or stash them before you switch branches.\nAborting\n";
+    assert!(is_checkout_worktree_conflict(stderr));
+    assert_eq!(checkout_conflicting_paths(stderr), vec!["src/main.rs", "src/config.rs"]);
+    let untracked = "error: The following untracked working tree files would be overwritten by checkout:\n\tnew.txt\nPlease move or remove them before you switch branches.\nAborting";
+    assert!(is_checkout_worktree_conflict(untracked));
+    assert_eq!(checkout_conflicting_paths(untracked), vec!["new.txt"]);
+    assert!(!is_checkout_worktree_conflict("error: pathspec 'foo' did not match any file(s) known to git"));
+    assert!(!is_checkout_worktree_conflict("fatal: Unable to create '.git/index.lock': File exists."));
+}
+
+#[test]
+fn blocked_checkout_opens_recovery_and_escape_keeps_edits() {
+    let repo = TempRepo::new("branch-conflict-cancel");
+    let mut gui = checkout_test_gui(&repo);
+    std::fs::write(repo.path.join("file"), "unfinished feature edits\n").unwrap();
+    request_test_checkout(&mut gui, ' ', "main");
+    wait_for_test_checkout(&mut gui);
+    match &gui.popup {
+        PopupState::BranchSwitchConflict { source, target, paths, .. } => {
+            assert_eq!(source, "feature");
+            assert_eq!(target, "main");
+            assert_eq!(paths.iter().map(String::as_str).collect::<Vec<_>>(), vec!["file"]);
+        }
+        _ => panic!("expected checkout conflict popup"),
+    }
+    gui.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+    assert!(gui.popup == PopupState::None);
+    assert_eq!(repo.git(&["branch", "--show-current"]), "feature");
+    assert_eq!(std::fs::read_to_string(repo.path.join("file")).unwrap(), "unfinished feature edits\n");
+}
+
+#[test]
+fn commit_and_switch_stages_all_only_after_submit_and_commits_on_source() {
+    let repo = TempRepo::new("branch-conflict-commit");
+    repo.git(&["config", "user.name", "Test"]);
+    repo.git(&["config", "user.email", "test@example.com"]);
+    let mut gui = checkout_test_gui(&repo);
+    std::fs::write(repo.path.join("file"), "unfinished feature edits\n").unwrap();
+    std::fs::write(repo.path.join("new.txt"), "new untracked file\n").unwrap();
+    request_test_checkout(&mut gui, ' ', "main");
+    wait_for_test_checkout(&mut gui);
+    assert!(matches!(gui.popup, PopupState::BranchSwitchConflict { .. }));
+    gui.handle_popup_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).unwrap();
+    assert!(matches!(gui.popup, PopupState::CommitInput { .. }));
+    assert_eq!(repo.git(&["diff", "--cached", "--name-only"]), "", "opening editor must not stage anything");
+    let popup = std::mem::replace(&mut gui.popup, PopupState::None);
+    if let PopupState::CommitInput { on_confirm, .. } = popup {
+        on_confirm(&mut gui, "Checkpoint before switch").unwrap();
+    } else {
+        panic!("expected commit editor");
+    }
+    wait_for_test_checkout(&mut gui);
+    assert_eq!(repo.git(&["branch", "--show-current"]), "main");
+    assert_eq!(repo.git(&["log", "-1", "--format=%s", "feature"]), "Checkpoint before switch");
+    assert!(repo.git(&["ls-tree", "-r", "--name-only", "feature"]).contains("new.txt"));
+    assert_eq!(repo.git(&["status", "--porcelain"]), "");
+}
+
+#[test]
+fn stash_and_switch_keeps_stash_instead_of_discarding_or_popping() {
+    let repo = TempRepo::new("branch-conflict-stash");
+    let mut gui = checkout_test_gui(&repo);
+    std::fs::write(repo.path.join("file"), "unfinished feature edits\n").unwrap();
+    std::fs::write(repo.path.join("new.txt"), "new untracked file\n").unwrap();
+    request_test_checkout(&mut gui, ' ', "main");
+    wait_for_test_checkout(&mut gui);
+    gui.handle_popup_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).unwrap();
+    wait_for_test_checkout(&mut gui);
+    assert_eq!(repo.git(&["branch", "--show-current"]), "main");
+    assert_eq!(repo.git(&["status", "--porcelain"]), "");
+    assert!(repo.git(&["stash", "list"]).contains("before switching feature -> main"));
+    assert!(repo.git(&["stash", "show", "--include-untracked", "--name-only"]).contains("new.txt"));
+}
+
+#[test]
+fn discard_and_switch_requires_second_confirmation() {
+    let repo = TempRepo::new("branch-conflict-discard");
+    let mut gui = checkout_test_gui(&repo);
+    std::fs::write(repo.path.join("file"), "unfinished feature edits\n").unwrap();
+    std::fs::write(repo.path.join("new.txt"), "new untracked file\n").unwrap();
+    request_test_checkout(&mut gui, ' ', "main");
+    wait_for_test_checkout(&mut gui);
+    gui.handle_popup_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)).unwrap();
+    assert!(matches!(gui.popup, PopupState::Confirm { .. }));
+    assert_eq!(repo.git(&["branch", "--show-current"]), "feature");
+    assert!(repo.path.join("new.txt").exists());
+    gui.handle_popup_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).unwrap();
+    wait_for_test_checkout(&mut gui);
+    assert_eq!(repo.git(&["branch", "--show-current"]), "main");
+    assert!(!repo.path.join("new.txt").exists());
+    assert_eq!(repo.git(&["status", "--porcelain"]), "");
+}
+
+#[test]
+fn conflicting_file_picker_follows_async_files_refresh() {
+    let repo = TempRepo::new("branch-conflict-inspect");
+    let mut gui = checkout_test_gui(&repo);
+    std::fs::write(repo.path.join("file"), "local edits needing preview\n").unwrap();
+    request_test_checkout(&mut gui, ' ', "main");
+    wait_for_test_checkout(&mut gui);
+    gui.handle_popup_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)).unwrap();
+    assert!(matches!(gui.popup, PopupState::RefPicker { .. }));
+    gui.handle_popup_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
+    assert_eq!(gui.context_mgr.active(), ContextId::Files);
+    assert_eq!(gui.pending_conflict_inspect_file.as_deref(), Some("file"));
+    gui.start_files_refresh_async();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while gui.files_refresh_in_progress {
+        assert!(Instant::now() < deadline, "files refresh did not finish");
+        gui.receive_files_refresh();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(gui.pending_conflict_inspect_file.is_none());
+    let selected = gui.context_mgr.selected_active();
+    let file_index = if gui.show_file_tree {
+        gui.file_tree_nodes[selected].file_index.unwrap()
+    } else {
+        selected
+    };
+    assert_eq!(gui.model.lock().unwrap().files[file_index].name, "file");
 }

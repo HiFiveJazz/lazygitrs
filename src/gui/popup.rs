@@ -1945,6 +1945,14 @@ pub enum PopupState {
         /// When set, this menu item index is running an async operation (shows inline spinner).
         loading_index: Option<usize>,
     },
+    /// Checkout was refused because local changes would be overwritten.
+    /// The existing branch remains checked out until an explicit choice runs.
+    BranchSwitchConflict {
+        source: String,
+        target: String,
+        paths: Vec<String>,
+        selected: usize,
+    },
     /// Guided reconciliation UI shown when the current branch and upstream have diverged.
     /// This is intentionally a dedicated large modal instead of the compact generic menu
     /// so the consequences of rebase/merge can be explained without truncation.
