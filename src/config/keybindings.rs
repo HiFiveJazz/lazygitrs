@@ -93,6 +93,20 @@ pub struct UniversalKeybinding {
     pub scroll_down_main_alt1: String,
     pub undo: String,
     pub redo: String,
+    #[serde(rename = "resetToRef")]
+    pub reset_to_ref: String,
+    #[serde(rename = "toggleCommitDetails")]
+    pub toggle_commit_details: String,
+    #[serde(rename = "toggleCommitDetailsFiles")]
+    pub toggle_commit_details_files: String,
+    #[serde(rename = "prevHunk")]
+    pub prev_hunk: String,
+    #[serde(rename = "nextHunk")]
+    pub next_hunk: String,
+    #[serde(rename = "toggleOldOnly")]
+    pub toggle_old_only: String,
+    #[serde(rename = "toggleNewOnly")]
+    pub toggle_new_only: String,
     #[serde(rename = "filteringMenu")]
     pub filtering_menu: String,
     #[serde(rename = "diffingMenu")]
@@ -157,8 +171,8 @@ impl Default for UniversalKeybinding {
             next_page: "<pgdown>".into(),
             scroll_left: "H".into(),
             scroll_right: "L".into(),
-            goto_top: "<".into(),
-            goto_bottom: ">".into(),
+            goto_top: "gg".into(),
+            goto_bottom: "G".into(),
             prev_block: "<left>".into(),
             next_block: "<right>".into(),
             prev_block_alt: "h".into(),
@@ -174,12 +188,19 @@ impl Default for UniversalKeybinding {
             scroll_down_main: "<pgdown>".into(),
             scroll_up_main_alt1: "K".into(),
             scroll_down_main_alt1: "J".into(),
-            undo: "z".into(),
+            undo: "u".into(),
             redo: "<c-z>".into(),
+            reset_to_ref: "Z".into(),
+            toggle_commit_details: "t".into(),
+            toggle_commit_details_files: "T".into(),
+            prev_hunk: "[".into(),
+            next_hunk: "]".into(),
+            toggle_old_only: "(".into(),
+            toggle_new_only: ")".into(),
             filtering_menu: "<c-s>".into(),
             diffing_menu: "W".into(),
             copy_to_clipboard: "<c-o>".into(),
-            refresh: "R".into(),
+            refresh: "<c-l>".into(),
             create_rebase_options_menu: "m".into(),
             push_files: "P".into(),
             pull_files: "p".into(),
@@ -187,7 +208,7 @@ impl Default for UniversalKeybinding {
             prev_screen_mode: "_".into(),
             create_patch_options_menu: "<c-p>".into(),
             revert_block: "<enter>".into(),
-            undo_revert_block: "u".into(),
+            undo_revert_block: "U".into(),
             shrink_side_panel: "<a-h>".into(),
             expand_side_panel: "<a-l>".into(),
             side_panel_full: "<a-k>".into(),
@@ -217,7 +238,7 @@ pub struct StatusKeybinding {
 impl Default for StatusKeybinding {
     fn default() -> Self {
         Self {
-            check_for_update: "u".into(),
+            check_for_update: "U".into(),
             recent_repos: "<enter>".into(),
             all_branches_log_graph: "a".into(),
         }
@@ -235,8 +256,6 @@ pub struct FilesKeybinding {
     pub commit_changes_without_hook: String,
     #[serde(rename = "amendLastCommit")]
     pub amend_last_commit: String,
-    #[serde(rename = "commitChangesWithEditor")]
-    pub commit_changes_with_editor: String,
     #[serde(rename = "toggleStagedAll")]
     pub toggle_staged_all: String,
     #[serde(rename = "stashAllChanges")]
@@ -260,7 +279,6 @@ impl Default for FilesKeybinding {
             generate_ai_commit: "<c-g>".into(),
             commit_changes_without_hook: "w".into(),
             amend_last_commit: "A".into(),
-            commit_changes_with_editor: "C".into(),
             toggle_staged_all: "a".into(),
             stash_all_changes: "s".into(),
             view_stash_options: "S".into(),
@@ -306,7 +324,7 @@ impl Default for BranchesKeybinding {
             rename_branch: "R".into(),
             merge_into_current_branch: "M".into(),
             fast_forward: "f".into(),
-            set_upstream: "u".into(),
+            set_upstream: "U".into(),
         }
     }
 }
@@ -364,7 +382,7 @@ impl Default for CommitsKeybinding {
             squash_down: "s".into(),
             rename_commit: "r".into(),
             rename_commit_with_editor: "R".into(),
-            view_reset_options: "g".into(),
+            view_reset_options: "z".into(),
             mark_commit_as_fixup: "f".into(),
             create_fixup_commit: "F".into(),
             squash_above_commits: "S".into(),
@@ -507,6 +525,33 @@ mod tests {
             parse_key(&config.universal.scroll_down_main_alt1),
             Some(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT))
         );
+    }
+
+    #[test]
+    fn vim_navigation_hunks_and_undo_defaults_do_not_collide() {
+        let kb = KeybindingConfig::default();
+        assert_eq!(kb.universal.goto_top, "gg");
+        assert_eq!(kb.universal.goto_bottom, "G");
+        assert_eq!(kb.universal.reset_to_ref, "Z");
+        assert_eq!(kb.commits.view_reset_options, "z");
+        assert_eq!(kb.universal.refresh, "<c-l>");
+        assert_eq!(kb.branches.rename_branch, "R");
+        assert_eq!(kb.universal.undo, "u");
+        assert_eq!(kb.universal.undo_revert_block, "U");
+        assert_eq!(kb.status.check_for_update, "U");
+        assert_eq!(kb.branches.set_upstream, "U");
+        assert_eq!(kb.universal.prev_hunk, "[");
+        assert_eq!(kb.universal.next_hunk, "]");
+        assert_eq!(kb.universal.toggle_old_only, "(");
+        assert_eq!(kb.universal.toggle_new_only, ")");
+        assert_eq!(kb.universal.toggle_commit_details, "t");
+        assert_eq!(kb.universal.toggle_commit_details_files, "T");
+        assert!(parse_key(&kb.universal.goto_top).is_none(), "gg is a sequence, not a key");
+
+        let legacy: KeybindingConfig = serde_yaml::from_str(
+            "files:\n  commitChangesWithEditor: C\n"
+        ).unwrap();
+        assert!(!serde_yaml::to_string(&legacy).unwrap().contains("commitChangesWithEditor"));
     }
 
     #[test]

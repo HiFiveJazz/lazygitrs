@@ -26,8 +26,50 @@ impl Gui {
         false
     }
 
+    /// Recognize a configurable one- or two-character top motion. Keeping
+    /// the pending prefix in `Gui` lets this survive separate terminal events.
+    fn try_handle_goto_top(&mut self, key: KeyEvent) -> bool {
+        let binding = self.config.user_config.keybinding.universal.goto_top.clone();
+        let mut chars = binding.chars();
+        let first = chars.next();
+        let second = chars.next();
+        let is_pair = first.is_some() && second.is_some() && chars.next().is_none();
+        if is_pair {
+            let first = first.unwrap().to_string();
+            let second = second.unwrap().to_string();
+            if self.pending_goto_top && matches_key(key, &second) {
+                self.pending_goto_top = false;
+                if self.diff_focused {
+                    self.diff_view.scroll_offset = 0;
+                } else {
+                    self.context_mgr.set_selection(0);
+                }
+                return true;
+            }
+            self.pending_goto_top = false;
+            if matches_key(key, &first) {
+                self.pending_goto_top = true;
+                return true;
+            }
+            return false;
+        }
+        self.pending_goto_top = false;
+        if matches_key(key, &binding) {
+            if self.diff_focused {
+                self.diff_view.scroll_offset = 0;
+            } else {
+                self.context_mgr.set_selection(0);
+            }
+            return true;
+        }
+        false
+    }
+
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         self.pending_startup_head = false;
+        if self.popup != PopupState::None || self.search_active || self.shell_command_job.is_some() {
+            self.pending_goto_top = false;
+        }
         if self.shell_command_job.is_some() {
             if key.code == KeyCode::Esc
                 || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
@@ -79,17 +121,24 @@ impl Gui {
             return Ok(());
         }
 
-        // Rebase mode takes priority over everything
+        // These specialized modes own their own navigation. Never let a
+        // partially entered list-motion leak into a mode or popup.
         if self.rebase_mode.active {
+            self.pending_goto_top = false;
             return controller::rebase_mode::handle_key(self, key);
         }
-
-        // Diff mode takes priority over normal UI
         if self.diff_mode.active {
+            self.pending_goto_top = false;
             return controller::diff_mode::handle_key(self, key);
         }
 
         if self.try_handle_panel_resize_key(key) {
+            self.pending_goto_top = false;
+            return Ok(());
+        }
+        // `gg` is a key sequence, not two simultaneous keys. Resolve it
+        // before context handlers, allowing `G` to jump to the bottom.
+        if self.try_handle_goto_top(key) {
             return Ok(());
         }
         let keybindings = &self.config.user_config.keybinding;
@@ -263,11 +312,7 @@ impl Gui {
             return Ok(());
         }
 
-        // Goto top/bottom
-        if matches_key(key, &keybindings.universal.goto_top) {
-            self.context_mgr.set_selection(0);
-            return Ok(());
-        }
+        // Go to top is handled above (it may be a multi-key `gg`).
         if matches_key(key, &keybindings.universal.goto_bottom) {
             let model = self.model.lock().unwrap();
             let len = self.context_mgr.list_len(&model);
@@ -306,12 +351,12 @@ impl Gui {
             return Ok(());
         }
 
-        // Next/prev hunk with { and }
-        if key.code == KeyCode::Char('{') {
+        // The same configurable hunk bindings work with either focus.
+        if matches_key(key, &keybindings.universal.prev_hunk) {
             self.diff_view.prev_hunk();
             return Ok(());
         }
-        if key.code == KeyCode::Char('}') {
+        if matches_key(key, &keybindings.universal.next_hunk) {
             self.diff_view.next_hunk();
             return Ok(());
         }
@@ -374,7 +419,7 @@ impl Gui {
             return Ok(());
         }
 
-        // Undo (z)
+        // Undo (u)
         if matches_key(key, &keybindings.universal.undo) {
             return self.undo();
         }
@@ -436,26 +481,21 @@ impl Gui {
             return Ok(());
         }
 
-        // Universal "G" key: global reset picker (lazygit `universal.viewResetOptions`).
-        // Opens a searchable branch/commit picker, then soft/mixed/hard options.
-        // Lowercase `g` remains contextual (commits.viewResetOptions) and is handled
-        // by per-context controllers — plain_char_key only matches uppercase G.
-        if plain_char_key(key, 'G') {
+        // The configurable reset picker no longer consumes Vim's `G` motion.
+        if matches_key(key, &keybindings.universal.reset_to_ref) {
             self.show_reset_picker();
             return Ok(());
         }
 
-        // `t` toggles commit details in commit lists; `T` does so in file
-        // subviews because lowercase `t` toggles the tree there. Both are
-        // handled here so these bindings stay consistent across controllers.
-        let details_key = if matches!(self.context_mgr.active(),
+        // Read the same config key that the help palette and border hint use.
+        let details_binding = if matches!(self.context_mgr.active(),
             ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles)
         {
-            'T' // `t` is reserved for the file tree in these subviews.
+            &keybindings.universal.toggle_commit_details_files
         } else {
-            't'
+            &keybindings.universal.toggle_commit_details
         };
-        if plain_char_key(key, details_key) && self.context_has_commit_details() {
+        if matches_key(key, details_binding) && self.context_has_commit_details() {
             self.show_commit_details = !self.show_commit_details;
             self.persist_commit_details_visibility();
             return Ok(());
@@ -760,6 +800,11 @@ impl Gui {
             }
         }
 
+        if matches_key(key, &keybindings.universal.goto_bottom) {
+            self.diff_view.scroll_offset = self.diff_view.lines.len().saturating_sub(1);
+            return Ok(());
+        }
+
         // Configured H/L scroll keybindings
         if matches_key(key, &keybindings.universal.scroll_left) {
             self.diff_view.scroll_left(4);
@@ -767,6 +812,39 @@ impl Gui {
         }
         if matches_key(key, &keybindings.universal.scroll_right) {
             self.diff_view.scroll_right(4);
+            return Ok(());
+        }
+
+        if matches_key(key, &keybindings.universal.next_hunk) {
+            if self.context_mgr.active() == ContextId::Files {
+                self.diff_view.cycle_next_revert_hunk();
+            } else {
+                self.diff_view.next_hunk();
+            }
+            return Ok(());
+        }
+        if matches_key(key, &keybindings.universal.prev_hunk) {
+            if self.context_mgr.active() == ContextId::Files {
+                self.diff_view.cycle_prev_revert_hunk();
+            } else {
+                self.diff_view.prev_hunk();
+            }
+            return Ok(());
+        }
+        if controller::tree::matches_key(key, &keybindings.universal.toggle_new_only) {
+            use crate::pager::side_by_side::DiffSideView;
+            self.diff_view.side_view = match self.diff_view.side_view {
+                DiffSideView::NewOnly => DiffSideView::Both,
+                _ => DiffSideView::NewOnly,
+            };
+            return Ok(());
+        }
+        if controller::tree::matches_key(key, &keybindings.universal.toggle_old_only) {
+            use crate::pager::side_by_side::DiffSideView;
+            self.diff_view.side_view = match self.diff_view.side_view {
+                DiffSideView::OldOnly => DiffSideView::Both,
+                _ => DiffSideView::OldOnly,
+            };
             return Ok(());
         }
 
@@ -799,39 +877,6 @@ impl Gui {
             KeyCode::Char('l') | KeyCode::Right => {
                 self.diff_view.scroll_right(4);
             }
-            // { and } jump between hunks. In Files context they also select
-            // the hunk as the revert target so the marker glyph turns
-            // accent-coloured; the scroll motion stays the same as plain
-            // hunk navigation (always jumps, even if already in viewport).
-            KeyCode::Char('}') => {
-                if self.context_mgr.active() == ContextId::Files {
-                    self.diff_view.cycle_next_revert_hunk();
-                } else {
-                    self.diff_view.next_hunk();
-                }
-            }
-            KeyCode::Char('{') => {
-                if self.context_mgr.active() == ContextId::Files {
-                    self.diff_view.cycle_prev_revert_hunk();
-                } else {
-                    self.diff_view.prev_hunk();
-                }
-            }
-            // [ and ] toggle old-only / new-only view
-            KeyCode::Char(']') => {
-                use crate::pager::side_by_side::DiffSideView;
-                self.diff_view.side_view = match self.diff_view.side_view {
-                    DiffSideView::NewOnly => DiffSideView::Both,
-                    _ => DiffSideView::NewOnly,
-                };
-            }
-            KeyCode::Char('[') => {
-                use crate::pager::side_by_side::DiffSideView;
-                self.diff_view.side_view = match self.diff_view.side_view {
-                    DiffSideView::OldOnly => DiffSideView::Both,
-                    _ => DiffSideView::OldOnly,
-                };
-            }
             // z toggles line wrapping
             KeyCode::Char('z') => {
                 self.diff_view.wrap = !self.diff_view.wrap;
@@ -844,14 +889,6 @@ impl Gui {
             }
             KeyCode::PageUp => {
                 self.diff_view.scroll_up(20);
-            }
-            // g/G for top/bottom
-            KeyCode::Char('g') => {
-                self.diff_view.scroll_offset = 0;
-            }
-            KeyCode::Char('G') => {
-                let max = self.diff_view.lines.len().saturating_sub(1);
-                self.diff_view.scroll_offset = max;
             }
             _ => {}
         }

@@ -82,11 +82,6 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return amend_commit(gui);
     }
 
-    // Commit with editor
-    if matches_key(key, &keybindings.files.commit_changes_with_editor) {
-        return commit_with_editor(gui);
-    }
-
     // Toggle file tree view
     if matches_key(key, &keybindings.files.toggle_tree_view) {
         gui.show_file_tree = !gui.show_file_tree;
@@ -1060,32 +1055,6 @@ fn amend_commit(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
-fn commit_with_editor(gui: &mut Gui) -> Result<()> {
-    // Run git commit which opens $EDITOR
-    // This requires suspending the TUI temporarily
-    gui.popup = PopupState::Input {
-        title: "Commit message (or leave empty to open editor)".to_string(),
-        textarea: make_textarea("Enter commit message..."),
-        on_confirm: Box::new(|gui, message| {
-            if !message.is_empty() {
-                let message = message.to_string();
-                gui.start_remote_op(
-                    RemoteOpKind::LocalAppend,
-                    "Commit",
-                    "Creating commit...",
-                    move |git| {
-                        git.create_commit(&message, false)?;
-                        Ok(())
-                    },
-                );
-            }
-            Ok(())
-        }),
-        is_commit: false,
-        confirm_focused: false,
-    };
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

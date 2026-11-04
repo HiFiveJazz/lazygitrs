@@ -26,8 +26,8 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig)
         return enter_submodule(gui);
     }
 
-    // u: update all submodules
-    if key.code == KeyCode::Char('u') {
+    // U: update all submodules (lowercase u is global Undo)
+    if key.code == KeyCode::Char('U') {
         return update_all_submodules(gui);
     }
 

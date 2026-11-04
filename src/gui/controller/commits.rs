@@ -263,7 +263,7 @@ fn show_reset_menu(gui: &mut Gui) -> Result<()> {
 }
 
 /// Shared soft/mixed/hard reset options for a branch, tag, or commit ref.
-/// Used by contextual `g` handlers and the global `G` reset picker.
+/// Used by contextual reset handlers and the global configurable reset picker.
 pub fn show_reset_menu_for_ref(gui: &mut Gui, ref_name: &str) -> Result<()> {
     let ref_name = ref_name.trim();
     if ref_name.is_empty() {

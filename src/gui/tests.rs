@@ -3,6 +3,90 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 
 #[test]
+fn gg_is_a_sequence_and_g_and_z_do_not_reset_the_repository() {
+    let repo = TempRepo::new("vim-list-jump");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    let count = gui.model.lock().unwrap().files.len();
+    assert!(count >= 3);
+    gui.context_mgr.set_selection(count - 1);
+
+    gui.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)).unwrap();
+    assert_eq!(gui.context_mgr.selected_active(), count - 1);
+    assert!(gui.pending_goto_top);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)).unwrap();
+    assert_eq!(gui.context_mgr.selected_active(), 0);
+    assert!(!gui.pending_goto_top);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)).unwrap();
+    assert_eq!(gui.context_mgr.selected_active(), count - 1);
+    assert!(gui.popup == PopupState::None, "G must navigate, not open reset");
+
+    gui.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
+    assert!(!gui.pending_goto_top, "other keys cancel a partial gg");
+    gui.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)).unwrap();
+    assert!(gui.pending_goto_top);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)).unwrap();
+    assert_eq!(gui.context_mgr.selected_active(), 0);
+}
+
+#[test]
+fn branch_rename_R_is_not_captured_by_universal_refresh() {
+    let repo = TempRepo::new("rename-R");
+    let mut gui = tree_test_gui(&repo);
+    gui.model.lock().unwrap().branches = gui.git.load_branches().unwrap();
+    gui.context_mgr.set_active(ContextId::Branches);
+    gui.context_mgr.set_selection(0);
+    gui.needs_refresh = false;
+    gui.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)).unwrap();
+    assert!(matches!(gui.popup, PopupState::Input { ref title, .. } if title.starts_with("Rename branch")));
+    assert!(!gui.needs_refresh);
+    gui.popup = PopupState::None;
+    gui.handle_key(crate::config::keybindings::parse_key("<c-l>").unwrap()).unwrap();
+    assert!(gui.needs_refresh);
+}
+
+#[test]
+fn files_has_only_one_commit_binding_and_diff_hunks_use_brackets() {
+    let repo = TempRepo::new("palette-key-cleanup");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT)).unwrap();
+    assert!(gui.popup == PopupState::None, "C should not duplicate c");
+    gui.show_command_palette();
+    let PopupState::CommandPalette { sections, .. } = &gui.popup else { panic!("expected palette") };
+    assert!(!sections.iter().flat_map(|s| &s.entries).any(|e| e.description == "Commit with editor"));
+    let global = sections.iter().find(|s| s.title == "Universal").unwrap();
+    for (action, key) in [("Undo", "u"), ("Go to top", "gg"), ("Go to bottom", "G"), ("Refresh", "<c-l>"), ("Reset to...", "Z")] {
+        assert!(global.entries.iter().any(|e| e.description == action && e.key == key), "{action} {key}");
+    }
+    gui.popup = PopupState::None;
+    gui.diff_focused = true;
+    gui.show_diff_command_palette();
+    let PopupState::CommandPalette { sections, .. } = &gui.popup else { panic!("expected diff palette") };
+    let entries = &sections[0].entries;
+    for (desc, key) in [("Toggle old-only view", "("), ("Toggle new-only view", ")")] {
+        assert!(entries.iter().any(|e| e.description == desc && e.key == key));
+    }
+    assert!(entries.iter().any(|e| e.description.contains("Cycle prev / next hunk") && e.key == "[ / ]"));
+}
+
+#[test]
+fn shifted_parentheses_toggle_diff_side_view_without_stealing_hunks() {
+    use crate::pager::side_by_side::DiffSideView;
+    let repo = TempRepo::new("side-view-shift");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.diff_focused = true;
+    gui.diff_view.side_view = DiffSideView::Both;
+    gui.handle_key(KeyEvent::new(KeyCode::Char('('), KeyModifiers::SHIFT)).unwrap();
+    assert!(matches!(gui.diff_view.side_view, DiffSideView::OldOnly));
+    gui.handle_key(KeyEvent::new(KeyCode::Char(')'), KeyModifiers::SHIFT)).unwrap();
+    assert!(matches!(gui.diff_view.side_view, DiffSideView::NewOnly));
+}
+
+#[test]
 fn pull_is_only_available_in_status_branches_and_remotes() {
     let kb = crate::config::KeybindingConfig::default();
     let pull = crate::config::keybindings::parse_key(&kb.universal.pull_files).unwrap();
@@ -53,6 +137,30 @@ fn remapped_keys_and_scoped_pull_match_command_palette() {
             let down = local.iter().position(|e| e.description == "Move commit down").unwrap();
             assert_eq!(up.abs_diff(down), 1, "reorder commands should stay grouped");
         }
+    }
+}
+
+#[test]
+fn custom_commit_details_keys_update_both_handler_and_command_palette() {
+    let repo = TempRepo::new("custom-detail-keys");
+    let mut gui = tree_test_gui(&repo);
+    let kb = &mut Arc::get_mut(&mut gui.config).unwrap().user_config.keybinding;
+    kb.universal.toggle_commit_details = "v".into();
+    kb.universal.toggle_commit_details_files = "Y".into();
+    for (ctx, key, expected) in [
+        (ContextId::Commits, 'v', "v"),
+        (ContextId::CommitFiles, 'Y', "Y"),
+    ] {
+        gui.popup = PopupState::None;
+        gui.context_mgr.set_active(ctx);
+        let old = gui.show_commit_details;
+        gui.handle_key(KeyEvent::new(KeyCode::Char(key),
+            if key.is_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE })).unwrap();
+        assert_ne!(gui.show_commit_details, old, "{ctx:?}");
+        gui.show_command_palette();
+        let PopupState::CommandPalette { sections, .. } = &gui.popup else { panic!("expected palette") };
+        assert!(sections.iter().flat_map(|s| &s.entries).any(|e|
+            e.description == "Toggle commit details panel" && e.key == expected), "{ctx:?}");
     }
 }
 
@@ -223,7 +331,7 @@ fn plain_character_shortcuts_reject_extra_modifiers() {
         ),
         'I'
     ));
-    // Global reset picker (G) uses the same plain-char matching as I.
+    // Plain character shortcuts accept SHIFT but reject extra modifiers.
     assert!(plain_char_key(
         KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
         'G'
@@ -235,7 +343,7 @@ fn plain_character_shortcuts_reject_extra_modifiers() {
         ),
         'G'
     ));
-    // Lowercase g must not match the global reset picker binding.
+    // Lowercase g is distinct from uppercase G (bottom motion).
     assert!(!plain_char_key(
         KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
         'G'

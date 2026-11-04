@@ -738,6 +738,33 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
+    // Reborrow after tree navigation, which mutably borrows `gui`.
+    let keybindings = &gui.config.user_config.keybinding;
+    if matches_key(key, &keybindings.universal.next_hunk) {
+        gui.diff_view.next_hunk();
+        return Ok(());
+    }
+    if matches_key(key, &keybindings.universal.prev_hunk) {
+        gui.diff_view.prev_hunk();
+        return Ok(());
+    }
+    if super::tree::matches_key(key, &keybindings.universal.toggle_new_only) {
+        use crate::pager::side_by_side::DiffSideView;
+        gui.diff_view.side_view = match gui.diff_view.side_view {
+            DiffSideView::NewOnly => DiffSideView::Both,
+            _ => DiffSideView::NewOnly,
+        };
+        return Ok(());
+    }
+    if super::tree::matches_key(key, &keybindings.universal.toggle_old_only) {
+        use crate::pager::side_by_side::DiffSideView;
+        gui.diff_view.side_view = match gui.diff_view.side_view {
+            DiffSideView::OldOnly => DiffSideView::Both,
+            _ => DiffSideView::OldOnly,
+        };
+        return Ok(());
+    }
+
     match key.code {
         KeyCode::Esc => {
             if !gui.diff_view.search_query.is_empty() {
@@ -763,26 +790,6 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Char('l') | KeyCode::Right => {
             gui.diff_view.scroll_right(4);
-        }
-        KeyCode::Char('}') => {
-            gui.diff_view.next_hunk();
-        }
-        KeyCode::Char('{') => {
-            gui.diff_view.prev_hunk();
-        }
-        KeyCode::Char(']') => {
-            use crate::pager::side_by_side::DiffSideView;
-            gui.diff_view.side_view = match gui.diff_view.side_view {
-                DiffSideView::NewOnly => DiffSideView::Both,
-                _ => DiffSideView::NewOnly,
-            };
-        }
-        KeyCode::Char('[') => {
-            use crate::pager::side_by_side::DiffSideView;
-            gui.diff_view.side_view = match gui.diff_view.side_view {
-                DiffSideView::OldOnly => DiffSideView::Both,
-                _ => DiffSideView::OldOnly,
-            };
         }
         KeyCode::Char('z') => {
             gui.diff_view.wrap = !gui.diff_view.wrap;
@@ -1125,8 +1132,8 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
                 "Navigate files or commits / Scroll diff".into(),
             ),
             CommandEntry::keybinding("PgUp/PgDn".into(), "Page through commits".into()),
-            CommandEntry::keybinding("{/}".into(), "Previous / next hunk".into()),
-            CommandEntry::keybinding("[/]".into(), "Toggle old / new only view".into()),
+            CommandEntry::keybinding(format!("{} / {}", gui.config.user_config.keybinding.universal.prev_hunk, gui.config.user_config.keybinding.universal.next_hunk), "Previous / next hunk".into()),
+            CommandEntry::keybinding(format!("{} / {}", gui.config.user_config.keybinding.universal.toggle_old_only, gui.config.user_config.keybinding.universal.toggle_new_only), "Toggle old / new only view".into()),
             CommandEntry::keybinding(
                 gui.config
                     .user_config

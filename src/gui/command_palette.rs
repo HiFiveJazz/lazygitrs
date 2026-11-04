@@ -157,11 +157,11 @@ impl Gui {
                     kb.universal.create_patch_options_menu.clone(),
                     "Custom patch builder".into(),
                 ),
-                CommandEntry::keybinding("{/}".into(), "Previous/next hunk".into()),
+                CommandEntry::keybinding(format!("{} / {}", kb.universal.prev_hunk, kb.universal.next_hunk), "Previous/next hunk".into()),
                 CommandEntry::keybinding(";".into(), "Toggle command log".into()),
                 CommandEntry::keybinding("W".into(), "Compare / Diff mode".into()),
                 CommandEntry::keybinding("I".into(), "Interactive rebase onto...".into()),
-                CommandEntry::keybinding("G".into(), "Reset to...".into()),
+                CommandEntry::keybinding(kb.universal.reset_to_ref.clone(), "Reset to...".into()),
                 CommandEntry::keybinding("1-5".into(), "Jump to panel".into()),
                 CommandEntry::keybinding("?".into(), "Show command palette".into()),
                 CommandEntry::action(
@@ -203,10 +203,6 @@ impl Gui {
                         "Amend last commit".into(),
                     ),
                     CommandEntry::keybinding(
-                        kb.files.commit_changes_with_editor.clone(),
-                        "Commit with editor".into(),
-                    ),
-                    CommandEntry::keybinding(
                         kb.files.toggle_staged_all.clone(),
                         "Toggle stage all".into(),
                     ),
@@ -236,7 +232,7 @@ impl Gui {
                     ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
                     CommandEntry::keybinding(
-                        "{/}".into(),
+                        format!("{} / {}", kb.universal.prev_hunk, kb.universal.next_hunk),
                         "Cycle prev/next revert block in diff".into(),
                     ),
                     CommandEntry::keybinding(
@@ -269,7 +265,7 @@ impl Gui {
                     CommandEntry::keybinding("a".into(), "Add submodule".into()),
                     CommandEntry::keybinding("d".into(), "Remove submodule".into()),
                     CommandEntry::keybinding("e".into(), "Enter submodule".into()),
-                    CommandEntry::keybinding("u".into(), "Update all submodules".into()),
+                    CommandEntry::keybinding("U".into(), "Update all submodules".into()),
                     CommandEntry::keybinding("i".into(), "Init submodules".into()),
                 ],
             },
@@ -331,7 +327,7 @@ impl Gui {
                         CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
                         CommandEntry::keybinding(kb.files.toggle_tree_view.clone(), "Toggle tree view".into()),
                         CommandEntry::keybinding(kb.universal.toggle_diff_view_layout.clone(), "Toggle unified / side-by-side view".into()),
-                        CommandEntry::keybinding("T".into(), "Toggle commit details panel".into()),
+                        CommandEntry::keybinding(kb.universal.toggle_commit_details_files.clone(), "Toggle commit details panel".into()),
                     ]
                 } else {
                     vec![
@@ -344,7 +340,7 @@ impl Gui {
                         "Filter commits".into(),
                     ),
                         CommandEntry::keybinding(kb.universal.toggle_diff_view_layout.clone(), "Toggle unified / side-by-side view".into()),
-                        CommandEntry::keybinding("t".into(), "Toggle commit details panel".into()),
+                        CommandEntry::keybinding(kb.universal.toggle_commit_details.clone(), "Toggle commit details panel".into()),
                     ]
                 },
             },
@@ -427,7 +423,7 @@ impl Gui {
                         kb.commits.reset_cherry_pick.clone(),
                         "Clear cherry-pick clipboard".into(),
                     ),
-                    CommandEntry::keybinding("t".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding(kb.universal.toggle_commit_details.clone(), "Toggle commit details panel".into()),
                 ];
                 if !self.cherry_pick_clipboard.is_empty() {
                     entries.insert(
@@ -476,7 +472,7 @@ impl Gui {
                         "Toggle tree view".into(),
                     ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
-                    CommandEntry::keybinding("T".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding(kb.universal.toggle_commit_details_files.clone(), "Toggle commit details panel".into()),
                 ],
             },
             ContextId::Reflog => CommandSection {
@@ -501,7 +497,7 @@ impl Gui {
                         "Copy (cherry-pick)".into(),
                     ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
-                    CommandEntry::keybinding("t".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding(kb.universal.toggle_commit_details.clone(), "Toggle commit details panel".into()),
                 ],
             },
             ContextId::Stash => CommandSection {
@@ -521,7 +517,7 @@ impl Gui {
             ContextId::StashFiles => CommandSection {
                 title: "Stash Files".into(),
                 entries: vec![
-                    CommandEntry::keybinding("T".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding(kb.universal.toggle_commit_details_files.clone(), "Toggle commit details panel".into()),
                     CommandEntry::keybinding(
                         kb.commits.open_log_menu.clone(),
                         "Filter files".into(),
@@ -577,7 +573,7 @@ impl Gui {
                     CommandEntry::keybinding("n".into(), "Create tag".into()),
                     CommandEntry::keybinding("d".into(), "Delete tag".into()),
                     CommandEntry::keybinding("P".into(), "Push tag".into()),
-                    CommandEntry::keybinding("g".into(), "Reset options".into()),
+                    CommandEntry::keybinding(kb.commits.view_reset_options.clone(), "Reset options".into()),
                 ],
             },
             ContextId::Status => CommandSection {
@@ -608,6 +604,7 @@ impl Gui {
     }
 
     pub(super) fn show_diff_command_palette(&mut self) {
+        let kb = &self.config.user_config.keybinding;
         use crate::gui::context::ContextId;
         let grep_supported = self.diff_mode.active
             || matches!(
@@ -621,11 +618,11 @@ impl Gui {
             CommandEntry::keybinding("j/k".into(), "Scroll down / up".into()),
             CommandEntry::keybinding("h/l".into(), "Scroll left / right".into()),
             CommandEntry::keybinding(
-                "{/}".into(),
+                format!("{} / {}", kb.universal.prev_hunk, kb.universal.next_hunk),
                 "Cycle prev / next hunk (selects revert block in Files)".into(),
             ),
-            CommandEntry::keybinding("[".into(), "Toggle old-only view".into()),
-            CommandEntry::keybinding("]".into(), "Toggle new-only view".into()),
+            CommandEntry::keybinding(kb.universal.toggle_old_only.clone(), "Toggle old-only view".into()),
+            CommandEntry::keybinding(kb.universal.toggle_new_only.clone(), "Toggle new-only view".into()),
             CommandEntry::keybinding(
                 self.config
                     .user_config
@@ -636,7 +633,7 @@ impl Gui {
                 "Toggle unified / side-by-side view".into(),
             ),
             CommandEntry::keybinding("z".into(), "Toggle line wrap".into()),
-            CommandEntry::keybinding("g/G".into(), "Go to top / bottom".into()),
+            CommandEntry::keybinding(format!("{} / {}", kb.universal.goto_top, kb.universal.goto_bottom), "Go to top / bottom".into()),
             CommandEntry::keybinding("PgUp/PgDn".into(), "Page up / down".into()),
             CommandEntry::keybinding("/".into(), "Search in diff".into()),
             CommandEntry::keybinding("n/N".into(), "Next / previous search match".into()),
@@ -657,7 +654,7 @@ impl Gui {
                 "Click revert icon to revert that block".into(),
             ),
             CommandEntry::keybinding(
-                "u".into(),
+                kb.universal.undo_revert_block.clone(),
                 if self.diff_view.revert_undo_stack.is_empty() {
                     "Undo last revert (nothing to undo)".into()
                 } else {

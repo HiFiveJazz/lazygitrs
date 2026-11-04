@@ -25,6 +25,7 @@ pub fn render_commit_details(
     full_message: Option<&str>,
     theme: &Theme,
     compact: bool,
+    toggle_key: &str,
     scroll: &mut u16,
 ) {
     let title_line = Line::from(vec![
@@ -42,7 +43,7 @@ pub fn render_commit_details(
         Span::raw(" "),
         Span::styled("toggle ", Style::default().fg(theme.text_dimmed)),
         Span::styled(
-            "'",
+            toggle_key.to_string(),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -372,7 +373,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn top_right_toggle_hint_uses_apostrophe_in_both_layouts() {
+    fn top_right_toggle_hint_uses_configured_key_in_both_layouts() {
         use ratatui::{Terminal, backend::TestBackend};
 
         let commit = Commit {
@@ -399,6 +400,7 @@ mod tests {
                         None,
                         &Theme::default(),
                         compact,
+                        "t",
                         &mut 0,
                     );
                 })
@@ -406,8 +408,38 @@ mod tests {
             let top: String = (0..60)
                 .map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol())
                 .collect();
-            assert!(top.ends_with(" toggle ' ┐"), "{top}");
+            assert!(top.ends_with(" toggle t ┐"), "{top}");
             assert!(!top.contains("toggle ."), "{top}");
+        }
+    }
+
+    #[test]
+    fn commit_details_border_uses_configured_toggle_hint() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let commit = Commit {
+            hash: "0123456789abcdef".into(),
+            name: "Configured hint".into(),
+            status: CommitStatus::Pushed,
+            tags: vec![],
+            refs: vec![],
+            author_name: "Author".into(),
+            author_email: String::new(),
+            unix_timestamp: 0,
+            parents: vec![],
+            divergence: Default::default(),
+        };
+        for binding in ["T", "<a-t>"] {
+            let mut terminal = Terminal::new(TestBackend::new(62, 10)).unwrap();
+            terminal.draw(|frame| {
+                render_commit_details(frame, frame.area(), &commit, None, None,
+                    &Theme::default(), true, binding, &mut 0);
+            }).unwrap();
+            let top: String = (0..62).map(|x|
+                terminal.backend().buffer().cell((x, 0)).unwrap().symbol()
+            ).collect();
+            assert!(top.ends_with(&format!(" toggle {binding} ┐")), "{top}");
+            assert!(!top.contains("toggle '"));
         }
     }
 

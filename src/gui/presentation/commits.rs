@@ -414,6 +414,7 @@ mod tests {
                                     (view == 4).then_some(entry.name.as_str()),
                                     &theme,
                                     false,
+                                    "t",
                                     &mut 0,
                                 );
                             } else {

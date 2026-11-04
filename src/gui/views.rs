@@ -417,6 +417,7 @@ pub fn render(
                 commit_messages,
                 theme,
                 true,
+                commit_details_toggle_key(ctx_mgr.active(), &config.user_config.keybinding),
                 commit_details_scroll,
             );
         }
@@ -1079,6 +1080,7 @@ pub fn render(
             commit_messages,
             theme,
             true,
+            commit_details_toggle_key(ctx_mgr.active(), &config.user_config.keybinding),
             commit_details_scroll,
         );
     }
@@ -3171,6 +3173,21 @@ fn render_status_bar(
     let open_log_menu_key = format_key_hint(&keybindings.commits.open_log_menu);
     let fold_key = format_key_hint(&keybindings.universal.fold_directory);
     let shell_key = format_key_hint(&keybindings.universal.custom_command_prompt);
+    let hunk_keys = format!(
+        "{}/{}",
+        format_key_hint(&keybindings.universal.prev_hunk),
+        format_key_hint(&keybindings.universal.next_hunk),
+    );
+    let side_keys = format!(
+        "{}/{}",
+        format_key_hint(&keybindings.universal.toggle_old_only),
+        format_key_hint(&keybindings.universal.toggle_new_only),
+    );
+    let tree_key = format_key_hint(&keybindings.files.toggle_tree_view);
+    let discard_all_key = format_key_hint(&keybindings.files.discard_all_unstaged);
+    let commit_reset_key = format_key_hint(&keybindings.commits.view_reset_options);
+    let commit_revert_key = format_key_hint(&keybindings.commits.revert_commit);
+    let undo_revert_key = format_key_hint(&keybindings.universal.undo_revert_block);
 
     if active_file_tree && !diff_focused && !fold_key.is_empty() {
         hints.push((fold_key.as_str(), "fold/unfold"));
@@ -3199,15 +3216,15 @@ fn render_status_bar(
                 emphasized.push("enter");
                 idx += 1;
             }
-            hints.insert(idx, ("{/}", "cycle hunks"));
+            hints.insert(idx, (hunk_keys.as_str(), "cycle hunks"));
             idx += 1;
             if has_undo {
-                hints.insert(idx, ("u", "undo revert"));
+                hints.insert(idx, (undo_revert_key.as_str(), "undo revert"));
             }
         } else {
-            hints.push(("{/}", "prev/next hunk"));
+            hints.push((hunk_keys.as_str(), "prev/next hunk"));
         }
-        hints.push(("[/]", "side view"));
+        hints.push((side_keys.as_str(), "side view"));
         let view_layout_hint = match diff_view.view_layout {
             DiffViewLayout::SideBySide => "unified view",
             DiffViewLayout::Unified => "split view",
@@ -3225,18 +3242,18 @@ fn render_status_bar(
                     ("c", "commit"),
                     ("a", "stage all"),
                     ("space", "toggle"),
-                    ("`", "tree"),
+                    (tree_key.as_str(), "tree"),
                 ]);
                 hints.extend([
                     ("\\", view_layout_hint),
                     ("d", "discard"),
-                    ("D", "reset/nuke"),
+                    (discard_all_key.as_str(), "discard unstaged"),
                     ("e", "edit"),
                     ("o", "open"),
                 ]);
             }
             ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
-                hints.extend([("enter", "focus diff"), ("`", "tree"), ("y", "copy")]);
+                hints.extend([("enter", "focus diff"), (tree_key.as_str(), "tree"), ("y", "copy")]);
                 hints.push(("\\", view_layout_hint));
             }
             ContextId::BranchCommits => {
@@ -3266,8 +3283,8 @@ fn render_status_bar(
                 hints.extend([
                     ("C", "copy (cherry-pick)"),
                     ("r", "reword"),
-                    ("g", "reset"),
-                    ("t", "revert"),
+                    (commit_reset_key.as_str(), "reset"),
+                    (commit_revert_key.as_str(), "revert"),
                     ("\\", view_layout_hint),
                 ]);
                 if !open_log_menu_key.is_empty() {
@@ -3276,8 +3293,8 @@ fn render_status_bar(
             }
             ContextId::Stash => {
                 hints.extend([
-                    ("g", "pop"),
-                    ("space", "apply"),
+                    ("space", "pop"),
+                    ("a", "apply"),
                     ("d", "drop"),
                     ("\\", view_layout_hint),
                 ]);
@@ -3323,7 +3340,7 @@ fn render_status_bar(
             if active != ContextId::Commits {
                 hints.push(("J/K", "scroll diff"));
             }
-            hints.push(("{/}", "hunks"));
+            hints.push((hunk_keys.as_str(), "hunks"));
         }
     }
 
@@ -5182,6 +5199,15 @@ fn find_commit_by_hash<'a>(model: &'a Model, hash: &str) -> Option<&'a Commit> {
         .or_else(|| model.reflog_commits.iter().find(|c| c.hash == hash))
 }
 
+/// The border hint must use the same mapping as the input dispatcher and `?`.
+fn commit_details_toggle_key<'a>(context: ContextId, kb: &'a KeybindingConfig) -> &'a str {
+    if matches!(context, ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles) {
+        &kb.universal.toggle_commit_details_files
+    } else {
+        &kb.universal.toggle_commit_details
+    }
+}
+
 fn render_commit_details_panel(
     frame: &mut Frame,
     rect: Rect,
@@ -5190,6 +5216,7 @@ fn render_commit_details_panel(
     commit_messages: &Arc<Mutex<HashMap<String, String>>>,
     theme: &Theme,
     compact: bool,
+    toggle_key: &str,
     scroll: &mut u16,
 ) {
     let stat_owned = commit_stats
@@ -5208,6 +5235,7 @@ fn render_commit_details_panel(
         message_owned.as_deref(),
         theme,
         compact,
+        toggle_key,
         scroll,
     );
 }

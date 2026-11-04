@@ -1198,6 +1198,8 @@ pub struct Gui {
     pub commit_details_scroll_hash: String,
     /// Whether commit details are visible. `t` in commit lists; `T` in file subviews.
     pub show_commit_details: bool,
+    /// First character of the configurable two-key Go to top binding.
+    pending_goto_top: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1677,6 +1679,7 @@ impl Gui {
             commit_details_scroll: 0,
             commit_details_scroll_hash: String::new(),
             show_commit_details,
+            pending_goto_top: false,
         })
     }
 

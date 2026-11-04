@@ -7,7 +7,7 @@ use crate::gui::{Gui, RemoteOpKind};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 
-pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig) -> Result<()> {
+pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
     // Enter: view tag commits
     if key.code == KeyCode::Enter {
         return enter_tag_commits(gui);
@@ -29,7 +29,7 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig)
     }
 
     // Reset options
-    if key.code == KeyCode::Char('g') {
+    if super::matches_key(key, &keybindings.commits.view_reset_options) {
         return show_reset_menu(gui);
     }
 

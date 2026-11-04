@@ -150,7 +150,7 @@ lazygitrs upgrade 0.0.32   # specific version
 - [x] **Interactive rebasing** — inspired by gitlens, a clean and easy-to-use UI for pick, reword, edit, squash, fixup, drop and fast rebasing.
 - [x] **Commit Details** — Inspired by zed, just a small details panel about the commit that's easier to look at.
 - [x] **Command Palette** — easily access stuff like:
-  - [x] `git reset` (global `G`) — asks which branch/commit, has quick search, then soft/mixed/hard options.
+  - [x] `git reset` (global `Z`) — asks which branch/commit, has quick search, then soft/mixed/hard options.
   - [x] `git diff/compare` (global `W`) and then asks what branch/commit A and B, has quick search.
   - [x] `git rebase` (global `I`) and then asks rebase on top of what branch/commit.
   - [x] 🎨 Themes + Theme-Picker!

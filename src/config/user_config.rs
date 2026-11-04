@@ -87,6 +87,25 @@ impl UserConfig {
         if self.keybinding.files.toggle_tree_view == "`" {
             self.keybinding.files.toggle_tree_view = "t".to_string();
         }
+
+        // Preserve custom keys while upgrading older on-disk defaults. The
+        // global undo takes `u`, so each previous context-specific `u` must
+        // move out of its way. Likewise `gg` needs a free `g` prefix.
+        let kb = &mut self.keybinding;
+        for (value, old, new) in [
+            (&mut kb.universal.undo, "z", "u"),
+            (&mut kb.universal.goto_top, "<", "gg"),
+            (&mut kb.universal.goto_bottom, ">", "G"),
+            (&mut kb.universal.refresh, "R", "<c-l>"),
+            (&mut kb.universal.undo_revert_block, "u", "U"),
+            (&mut kb.status.check_for_update, "u", "U"),
+            (&mut kb.branches.set_upstream, "u", "U"),
+            (&mut kb.commits.view_reset_options, "g", "z"),
+        ] {
+            if value.as_str() == old {
+                *value = new.to_owned();
+            }
+        }
     }
 
     pub fn load(config_dir: &Path) -> Result<Self> {
@@ -654,6 +673,41 @@ mod keybinding_migration_tests {
         assert_eq!(custom.keybinding.files.toggle_tree_view, "v");
         assert_eq!(custom.keybinding.commits.checkout_commit, "h");
         assert_eq!(custom.keybinding.commits.move_up_commit, "b");
+    }
+
+    #[test]
+    fn old_defaults_migrate_to_unambiguous_vim_keys_without_overriding_custom_keys() {
+        let mut old = UserConfig::default();
+        old.keybinding.universal.undo = "z".into();
+        old.keybinding.universal.goto_top = "<".into();
+        old.keybinding.universal.goto_bottom = ">".into();
+        old.keybinding.universal.refresh = "R".into();
+        old.keybinding.universal.undo_revert_block = "u".into();
+        old.keybinding.status.check_for_update = "u".into();
+        old.keybinding.branches.set_upstream = "u".into();
+        old.keybinding.commits.view_reset_options = "g".into();
+        old.normalize_legacy_keybindings();
+        assert_eq!(old.keybinding.universal.undo, "u");
+        assert_eq!(old.keybinding.universal.goto_top, "gg");
+        assert_eq!(old.keybinding.universal.goto_bottom, "G");
+        assert_eq!(old.keybinding.universal.refresh, "<c-l>");
+        assert_eq!(old.keybinding.universal.undo_revert_block, "U");
+        assert_eq!(old.keybinding.status.check_for_update, "U");
+        assert_eq!(old.keybinding.branches.set_upstream, "U");
+        assert_eq!(old.keybinding.commits.view_reset_options, "z");
+
+        let mut custom = UserConfig::default();
+        custom.keybinding.universal.goto_top = "<home>".into();
+        custom.keybinding.universal.goto_bottom = "<end>".into();
+        custom.keybinding.universal.undo = "<c-u>".into();
+        custom.keybinding.universal.refresh = "<f5>".into();
+        custom.keybinding.commits.view_reset_options = "B".into();
+        custom.normalize_legacy_keybindings();
+        assert_eq!(custom.keybinding.universal.goto_top, "<home>");
+        assert_eq!(custom.keybinding.universal.goto_bottom, "<end>");
+        assert_eq!(custom.keybinding.universal.undo, "<c-u>");
+        assert_eq!(custom.keybinding.universal.refresh, "<f5>");
+        assert_eq!(custom.keybinding.commits.view_reset_options, "B");
     }
 
     #[test]

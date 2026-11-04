@@ -3111,7 +3111,7 @@ impl Gui {
         );
     }
 
-    /// Global reset picker (uppercase `G`): choose a branch/commit/tag, then
+    /// Global reset picker (default `Z`): choose a branch/commit/tag, then
     /// soft/mixed/hard reset options (lazygit `universal.viewResetOptions` /
     /// `CreateGitResetMenu`). Reuses the same searchable ref list as the
     /// interactive rebase picker, then the shared reset-options menu used by
@@ -3124,7 +3124,7 @@ impl Gui {
         );
     }
 
-    /// Shared branch/remote/tag/commit items for the global I and G pickers.
+    /// Shared branch/remote/tag/commit items for the interactive rebase and reset pickers.
     /// When `skip_head` is true, the current HEAD branch is omitted (rebase);
     /// when false it is included (reset). HEAD itself is always omitted from
     /// the commits section because operating on the tip is a no-op.

@@ -7,6 +7,8 @@ use super::*;
 
 impl Gui {
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // A mouse interaction cancels a pending multi-key motion (e.g. `g`).
+        self.pending_goto_top = false;
         if self.shell_command_job.is_some() {
             return;
         }
