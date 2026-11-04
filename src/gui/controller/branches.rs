@@ -197,7 +197,7 @@ pub(crate) fn checkout_conflicting_paths(error: &str) -> Vec<String> {
 }
 
 fn start_async_checkout(gui: &mut Gui, name: String) {
-    start_checkout_op(gui, name, false, "Checking out", |git, target| {
+    start_checkout_op(gui, name, false, false, "Checking out", |git, target| {
         git.checkout_branch(target)
     });
 }
@@ -205,7 +205,14 @@ fn start_async_checkout(gui: &mut Gui, name: String) {
 /// All branch-switch strategies use the same async checkout lifecycle. Only
 /// plain checkout offers the conflict popup; an assisted checkout failure may
 /// have already changed HEAD or the index and must be reported for inspection.
-fn start_checkout_op<F>(gui: &mut Gui, target: String, assisted: bool, title: &str, op: F)
+fn start_checkout_op<F>(
+    gui: &mut Gui,
+    target: String,
+    assisted: bool,
+    committed: bool,
+    title: &str,
+    op: F,
+)
 where
     F: FnOnce(&crate::git::GitCommands, &str) -> Result<()> + Send + 'static,
 {
@@ -216,6 +223,7 @@ where
         return;
     }
     gui.pending_checkout_assisted = assisted;
+    gui.pending_checkout_committed = committed;
     gui.pending_checkout_by_name = Some(target.clone());
     gui.start_remote_op(RemoteOpKind::Other, title, "", move |git| op(git, &target));
 }
@@ -247,7 +255,7 @@ pub(crate) fn resolve_checkout_conflict(
                 on_confirm: Box::new(move |gui, message| {
                     if !message.trim().is_empty() {
                         let message = message.to_string();
-                        start_checkout_op(gui, target.clone(), true, "Committing and switching", move |git, target| {
+                        start_checkout_op(gui, target.clone(), true, true, "Committing and switching", move |git, target| {
                             // Stage and commit ONLY after the user submits the editor.
                             git.stage_all()?;
                             git.create_commit(&message, false)?;
@@ -263,7 +271,7 @@ pub(crate) fn resolve_checkout_conflict(
         }
         1 => {
             let label = format!("lazygitrs: before switching {source} -> {target}");
-            start_checkout_op(gui, target, true, "Stashing and switching", move |git, target| {
+            start_checkout_op(gui, target, true, false, "Stashing and switching", move |git, target| {
                 // Keep the stash; never drop/pop it automatically. Include untracked.
                 git.stash_include_untracked(&label)?;
                 git.checkout_branch(target).context(
@@ -271,7 +279,7 @@ pub(crate) fn resolve_checkout_conflict(
                 )
             });
         }
-        2 => start_checkout_op(gui, target, true, "Moving changes and switching", |git, target| {
+        2 => start_checkout_op(gui, target, true, false, "Moving changes and switching", |git, target| {
             git.checkout_branch_with_merge(target).context(
                 "Merge checkout did not complete cleanly; inspect the current branch and conflicts"
             )
@@ -283,7 +291,7 @@ pub(crate) fn resolve_checkout_conflict(
                     "Discard ALL staged and unstaged changes and untracked files on {source}, then switch to {target}?\n\nThis cannot be undone. Ignored files will be kept."
                 ),
                 on_confirm: Box::new(move |gui| {
-                    start_checkout_op(gui, target.clone(), true, "Discarding and switching", |git, target| {
+                    start_checkout_op(gui, target.clone(), true, false, "Discarding and switching", |git, target| {
                         git.discard_all_for_branch_switch()?;
                         git.checkout_branch(target).context(
                             "Working tree was discarded, but checkout failed"

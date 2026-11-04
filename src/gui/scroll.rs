@@ -2,6 +2,13 @@ use std::time::{Duration, Instant};
 
 pub const LIST_SCROLL_DURATION: Duration = Duration::from_millis(100);
 
+/// A full 22-row Ctrl-J/K jump should be smooth, but animating a one- or
+/// two-row list for the same 100 ms makes the UI feel unresponsive. Scale
+/// only selection animation duration; long lists keep the original easing.
+pub fn selection_scroll_duration(rows: usize) -> Duration {
+    Duration::from_millis((rows as u64).saturating_mul(16).min(100))
+}
+
 /// Adjust `scroll_offset` so that `selected` is visible within `visible_height`.
 /// Only scrolls when the cursor would otherwise be outside the visible window.
 pub fn ensure_visible(selected: usize, scroll_offset: &mut usize, visible_height: usize) {
@@ -122,5 +129,20 @@ impl SmoothScroll {
 
     pub fn target(&self) -> usize {
         self.target as usize
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::{LIST_SCROLL_DURATION, selection_scroll_duration};
+    use std::time::Duration;
+
+    #[test]
+    fn short_lists_scroll_quickly_and_long_lists_keep_normal_speed() {
+        assert_eq!(selection_scroll_duration(0), Duration::ZERO);
+        assert_eq!(selection_scroll_duration(1), Duration::from_millis(16));
+        assert_eq!(selection_scroll_duration(3), Duration::from_millis(48));
+        assert_eq!(selection_scroll_duration(22), LIST_SCROLL_DURATION);
+        assert_eq!(selection_scroll_duration(usize::MAX), LIST_SCROLL_DURATION);
     }
 }

@@ -32,7 +32,7 @@ fn gg_is_a_sequence_and_g_and_z_do_not_reset_the_repository() {
 }
 
 #[test]
-fn branch_rename_R_is_not_captured_by_universal_refresh() {
+fn branch_rename_r_is_not_captured_by_universal_refresh() {
     let repo = TempRepo::new("rename-R");
     let mut gui = tree_test_gui(&repo);
     gui.model.lock().unwrap().branches = gui.git.load_branches().unwrap();
@@ -1575,6 +1575,21 @@ fn new_checkout_cancels_previous_checkout_refresh_immediately() {
 }
 
 #[test]
+fn checkout_cancellation_does_not_interrupt_unrelated_history_refresh() {
+    let repo = TempRepo::new("checkout-history-refresh-ownership");
+    let mut gui = checkout_test_gui(&repo);
+    let (tx, rx) = mpsc::channel();
+    gui.initial_load_rx = Some(rx);
+    gui.refresh_in_progress = true;
+    gui.initial_load_expected = HISTORY_MODEL_PART_COUNT;
+    gui.checkout_refresh_active = false;
+    gui.cancel_checkout_refresh_if_running();
+    assert!(gui.initial_load_rx.is_some());
+    assert!(gui.refresh_in_progress);
+    drop(tx);
+}
+
+#[test]
 fn checkout_discards_pre_checkout_refresh_results() {
     let repo = TempRepo::new("checkout-stale-refresh");
     let mut gui = checkout_test_gui(&repo);
@@ -1760,7 +1775,12 @@ fn checkout_uses_targeted_background_refresh() {
         "current-branch commits must not retain the unrelated feature tip"
     );
 
-    assert!(!parts.iter().any(|part| matches!(part, ModelPart::Stash(_))));
+    // Checkout refreshes the stash sidebar too: assisted checkout may have
+    // created a new stash, even though this ordinary checkout has none.
+    assert!(parts.iter().any(|part| matches!(
+        part,
+        ModelPart::Stash(entries) if entries.is_empty()
+    )));
     assert!(
         !parts
             .iter()
@@ -4111,6 +4131,13 @@ fn commit_and_switch_stages_all_only_after_submit_and_commits_on_source() {
     repo.git(&["config", "user.name", "Test"]);
     repo.git(&["config", "user.email", "test@example.com"]);
     let mut gui = checkout_test_gui(&repo);
+    let previous_feature_head = repo.git(&["rev-parse", "feature"]);
+    repo.git(&["update-ref", "refs/remotes/origin/feature", &previous_feature_head]);
+    repo.git(&["config", "remote.origin.url", "."]);
+    repo.git(&["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    repo.git(&["branch", "--set-upstream-to=origin/feature", "feature"]);
+    // The UI cache predates the commit and must not be reused after switching.
+    gui.model.lock().unwrap().branches = gui.git.load_branches().unwrap();
     std::fs::write(repo.path.join("file"), "unfinished feature edits\n").unwrap();
     std::fs::write(repo.path.join("new.txt"), "new untracked file\n").unwrap();
     request_test_checkout(&mut gui, ' ', "main");
@@ -4130,6 +4157,11 @@ fn commit_and_switch_stages_all_only_after_submit_and_commits_on_source() {
     assert_eq!(repo.git(&["log", "-1", "--format=%s", "feature"]), "Checkpoint before switch");
     assert!(repo.git(&["ls-tree", "-r", "--name-only", "feature"]).contains("new.txt"));
     assert_eq!(repo.git(&["status", "--porcelain"]), "");
+    let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+    assert_eq!(parts.len(), CHECKOUT_MODEL_PART_COUNT);
+    assert!(parts.iter().any(|part| matches!(part, ModelPart::Branches(branches)
+        if branches.iter().any(|branch| branch.name == "feature"
+            && branch.pushables == "1"))), "source branch must show one unpushed commit");
 }
 
 #[test]
@@ -4146,6 +4178,11 @@ fn stash_and_switch_keeps_stash_instead_of_discarding_or_popping() {
     assert_eq!(repo.git(&["status", "--porcelain"]), "");
     assert!(repo.git(&["stash", "list"]).contains("before switching feature -> main"));
     assert!(repo.git(&["stash", "show", "--include-untracked", "--name-only"]).contains("new.txt"));
+    let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+    assert_eq!(parts.len(), CHECKOUT_MODEL_PART_COUNT);
+    assert!(parts.iter().any(|part| matches!(part, ModelPart::Stash(stashes)
+        if stashes.len() == 1 && stashes[0].name.contains("before switching feature -> main"))),
+        "stash created by assisted checkout must immediately appear in the sidebar");
 }
 
 #[test]

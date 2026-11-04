@@ -150,6 +150,7 @@ impl Gui {
                         );
 
                     self.refresh_in_progress = false;
+                    self.checkout_refresh_active = false;
 
                     // Leave needs_refresh alone: if another mutation arrived
                     // mid-refresh it will re-queue on the next frame. The preview

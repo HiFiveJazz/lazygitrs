@@ -216,7 +216,11 @@ impl ContextManager {
             .entry(ctx)
             .or_insert_with(|| super::scroll::SmoothScroll::new(current));
 
-        animation.retarget(current, target, super::scroll::LIST_SCROLL_DURATION);
+        animation.retarget(
+            current,
+            target,
+            super::scroll::selection_scroll_duration(current.abs_diff(target)),
+        );
     }
 
     pub fn tick_selection_animations(&mut self) {

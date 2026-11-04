@@ -20,6 +20,9 @@ pub use worktree::Worktree;
 use std::collections::HashMap;
 
 const MAX_REMEMBERED_COMMIT_AUTHORS: usize = 2048;
+// Remember the last file ordering only for manageable lists; large worktrees
+// should not pay for a second long-lived copy of every changed path.
+const MAX_CACHED_FILE_ORDER: usize = 8192;
 
 use crate::git::submodule::Submodule;
 
@@ -32,6 +35,9 @@ pub struct Model {
     /// Empty string when HEAD is detached.
     pub head_branch_name: String,
     pub files: Vec<File>,
+    /// Only retained while Files is temporarily empty (e.g. stash/pop). Using
+    /// filenames rather than full File clones keeps this cheap and bounded.
+    pub(crate) file_order_before_empty: Vec<String>,
     pub branches: Vec<Branch>,
     pub commits: Vec<Commit>,
     /// Changes whenever `commits` is replaced or extended. Used to cache the
@@ -194,13 +200,40 @@ impl Model {
         }
     }
 
-    pub fn set_files(&mut self, new_files: Vec<File>) {
+    pub fn set_files(&mut self, mut new_files: Vec<File>) {
+        if new_files.is_empty() {
+            if !self.files.is_empty() {
+                if self.files.len() <= MAX_CACHED_FILE_ORDER {
+                    self.file_order_before_empty =
+                        self.files.iter().map(|f| f.name.clone()).collect();
+                } else {
+                    self.file_order_before_empty.clear();
+                }
+            }
+            self.files.clear();
+            return;
+        }
         if self.files.is_empty() {
+            if !self.file_order_before_empty.is_empty() {
+                let ranks: HashMap<&str, usize> = self.file_order_before_empty
+                    .iter().enumerate().map(|(i, name)| (name.as_str(), i)).collect();
+                new_files.sort_by(|a, b| {
+                    match (ranks.get(a.name.as_str()), ranks.get(b.name.as_str())) {
+                        (Some(i), Some(j)) => i.cmp(j),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.current_path().cmp(b.current_path()),
+                    }
+                });
+                drop(ranks);
+                self.file_order_before_empty.clear();
+            }
             self.files = new_files;
             return;
         }
         use std::collections::HashMap;
 
+        self.file_order_before_empty.clear();
         let mut by_name: HashMap<String, File> =
             new_files.into_iter().map(|f| (f.name.clone(), f)).collect();
 
@@ -331,5 +364,56 @@ mod tests {
         assert_eq!(model.sub_commits_revision, 2);
         model.clear_sub_commits();
         assert_eq!(model.sub_commits_revision, 2);
+    }
+}
+
+#[cfg(test)]
+mod stash_file_order_tests {
+    use super::{File, FileStatus, Model};
+
+    fn file(name: &str) -> File {
+        File {
+            name: name.into(),
+            display_name: name.into(),
+            status: FileStatus::Modified,
+            has_staged_changes: false,
+            has_unstaged_changes: true,
+            tracked: true,
+            added: false,
+            deleted: false,
+            has_merge_conflicts: false,
+            short_status: " M".into(),
+            hunk_count: 0,
+            additions: 0,
+            deletions: 0,
+        }
+    }
+
+    #[test]
+    fn stash_then_pop_preserves_file_order_without_remembering_file_payloads() {
+        let mut model = Model::default();
+        model.set_files(vec![file("b.rs"), file("a.rs")]);
+        model.set_files(Vec::new());
+        assert!(model.files.is_empty());
+        model.set_files(vec![file("a.rs"), file("c.rs"), file("b.rs")]);
+        assert_eq!(
+            model.files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            vec!["b.rs", "a.rs", "c.rs"]
+        );
+        model.set_files(vec![file("a.rs"), file("b.rs"), file("c.rs")]);
+        assert_eq!(
+            model.files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            vec!["b.rs", "a.rs", "c.rs"]
+        );
+    }
+
+    #[test]
+    fn restored_file_order_is_cleared_after_rehydration() {
+        let mut model = Model::default();
+        model.set_files(vec![file("b.rs"), file("a.rs")]);
+        model.set_files(Vec::new());
+        assert_eq!(model.file_order_before_empty, ["b.rs", "a.rs"]);
+        model.set_files(vec![file("a.rs"), file("b.rs")]);
+        assert!(model.file_order_before_empty.is_empty());
     }
 }

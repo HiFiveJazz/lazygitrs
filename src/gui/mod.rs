@@ -231,7 +231,7 @@ const DIFF_PREVIEW_CACHE_ENTRIES: usize = 24;
 const DIFF_PREVIEW_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CACHED_DIFF_BYTES: usize = 8 * 1024 * 1024;
 /// How many diffs below/above the selection to warm in the preview cache.
-const CHECKOUT_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 5;
+const CHECKOUT_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 4;
 const HISTORY_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 4;
 const DIFF_PREFETCH_AHEAD: usize = 3;
 const DIFF_PREFETCH_BEHIND: usize = 1;
@@ -1164,6 +1164,10 @@ pub struct Gui {
     /// True for a user-selected recovery strategy, which must not retry the
     /// same conflict popup after an unsuccessful or partially applied checkout.
     pub(crate) pending_checkout_assisted: bool,
+    /// Commit-and-Switch moves the source tip, invalidating cached ahead counts.
+    pub(crate) pending_checkout_committed: bool,
+    /// Distinguish a checkout refresh from other 12-part model refreshes.
+    checkout_refresh_active: bool,
     /// Chosen from the checkout-conflicts picker; focus it after the async
     /// status refresh, since the cached Files list can be stale at failure time.
     pub(crate) pending_conflict_inspect_file: Option<String>,
@@ -1667,6 +1671,8 @@ impl Gui {
             action_toast: None,
             pending_checkout_by_name: None,
             pending_checkout_assisted: false,
+            pending_checkout_committed: false,
+            checkout_refresh_active: false,
             pending_conflict_inspect_file: None,
             pending_editor_launch: None,
             cherry_pick_clipboard: Vec::new(),
@@ -3220,6 +3226,7 @@ impl Gui {
                     );
                     let was_checkout = self.pending_checkout_by_name.take().is_some();
                     self.pending_checkout_assisted = false;
+                    let checkout_committed = std::mem::take(&mut self.pending_checkout_committed);
                     let confirmed_checkout_head = if was_checkout {
                         completion.head.clone()
                     } else {
@@ -3369,7 +3376,7 @@ impl Gui {
                         self.checkout_invalidated_refresh = false;
                         // Dispatch before the next paint/input wait, not after an
                         // idle 50/200ms poll. HEAD is already visible above.
-                        if !self.start_background_checkout_refresh(confirmed_checkout_head) {
+                        if !self.start_background_checkout_refresh(confirmed_checkout_head, checkout_committed) {
                             self.needs_refresh = true;
                         }
                     }
@@ -3378,6 +3385,7 @@ impl Gui {
                     let target = self.pending_checkout_by_name.take();
                     let failed_checkout = target.is_some();
                     let assisted = std::mem::take(&mut self.pending_checkout_assisted);
+                    self.pending_checkout_committed = false;
                     // AI generation may have restored the editor just before
                     // a queued remote error arrives. Preserve that draft.
                     if matches!(self.popup, PopupState::CommitInput { .. }) {

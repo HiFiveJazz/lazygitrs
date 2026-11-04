@@ -883,7 +883,9 @@ impl GitCommands {
     /// worktree state, submodule state, reflog, diff stats, and repository status.
     /// Contributors are intentionally not recomputed on every checkout; the
     /// informational list is refreshed by full/history-changing model refreshes.
-    /// Checkout cannot change stash, remotes, tags, or the repo URL.
+    /// Assisted checkout can create a stash; ordinary checkout does not change
+    /// the stash, but re-reading the tiny reflog keeps the sidebar authoritative.
+    /// Neither checkout variant changes remotes, tags, or the repo URL.
     pub fn load_model_after_checkout_streaming(
         self: &Arc<Self>,
         tx: &mpsc::Sender<ModelPart>,
@@ -891,8 +893,10 @@ impl GitCommands {
         mut branches: Vec<crate::model::Branch>,
         mut worktrees: Vec<crate::model::Worktree>,
         mut reflog: Vec<crate::model::Commit>,
+        cached_stashes: Vec<crate::model::StashEntry>,
         confirmed_head: Option<HeadState>,
         commit_filter: Option<crate::git::commit::CommitFilter>,
+        reload_branches: bool,
     ) {
         // Keep the worktree scan on its own worker: on very large repositories
         // (notably Linux) status dominates checkout refresh latency. If this
@@ -927,11 +931,16 @@ impl GitCommands {
                 // branch carries the HEAD marker. Branch tips/upstreams do not
                 // move. Only fall back to `for-each-ref` when checkout created a
                 // local branch we did not previously know about.
+                // A Commit-and-Switch action moves the source branch tip before
+                // checkout. That invalidates cached ahead/behind counts even
+                // though the destination branch is already in the list.
                 let cached_branch_is_complete = head.branch_name.is_empty()
-                    || branches
-                        .iter()
-                        .any(|branch| branch.name == head.branch_name);
-                if cached_branch_is_complete {
+                    || branches.iter().any(|branch| {
+                        branch.name == head.branch_name
+                            && !branch.hash.is_empty()
+                            && head.hash.starts_with(&branch.hash)
+                    });
+                if cached_branch_is_complete && !reload_branches {
                     for branch in &mut branches {
                         branch.head = branch.name == head.branch_name;
                     }
@@ -943,6 +952,12 @@ impl GitCommands {
                 branches = fresh;
             }
             send_or_abandon!(ModelPart::Branches(branches));
+
+            // Stash-and-Switch writes to refs/stash. Reloading it here also
+            // handles a stash that was made outside lazygitrs during checkout.
+            // A transient `git stash list` failure must not erase visible stashes.
+            let stashes = git.load_stash().unwrap_or(cached_stashes);
+            send_or_abandon!(ModelPart::Stash(stashes));
 
             // The main commits panel is HEAD-relative, so checkout changes which
             // history belongs in the panel even though the repository's global

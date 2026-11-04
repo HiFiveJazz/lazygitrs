@@ -82,6 +82,7 @@ impl Gui {
         self.initial_load_received = 0;
         self.initial_load_expected = expected_parts;
         self.refresh_in_progress = true;
+        self.checkout_refresh_active = false;
         if clear_pending_refresh {
             self.needs_refresh = false;
         }
@@ -637,6 +638,7 @@ impl Gui {
         self.initial_load_rx = None;
         self.initial_load_received = 0;
         self.refresh_in_progress = false;
+        self.checkout_refresh_active = false;
         self.files_refresh_rx = None;
         self.files_refresh_in_progress = false;
         self.needs_files_refresh = false;
@@ -652,12 +654,13 @@ impl Gui {
     /// this aggressively.
     pub(crate) fn cancel_checkout_refresh_if_running(&mut self) {
         if self.refresh_in_progress
-            && self.initial_load_expected == CHECKOUT_MODEL_PART_COUNT
+            && self.checkout_refresh_active
             && self.initial_load_rx.is_some()
         {
             self.initial_load_rx = None;
             self.initial_load_received = 0;
             self.refresh_in_progress = false;
+            self.checkout_refresh_active = false;
         }
     }
 
@@ -665,22 +668,25 @@ impl Gui {
     pub(super) fn start_background_checkout_refresh(
         &mut self,
         confirmed_head: Option<HeadState>,
+        reload_branches: bool,
     ) -> bool {
         let Some(tx) = self.begin_streaming_refresh(CHECKOUT_MODEL_PART_COUNT, true) else {
             return false;
         };
+        self.checkout_refresh_active = true;
 
         self.reset_commit_pagination();
         self.diff_preview_cache.retain_immutable();
 
         let commit_filter = self.commit_filter_for_load();
-        let (commits, branches, worktrees, reflog) = {
+        let (commits, branches, worktrees, reflog, stashes) = {
             let model = self.model.lock().unwrap();
             (
                 model.commits.clone(),
                 model.branches.clone(),
                 model.worktrees.clone(),
                 model.reflog_commits.clone(),
+                model.stash_entries.clone(),
             )
         };
 
@@ -693,8 +699,10 @@ impl Gui {
                 branches,
                 worktrees,
                 reflog,
+                stashes,
                 confirmed_head,
                 commit_filter,
+                reload_branches,
             );
         });
 

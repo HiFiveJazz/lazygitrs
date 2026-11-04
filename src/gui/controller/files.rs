@@ -139,12 +139,6 @@ where
         }
     }
 
-    for idx in (0..selected.min(len)).rev() {
-        if is_file(idx) {
-            return idx;
-        }
-    }
-
     selected.min(len - 1)
 }
 
@@ -243,8 +237,8 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
         gui.rebuild_file_tree_from_model();
 
         // Space acts like a checklist: after toggling one file, advance to the
-        // next visible file. At the bottom, step back to the previous file;
-        // with a single file, keep the selection where it is.
+        // next visible file. At the bottom, keep the cursor on the last file;
+        // never unexpectedly jump backwards when toggling it again.
         //
         // Only refresh the diff immediately when selection actually moved.
         // For the toggled file itself, the model is optimistic but the Git
@@ -1061,10 +1055,10 @@ mod tests {
     use super::next_file_row_after_toggle;
 
     #[test]
-    fn file_toggle_advances_then_steps_back_at_bottom() {
+    fn file_toggle_advances_and_stays_at_bottom() {
         assert_eq!(next_file_row_after_toggle(0, 3, |_| true), 1);
         assert_eq!(next_file_row_after_toggle(1, 3, |_| true), 2);
-        assert_eq!(next_file_row_after_toggle(2, 3, |_| true), 1);
+        assert_eq!(next_file_row_after_toggle(2, 3, |_| true), 2);
     }
 
     #[test]
@@ -1082,7 +1076,7 @@ mod tests {
         );
         assert_eq!(
             next_file_row_after_toggle(3, file_rows.len(), |idx| file_rows[idx]),
-            1
+            3
         );
     }
 }
