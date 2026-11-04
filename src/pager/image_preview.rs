@@ -261,6 +261,12 @@ impl ImagePreview {
     }
 }
 
+/// Whether the terminal has a usable inline graphics protocol.
+/// Used by the diff fallback to distinguish images from other binary files.
+pub(crate) fn graphics_enabled() -> bool {
+    global_picker_ref().is_some_and(|p| p.protocol_type() != ProtocolType::Halfblocks)
+}
+
 /// Free-function load (forwards to [`ImagePreview::load`]).
 pub fn load(
     git: &crate::git::GitCommands,

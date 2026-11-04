@@ -198,9 +198,12 @@ pub fn render_file_tree<'a>(
         .collect()
 }
 
-/// File name color: green when fully staged, white otherwise.
+/// Deleted file names are red; other files are green when fully staged,
+/// white otherwise.
 fn file_name_style(file: &crate::model::File, theme: &Theme) -> Style {
-    if file.has_staged_changes && !file.has_unstaged_changes {
+    if file.deleted && !file.has_merge_conflicts {
+        Style::default().fg(theme.change_deleted)
+    } else if file.has_staged_changes && !file.has_unstaged_changes {
         theme.file_staged
     } else {
         Style::default().fg(theme.text_strong)
@@ -210,6 +213,7 @@ fn file_name_style(file: &crate::model::File, theme: &Theme) -> Style {
 /// Per-char status colors: XY where X = index (staged) and Y = worktree
 /// (unstaged). Fully-staged (`M `) is green, unstaged (` M`) is yellow, and
 /// partially-staged (`MM`, `AM`, …) splits — left char green, right yellow.
+/// Deleted status characters use the theme's red deletion color in either slot.
 fn file_status_spans(file: &crate::model::File, theme: &Theme) -> Vec<Span<'static>> {
     let status_style = if file.has_merge_conflicts {
         theme.file_conflicted
@@ -247,23 +251,64 @@ fn file_status_spans(file: &crate::model::File, theme: &Theme) -> Vec<Span<'stat
     let mut chars = status_icon.chars();
     let first = chars.next().unwrap_or(' ').to_string();
     let second = chars.next().unwrap_or(' ').to_string();
-    if file.has_staged_changes && file.has_unstaged_changes {
-        vec![
-            Span::styled(first, theme.file_staged),
-            Span::styled(second, theme.file_unstaged),
-        ]
-    } else {
-        vec![
-            Span::styled(first, status_style),
-            Span::styled(second, status_style),
-        ]
+    // Deletions should be visibly red in both the index and worktree slots,
+    // independent of whether their other status is staged or unstaged.
+    let mixed = file.has_staged_changes && file.has_unstaged_changes;
+    let mut first_style = if mixed { theme.file_staged } else { status_style };
+    let mut second_style = if mixed { theme.file_unstaged } else { status_style };
+    if !file.has_merge_conflicts {
+        if first == "D" {
+            first_style = Style::default().fg(theme.change_deleted);
+        }
+        if second == "D" {
+            second_style = Style::default().fg(theme.change_deleted);
+        }
     }
+    vec![Span::styled(first, first_style), Span::styled(second, second_style)]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{File, FileStatus};
+
+    #[test]
+    fn deleted_file_names_and_status_badges_use_theme_deletion_color() {
+        let mut theme = Theme::dark();
+        // The built-in dark theme already uses red for unstaged files. Verify
+        // that a theme with orange unstaged changes still renders deletes red.
+        theme.file_unstaged = Style::default().fg(ratatui::style::Color::Yellow);
+        let deleted = |short_status: &str, staged: bool, unstaged: bool| File {
+            name: "removed.txt".into(),
+            display_name: "removed.txt".into(),
+            status: FileStatus::Deleted,
+            has_staged_changes: staged,
+            has_unstaged_changes: unstaged,
+            tracked: true,
+            added: false,
+            deleted: true,
+            has_merge_conflicts: false,
+            short_status: short_status.into(),
+            hunk_count: 0,
+            additions: 0,
+            deletions: 1,
+        };
+        for file in [deleted("D ", true, false), deleted(" D", false, true)] {
+            assert_eq!(file_name_style(&file, &theme).fg, Some(theme.change_deleted));
+            let badge = file_status_spans(&file, &theme);
+            let deletion = badge.iter().find(|s| s.content == "D").unwrap();
+            assert_eq!(deletion.style.fg, Some(theme.change_deleted));
+        }
+        let modified = File {
+            deleted: false,
+            short_status: " M".into(),
+            status: FileStatus::Modified,
+            ..deleted(" D", false, true)
+        };
+        assert_eq!(file_status_spans(&modified, &theme)[1].style, theme.file_unstaged);
+        assert_eq!(file_name_style(&modified, &theme).fg, Some(theme.text_strong));
+
+    }
 
     #[test]
     fn stale_file_tree_node_is_ignored_instead_of_panicking() {

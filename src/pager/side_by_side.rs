@@ -374,6 +374,9 @@ pub struct DiffViewState {
     pub inline_images: HashMap<usize, super::image_preview::InlineImagePreview>,
     /// Graphics are suppressed while an overlay covers the diff pane.
     pub image_preview_hidden: bool,
+    /// Start of the current single-image fallback. Briefly keep the pane
+    /// clear when a raster preview is about to replace a binary diff.
+    image_fallback_since: Instant,
     pub scroll_offset: usize,
     /// Short easing animation used by keyboard preview scrolling (J/K).
     smooth_scroll_from: f64,
@@ -444,6 +447,7 @@ impl Default for DiffViewState {
             image_preview: None,
             inline_images: HashMap::new(),
             image_preview_hidden: false,
+            image_fallback_since: Instant::now(),
             scroll_offset: 0,
             smooth_scroll_from: 0.0,
             smooth_scroll_target: 0.0,
@@ -1025,6 +1029,11 @@ impl DiffViewState {
     /// Apply a pre-parsed diff result, preserving scroll position for same-file reloads.
     pub fn apply_parsed(&mut self, mut parsed: ParsedDiff) {
         let same_file = self.filename == parsed.filename;
+        // A first-load raster diff can temporarily lack its image protocol.
+        // Don't show a misleading binary error while the image handoff settles.
+        if !same_file || (self.image_preview.is_some() && parsed.image_preview.is_none()) {
+            self.image_fallback_since = Instant::now();
+        }
         if same_file
             && let (Some(previous), Some(incoming)) =
                 (self.image_preview.as_mut(), parsed.image_preview.as_mut())
@@ -1856,6 +1865,26 @@ fn truncate_front_ellipsis(text: &str, budget: usize) -> String {
     format!("…{kept}")
 }
 
+/// Delay the unavailable-image fallback for a short initial handoff window.
+/// The binary placeholder remains immediate for non-images and for terminals
+/// without a graphics protocol; corrupt/unavailable images still get feedback
+/// after the grace period instead of leaving an indefinitely empty pane.
+fn binary_preview_fallback_message<'a>(
+    filename: &str,
+    binary_message: &'a str,
+    graphics_enabled: bool,
+    elapsed: Duration,
+) -> Option<&'a str> {
+    if !graphics_enabled || !super::image_preview::is_image_path(filename) {
+        return Some(binary_message);
+    }
+    if elapsed < Duration::from_millis(1500) {
+        None
+    } else {
+        Some("Image preview unavailable")
+    }
+}
+
 /// Render a side-by-side diff view into the given area.
 /// Uses direct buffer writes instead of per-cell Paragraph widgets for performance.
 pub fn render_diff(
@@ -2022,7 +2051,7 @@ pub fn render_diff(
             .iter()
             .all(|line| line.preview_placeholder.is_some())
     {
-        let message = state
+        let binary_message = state
             .lines
             .iter()
             .find_map(|line| {
@@ -2030,7 +2059,14 @@ pub fn render_diff(
                     .filter(|message| !message.trim().is_empty())
             })
             .unwrap_or("");
-        render_preview_placeholder(frame.buffer_mut(), inner, message, theme);
+        if let Some(message) = binary_preview_fallback_message(
+            &state.filename,
+            binary_message,
+            super::image_preview::graphics_enabled(),
+            state.image_fallback_since.elapsed(),
+        ) {
+            render_preview_placeholder(frame.buffer_mut(), inner, message, theme);
+        }
         return;
     }
 
@@ -4681,6 +4717,37 @@ mod tests {
 
     fn buffer_row(buf: &Buffer, y: u16) -> String {
         (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn raster_image_fallback_does_not_flash_binary_error_during_startup() {
+        let error = "Binary cannot be previewed";
+        assert_eq!(
+            binary_preview_fallback_message(
+                "images/picture.PNG",
+                error,
+                true,
+                Duration::from_millis(100),
+            ),
+            None,
+        );
+        assert_eq!(
+            binary_preview_fallback_message(
+                "images/picture.PNG",
+                error,
+                true,
+                Duration::from_millis(1500),
+            ),
+            Some("Image preview unavailable"),
+        );
+        // Unsupported terminals and other binary files retain an immediate,
+        // informative fallback instead of displaying an empty panel.
+        for (name, supported) in [("picture.png", false), ("archive.zip", true)] {
+            assert_eq!(
+                binary_preview_fallback_message(name, error, supported, Duration::ZERO),
+                Some(error),
+            );
+        }
     }
 
     #[test]
