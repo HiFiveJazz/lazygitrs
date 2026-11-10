@@ -399,7 +399,7 @@ impl GitCommands {
             model.reflog_commits = h_reflog.join().unwrap().unwrap_or_default();
 
             if let Ok((added, deleted)) = h_shortstat.join().unwrap() {
-                model.total_additions = added;
+                model.total_additions = added.saturating_add(self.untracked_line_additions(&model.files));
                 model.total_deletions = deleted;
             }
 
@@ -523,6 +523,7 @@ impl GitCommands {
                 return;
             }
             let has_tracked_changes = files.iter().any(|file| file.tracked);
+            let untracked_additions = git.untracked_line_additions(&files);
 
             // Normal refreshes publish the complete status in one Files part.
             // Startup may already have published tracked rows above; in that case
@@ -558,13 +559,12 @@ impl GitCommands {
                 }
             }
 
-            // shortstat intentionally omits untracked files. A clean tree
-            // (or one containing only untracked files) therefore has an
-            // exact 0/0 answer without another full-tree Git process.
+            // Untracked files contribute additions even when nothing is staged.
+            // Skip tracked diff entirely when there are no tracked changes.
             if !has_tracked_changes {
                 if tx
                     .send(ModelPart::DiffStats {
-                        added: 0,
+                        added: untracked_additions,
                         deleted: 0,
                     })
                     .is_err()
@@ -583,11 +583,17 @@ impl GitCommands {
             // `git diff HEAD --shortstat`. Status-only refresh paths still use
             // shortstat because they intentionally skipped numstat enrichment.
             if let Some((added, deleted)) = diff_totals {
-                if tx.send(ModelPart::DiffStats { added, deleted }).is_err() {
+                if tx.send(ModelPart::DiffStats {
+                    added: added.saturating_add(untracked_additions),
+                    deleted,
+                }).is_err() {
                     trim_if_abandoned();
                 }
             } else if let Ok((added, deleted)) = git.diff_shortstat()
-                && tx.send(ModelPart::DiffStats { added, deleted }).is_err()
+                && tx.send(ModelPart::DiffStats {
+                    added: added.saturating_add(untracked_additions),
+                    deleted,
+                }).is_err()
             {
                 trim_if_abandoned();
             }

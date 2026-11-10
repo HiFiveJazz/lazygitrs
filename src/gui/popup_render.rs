@@ -185,6 +185,18 @@ pub(crate) fn render_popup(
                 ),
             );
         }
+        PopupState::ConfirmResetToUpstream { branch, upstream } => {
+            // Reuse the existing confirmation layout; input handling for this
+            // destructive variant explicitly requires 'y' rather than Enter.
+            let display = PopupState::Confirm {
+                title: "Discard local branch history?".into(),
+                message: format!(
+                    "Reset {branch} to {upstream}? Local-only commits and tracked edits will be discarded. Untracked paths usually remain unless they conflict. The old HEAD will be backed up. Press y to confirm (Enter cancels)."
+                ),
+                on_confirm: Box::new(|_| Ok(())),
+            };
+            render_popup(frame, &display, area, spinner_frame, theme, ai_button_hovered, ai_configured);
+        }
         PopupState::Confirm { title, message, .. } => {
             let inner_width = popup_width.saturating_sub(4) as usize; // borders + padding
             let wrapped = wrap_popup_lines(message, inner_width);
@@ -1070,7 +1082,7 @@ pub(crate) fn render_popup(
                 ]),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "How should the histories be combined?",
+                    "How should the histories be reconciled?",
                     normal.add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
@@ -1090,7 +1102,13 @@ pub(crate) fn render_popup(
                     dim,
                 )),
                 Line::from(""),
-                option(2, "v", "View divergent commits".to_string()),
+                option(2, "d", "Discard local history and match upstream".to_string()),
+                Line::from(Span::styled(
+                    "    Backs up HEAD; drops local commits and tracked changes",
+                    dim,
+                )),
+                Line::from(""),
+                option(3, "v", "View divergent commits".to_string()),
                 Line::from(Span::styled(
                     format!("    Compare HEAD with {upstream} before choosing"),
                     dim,

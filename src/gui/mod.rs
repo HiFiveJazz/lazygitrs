@@ -403,6 +403,7 @@ pub(crate) enum RemoteOpKind {
     /// HEAD was rewritten in place (amend or reword).
     LocalRewriteHead,
     LocalHistory,
+    ResetToUpstream,
     /// `git send-email` is network-adjacent work that should share the
     /// serialized remote lane, but it does not mutate repository refs/model.
     Email(bool),
@@ -412,6 +413,7 @@ pub(crate) enum RemoteOpKind {
 enum RemoteOpResult {
     Done,
     Pull(PullOutcome),
+    Backup(String),
 }
 
 type RemoteOpFn = Box<dyn FnOnce(&GitCommands) -> Result<RemoteOpResult> + Send>;
@@ -423,6 +425,7 @@ struct PendingRemoteOp {
 }
 
 struct RemoteOpCompletion {
+    backup_branch: Option<String>,
     head: Option<HeadState>,
     pull_outcome: Option<PullOutcome>,
     /// Some(false) proves that the network operation moved no repository refs.
@@ -622,11 +625,13 @@ fn spawn_index_mutation_worker(
             }
 
             let files = current_git.refresh_files_status_only();
+            let totals = files.as_ref().ok().and_then(|f| current_git.worktree_diff_totals(f).ok());
             busy.store(false, Ordering::Release);
             if tx
                 .send(IndexMutationResult {
                     generation,
                     files,
+                    totals,
                     mutation_error,
                 })
                 .is_err()
@@ -918,6 +923,7 @@ struct IndexMutationCommand {
 struct IndexMutationResult {
     generation: u64,
     files: Result<Vec<crate::model::File>>,
+    totals: Option<(usize, usize)>,
     mutation_error: Option<String>,
 }
 
@@ -1040,7 +1046,7 @@ pub struct Gui {
     /// waits are intentionally ignored.
     pending_remote_op: Option<PendingRemoteOp>,
     /// Async light files refresh (status-only) for non-index refreshes.
-    files_refresh_rx: Option<mpsc::Receiver<Result<Vec<crate::model::File>>>>,
+    files_refresh_rx: Option<mpsc::Receiver<Result<(Vec<crate::model::File>, Option<(usize, usize)>)>>>,
     files_refresh_in_progress: bool,
     /// True when starting a checkout invalidated an in-flight model/files
     /// refresh. If checkout fails, queue a fresh refresh because the old
@@ -3344,6 +3350,24 @@ impl Gui {
                         RemoteOpKind::LocalHistory => {
                             self.request_history_refresh();
                         }
+                        RemoteOpKind::ResetToUpstream => {
+                            // Reset replaces HEAD, index and tracked worktree content.
+                            // Discard old in-flight worktree snapshots and rebuild everything.
+                            self.git.cancel_worktree_reads();
+                            self.initial_load_rx = None;
+                            self.refresh_in_progress = false;
+                            self.files_refresh_rx = None;
+                            self.files_refresh_in_progress = false;
+                            self.diff_preview_cache.retain_immutable();
+                            self.needs_refresh = true;
+                            if let Some(backup) = completion.backup_branch {
+                                self.popup = PopupState::Message {
+                                    title: "Branch matched upstream".into(),
+                                    message: format!("Previous HEAD saved as {backup}. Untracked files were preserved."),
+                                    kind: MessageKind::Info,
+                                };
+                            }
+                        }
                         RemoteOpKind::Email(dry_run) => {
                             self.show_action_toast(if dry_run {
                                 "Email dry run passed"
@@ -3428,7 +3452,9 @@ impl Gui {
                             self.needs_refresh = true;
                         }
                     }
-                    if matches!(kind, RemoteOpKind::PullIntegrate) {
+                    // Even a failed reset may have changed the index or worktree.
+                    // A previously running refresh was cancelled before the attempt.
+                    if matches!(kind, RemoteOpKind::PullIntegrate | RemoteOpKind::ResetToUpstream) {
                         self.needs_refresh = true;
                     }
                     if matches!(kind, RemoteOpKind::Email(_)) {
@@ -3546,6 +3572,36 @@ impl Gui {
             behind,
             selected: 0,
         };
+    }
+
+    fn confirm_reset_to_upstream(&mut self, upstream: String) {
+        let branch = self.model.lock().unwrap().head_branch_name.clone();
+        self.popup = PopupState::ConfirmResetToUpstream { branch, upstream };
+    }
+
+    fn start_reset_to_upstream(&mut self, branch: String, upstream: String) {
+        if self.remote_op_label.is_some() || self.pending_remote_op.is_some() {
+            return;
+        }
+        // Invalidate in-flight status loads before the destructive operation.
+        self.git.cancel_worktree_reads();
+        self.initial_load_rx = None;
+        self.refresh_in_progress = false;
+        self.files_refresh_rx = None;
+        self.files_refresh_in_progress = false;
+        let op: RemoteOpFn = Box::new(move |git| {
+            git.reset_to_upstream_with_backup(&branch, &upstream)
+                .map(RemoteOpResult::Backup)
+        });
+        if self.auto_fetch_in_flight {
+            self.pending_remote_op = Some(PendingRemoteOp {
+                kind: RemoteOpKind::ResetToUpstream,
+                title: "Resetting to upstream".to_string(),
+                op,
+            });
+        } else {
+            self.launch_remote_op(RemoteOpKind::ResetToUpstream, "Resetting to upstream", op);
+        }
     }
 
     fn start_pull_divergence_compare(&mut self, upstream: String, ahead: usize, behind: usize) {
@@ -3700,7 +3756,11 @@ impl Gui {
         let (tx, rx) = mpsc::channel();
         self.files_refresh_rx = Some(rx);
         std::thread::spawn(move || {
-            let _ = tx.send(git.refresh_files_status_only());
+            let result = git.refresh_files_status_only().map(|files| {
+                let totals = git.worktree_diff_totals(&files).ok();
+                (files, totals)
+            });
+            let _ = tx.send(result);
         });
     }
 
@@ -3756,6 +3816,10 @@ impl Gui {
                 Ok(files) if is_latest => {
                     let mut model = self.model.lock().unwrap();
                     model.set_files(files);
+                    if let Some((added, deleted)) = result.totals {
+                        model.total_additions = added;
+                        model.total_deletions = deleted;
+                    }
                     if self.show_file_tree {
                         self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
                         self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
@@ -3808,12 +3872,16 @@ impl Gui {
             return;
         };
         match rx.try_recv() {
-            Ok(Ok(files)) => {
+            Ok(Ok((files, totals))) => {
                 self.files_refresh_rx = None;
                 self.files_refresh_in_progress = false;
                 {
                     let mut model = self.model.lock().unwrap();
                     model.set_files(files);
+                    if let Some((added, deleted)) = totals {
+                        model.total_additions = added;
+                        model.total_deletions = deleted;
+                    }
                     if self.show_file_tree {
                         self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
                         self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
@@ -4076,9 +4144,10 @@ impl Gui {
             };
 
             let result = op(&git).map(|op_result| {
-                let pull_outcome = match op_result {
-                    RemoteOpResult::Done => None,
-                    RemoteOpResult::Pull(outcome) => Some(outcome),
+                let (pull_outcome, backup_branch) = match op_result {
+                    RemoteOpResult::Done => (None, None),
+                    RemoteOpResult::Pull(outcome) => (Some(outcome), None),
+                    RemoteOpResult::Backup(backup) => (None, Some(backup)),
                 };
                 let head = if is_checkout {
                     // Read on the worker, never on the UI thread. If this read
@@ -4099,6 +4168,7 @@ impl Gui {
                 };
 
                 RemoteOpCompletion {
+                    backup_branch,
                     head,
                     pull_outcome,
                     refs_changed,
@@ -4140,7 +4210,8 @@ impl Gui {
             // filesystem/cache bandwidth. The stash list itself is tiny.
             let stash_result = git.load_stash();
             let files_result = refresh_worktree.then(|| git.load_files_status_only());
-            let diff_stats_result = refresh_worktree.then(|| git.diff_shortstat());
+            let diff_stats_result = files_result.as_ref().and_then(|result| result.as_ref().ok())
+                .map(|files| git.worktree_diff_totals(files));
 
             let _ = tx.send(Box::new(move |gui: &mut Gui| {
                 gui.background_mutation_label = None;

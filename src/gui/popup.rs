@@ -1961,9 +1961,11 @@ pub enum PopupState {
         upstream: String,
         ahead: usize,
         behind: usize,
-        /// Primary selection: 0=rebase, 1=merge, 2=view.
+        /// Primary selection: 0=rebase, 1=merge, 2=discard to upstream, 3=view.
         selected: usize,
     },
+    /// Destructive reset requires the explicit 'y' key, not Enter.
+    ConfirmResetToUpstream { branch: String, upstream: String },
     /// Informational or error message — dismissed by any key press.
     Message {
         title: String,

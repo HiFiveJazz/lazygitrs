@@ -1393,9 +1393,9 @@ mod tests {
         let area = Rect::new(0, 0, 120, 30);
         let rect = pull_divergence_popup_geometry(area).unwrap();
         assert_eq!(rect.width, 96);
-        assert_eq!(rect.height, 20);
+        assert_eq!(rect.height, 22);
         assert_eq!(rect.x, 12);
-        assert_eq!(rect.y, 5);
+        assert_eq!(rect.y, 4);
     }
 
     #[test]
@@ -4201,7 +4201,7 @@ fn pull_divergence_popup_geometry(area: Rect) -> Option<Rect> {
     if width < 36 || area.height < 12 {
         return None;
     }
-    let desired_height = 20u16.min(area.height.saturating_sub(2));
+    let desired_height = 22u16.min(area.height.saturating_sub(2));
     if desired_height < 12 {
         return None;
     }

@@ -23,6 +23,16 @@ impl Gui {
         let was_theme_picker = matches!(self.popup, PopupState::ThemePicker { .. });
 
         match &self.popup {
+            PopupState::ConfirmResetToUpstream { branch, upstream } => {
+                if key.code == KeyCode::Char('y') {
+                    let branch = branch.clone();
+                    let upstream = upstream.clone();
+                    self.popup = PopupState::None;
+                    self.start_reset_to_upstream(branch, upstream);
+                } else if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n')) {
+                    self.popup = PopupState::None;
+                }
+            }
             PopupState::Confirm { .. } => {
                 if key.code == KeyCode::Char('y') || key.code == KeyCode::Enter {
                     let popup = std::mem::replace(&mut self.popup, PopupState::None);
@@ -797,7 +807,7 @@ impl Gui {
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
                         if let PopupState::PullDivergence { selected, .. } = &mut self.popup {
-                            *selected = (*selected + 1).min(2);
+                            *selected = (*selected + 1).min(3);
                         }
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
@@ -814,6 +824,7 @@ impl Gui {
                             self.popup = PopupState::None;
                             self.start_pull_integration(upstream, PullStrategy::Merge, false);
                         }
+                        2 => self.confirm_reset_to_upstream(upstream),
                         _ => self.start_pull_divergence_compare(upstream, ahead, behind),
                     },
                     KeyCode::Char('r') => {
@@ -823,6 +834,9 @@ impl Gui {
                     KeyCode::Char('m') => {
                         self.popup = PopupState::None;
                         self.start_pull_integration(upstream, PullStrategy::Merge, false);
+                    }
+                    KeyCode::Char('d') => {
+                        self.confirm_reset_to_upstream(upstream);
                     }
                     KeyCode::Char('v') => {
                         self.start_pull_divergence_compare(upstream, ahead, behind);

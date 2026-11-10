@@ -1607,7 +1607,7 @@ fn checkout_discards_pre_checkout_refresh_results() {
             branch_name: "feature".into(),
         })
         .unwrap();
-    files_tx.send(Ok(Vec::new())).unwrap();
+    files_tx.send(Ok((Vec::new(), None))).unwrap();
 
     request_test_checkout(&mut gui, ' ', "main");
     wait_for_test_checkout(&mut gui);
@@ -1620,7 +1620,7 @@ fn checkout_discards_pre_checkout_refresh_results() {
             })
             .is_err()
     );
-    assert!(files_tx.send(Ok(Vec::new())).is_err());
+    assert!(files_tx.send(Ok((Vec::new(), None))).is_err());
     assert!(gui.files_refresh_rx.is_none());
     assert!(!gui.files_refresh_in_progress);
     assert!(gui.refresh_in_progress);
@@ -1919,6 +1919,7 @@ fn push_uses_targeted_background_refresh() {
         .send((
             RemoteOpKind::Push,
             Ok(RemoteOpCompletion {
+                backup_branch: None,
                 head: None,
                 pull_outcome: None,
                 refs_changed: None,
@@ -2048,6 +2049,7 @@ fn fetch_uses_targeted_background_refresh() {
         .send((
             RemoteOpKind::Fetch,
             Ok(RemoteOpCompletion {
+                backup_branch: None,
                 head: None,
                 pull_outcome: None,
                 refs_changed: Some(true),
@@ -2154,6 +2156,7 @@ fn pull_uses_targeted_background_refresh() {
         .send((
             RemoteOpKind::Pull,
             Ok(RemoteOpCompletion {
+                backup_branch: None,
                 head: None,
                 pull_outcome: Some(PullOutcome::FastForwarded {
                     upstream: "origin/main".to_string(),
@@ -2198,6 +2201,7 @@ fn divergent_pull_opens_strategy_menu_instead_of_git_error() {
         .send((
             RemoteOpKind::Pull,
             Ok(RemoteOpCompletion {
+                backup_branch: None,
                 head: None,
                 pull_outcome: Some(PullOutcome::Diverged {
                     upstream: "origin/main".to_string(),
@@ -2223,6 +2227,26 @@ fn divergent_pull_opens_strategy_menu_instead_of_git_error() {
     assert_eq!(upstream, "origin/main");
     assert_eq!((*ahead, *behind, *selected), (3, 17, 0));
     assert!(gui.remote_op_success_at.is_none());
+}
+
+#[test]
+fn divergence_discard_requires_confirmation_and_can_be_cancelled() {
+    let repo = TempRepo::new("pull-discard-confirm");
+    let mut gui = checkout_test_gui(&repo);
+    let initial_head = repo.git(&["rev-parse", "HEAD"]);
+    gui.popup = PopupState::PullDivergence {
+        branch: "feature".into(),
+        upstream: "origin/main".into(),
+        ahead: 2,
+        behind: 2,
+        selected: 2,
+    };
+    gui.handle_popup_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)).unwrap();
+    assert!(matches!(gui.popup, PopupState::ConfirmResetToUpstream { .. }));
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), initial_head);
+    gui.handle_popup_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
+    assert!(matches!(gui.popup, PopupState::None));
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), initial_head);
 }
 
 #[test]
@@ -2270,6 +2294,7 @@ fn pull_with_remote_ref_changes_but_unchanged_head_uses_fetch_refresh() {
         .send((
             RemoteOpKind::Pull,
             Ok(RemoteOpCompletion {
+                backup_branch: None,
                 head: None,
                 pull_outcome: Some(PullOutcome::Diverged {
                     upstream: "origin/main".to_string(),
@@ -2319,6 +2344,7 @@ fn successful_checkout_without_head_metadata_still_refreshes() {
         .send((
             RemoteOpKind::Other,
             Ok(RemoteOpCompletion {
+                backup_branch: None,
                 head: None,
                 pull_outcome: None,
                 refs_changed: None,

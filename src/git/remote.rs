@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::GitCommands;
 use crate::model::{Remote, RemoteBranch};
@@ -443,6 +444,49 @@ impl GitCommands {
             // their history shape.
             _ => None,
         })
+    }
+
+    /// Discard the local branch's committed history and tracked index/worktree changes,
+    /// matching its currently configured upstream. Never deletes untracked files.
+    /// A separate backup branch preserves the previous HEAD before the hard reset.
+    /// The caller must obtain explicit user confirmation before invoking this.
+    pub fn reset_to_upstream_with_backup(
+        &self,
+        expected_branch: &str,
+        expected_upstream: &str,
+    ) -> Result<String> {
+        let current = self.current_branch_name()?;
+        if current.is_empty() || current != expected_branch {
+            bail!("Branch changed before reset (expected {expected_branch}, found {current}); nothing was reset");
+        }
+        let status = self.repo_status()?;
+        if status.is_rebasing || status.is_merging || status.is_cherry_picking || status.is_bisecting {
+            bail!("Finish or abort the active Git operation before resetting");
+        }
+        let upstream = self.git().args(&[
+            "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}",
+        ]).run_expecting_success()?.stdout_trimmed().to_string();
+        if upstream != expected_upstream || upstream.is_empty() {
+            bail!("Upstream changed before reset; nothing was reset");
+        }
+        // Resolve to an actual commit before taking a backup or touching the worktree.
+        let target = self.git().args(&[
+            "rev-parse", "--verify", "--end-of-options", "@{upstream}^{commit}",
+        ]).run_expecting_success()?.stdout_trimmed().to_string();
+        let head = self.git().args(&["rev-parse", "HEAD"])
+            .run_expecting_success()?.stdout_trimmed().to_string();
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let backup = format!("backup/{current}-before-upstream-reset-{unique}");
+        // If this fails (e.g. a refname conflict), DO NOT reset.
+        self.git().args(&["branch", "--no-track", &backup, &head])
+            .run_expecting_success()?;
+        self.git().args(&["reset", "--hard", &target])
+            .run_expecting_success()
+            .with_context(|| format!("Reset failed; your original HEAD is preserved at {backup}"))?;
+        if let Some(repo) = &self.read_repo {
+            let _ = repo.reload();
+        }
+        Ok(backup)
     }
 
     pub fn push(&self, force: bool) -> Result<()> {
@@ -1106,6 +1150,53 @@ mod tests {
         let commands = GitCommands::new(&local).expect("open local clone");
         assert!(commands.origin_contains_commit(&pushed).unwrap());
         assert!(!commands.origin_contains_commit(&local_only).unwrap());
+    }
+
+    #[test]
+    fn reset_to_upstream_creates_backup_and_preserves_untracked() {
+        let temp = TempDir::new("reset-to-upstream");
+        let remote = temp.path.join("remote.git");
+        let local = temp.path.join("local");
+        let peer = temp.path.join("peer");
+        let remote_arg = remote.to_string_lossy().to_string();
+        let local_arg = local.to_string_lossy().to_string();
+        let peer_arg = peer.to_string_lossy().to_string();
+
+        git(&temp.path, &["init", "-q", "--bare", "--initial-branch=main", &remote_arg]);
+        git(&temp.path, &["clone", "-q", &remote_arg, &local_arg]);
+        configure_identity(&local);
+        std::fs::write(local.join("base"), "base\n").unwrap();
+        git(&local, &["add", "base"]);
+        git(&local, &["commit", "-qm", "base"]);
+        git(&local, &["push", "-q", "-u", "origin", "main"]);
+        git(&temp.path, &["clone", "-q", &remote_arg, &peer_arg]);
+        configure_identity(&peer);
+
+        std::fs::write(local.join("local-only"), "local\n").unwrap();
+        git(&local, &["add", "local-only"]);
+        git(&local, &["commit", "-qm", "local"]);
+        let old_head = git(&local, &["rev-parse", "HEAD"]);
+        std::fs::write(local.join("base"), "staged worktree edit\n").unwrap();
+        git(&local, &["add", "base"]);
+        std::fs::write(local.join("untracked"), "keep me\n").unwrap();
+        std::fs::write(peer.join("remote-only"), "remote\n").unwrap();
+        git(&peer, &["add", "remote-only"]);
+        git(&peer, &["commit", "-qm", "remote"]);
+        git(&peer, &["push", "-q", "origin", "main"]);
+        git(&local, &["fetch", "-q", "origin"]);
+        let target = git(&local, &["rev-parse", "origin/main"]);
+
+        let commands = GitCommands::new(&local).unwrap();
+        assert!(commands.reset_to_upstream_with_backup("other", "origin/main").is_err());
+        assert!(commands.reset_to_upstream_with_backup("main", "wrong/upstream").is_err());
+        assert_eq!(git(&local, &["rev-parse", "HEAD"]), old_head);
+        let backup = commands.reset_to_upstream_with_backup("main", "origin/main").unwrap();
+        assert!(backup.starts_with("backup/main-before-upstream-reset-"));
+        assert_eq!(git(&local, &["rev-parse", "HEAD"]), target);
+        assert_eq!(git(&local, &["rev-parse", &backup]), old_head);
+        assert!(local.join("untracked").exists());
+        assert!(!local.join("local-only").exists());
+        assert_eq!(std::fs::read_to_string(local.join("base")).unwrap(), "base\n");
     }
 
     #[test]

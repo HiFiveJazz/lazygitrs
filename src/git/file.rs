@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::Read;
 
 use anyhow::Result;
 
@@ -84,6 +86,54 @@ impl GitCommands {
             .run_expecting_success()?;
 
         Ok(parse_porcelain_status_lines(&result.stdout))
+    }
+
+    /// Include small untracked text files in the header's change count.
+    /// `git diff HEAD --shortstat` ignores them until staged. Bound all reads
+    /// to keep enormous untracked trees (e.g. node_modules) responsive.
+    pub(super) fn untracked_line_additions(&self, files: &[File]) -> usize {
+        const MAX_FILES: usize = 128;
+        const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+        const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+        let mut budget = MAX_TOTAL_BYTES;
+        let mut added = 0usize;
+        for file in files.iter().filter(|file| !file.tracked).take(MAX_FILES) {
+            let path = self.repo_path().join(file.current_path());
+            let Ok(meta) = fs::symlink_metadata(&path) else { continue; };
+            if meta.file_type().is_symlink() {
+                added = added.saturating_add(1);
+                continue;
+            }
+            let limit = MAX_FILE_BYTES.min(budget);
+            if !meta.is_file() || meta.len() > limit {
+                continue;
+            }
+            let Ok(stream) = fs::File::open(&path) else { continue; };
+            let mut bytes = Vec::new();
+            if stream.take(limit.saturating_add(1)).read_to_end(&mut bytes).is_err()
+                || bytes.len() as u64 > limit
+            {
+                continue;
+            }
+            budget -= bytes.len() as u64;
+            if bytes.contains(&0) { continue; } // Git treats NUL-containing files as binary.
+            added = added.saturating_add(bytes.iter().filter(|&&b| b == b'\n').count());
+            if bytes.last().is_some_and(|b| *b != b'\n') {
+                added = added.saturating_add(1);
+            }
+        }
+        added
+    }
+
+    /// Aggregate stats for a completed status snapshot. Called off the UI
+    /// thread; reuse the provided untracked rows instead of running ls-files again.
+    pub fn worktree_diff_totals(&self, files: &[File]) -> Result<(usize, usize)> {
+        let (tracked_added, deleted) = if files.iter().any(|file| file.tracked) {
+            self.diff_shortstat()?
+        } else {
+            (0, 0)
+        };
+        Ok((tracked_added.saturating_add(self.untracked_line_additions(files)), deleted))
     }
 
     /// Populate final working-tree stats relative to HEAD. Failures are
@@ -705,6 +755,27 @@ mod tests {
         let git_cmds = GitCommands::new(repo).expect("git commands");
         let files = git_cmds.load_files_status_only().expect("porcelain status");
         assert!(files.iter().any(|file| file.has_merge_conflicts));
+    }
+
+    #[test]
+    fn working_tree_totals_include_new_files_without_double_counting_after_stage() {
+        let temp = TempDir::new("untracked-totals");
+        let repo = temp.path();
+        init_repo(repo);
+        std::fs::write(repo.join("tracked.txt"), "before\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "base"]);
+        std::fs::write(repo.join("tracked.txt"), "after\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "one\ntwo\nthree").unwrap();
+        std::fs::write(repo.join("binary.bin"), b"text\0binary").unwrap();
+        let commands = GitCommands::new(repo).unwrap();
+        let files = commands.load_files_status_only().unwrap();
+        assert_eq!(commands.worktree_diff_totals(&files).unwrap(), (4, 1));
+
+        git(repo, &["add", "new.txt"]);
+        let files = commands.load_files_status_only().unwrap();
+        assert_eq!(commands.worktree_diff_totals(&files).unwrap(), (4, 1));
+        assert!(files.iter().any(|f| !f.tracked && f.current_path() == "binary.bin"));
     }
 
     #[test]
