@@ -46,6 +46,9 @@ impl Gui {
                         }
                     }
                 } else {
+                    // A cancelled destructive confirmation must restore the
+                    // ordinary orange/green marks rather than leave red bars.
+                    self.marked_file_discarding.clear();
                     self.popup = PopupState::None;
                 }
             }

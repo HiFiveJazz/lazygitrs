@@ -4294,7 +4294,7 @@ fn files_marks_are_independent_of_index_and_visual_ranges_survive_tree_switches(
     gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
     assert!(gui.file_visual_anchor.is_none());
     assert_eq!(gui.marked_file_paths.len(), 3);
-    assert_eq!(gui.context_mgr.selected_active(), 3.min(names.len() - 1));
+    assert_eq!(gui.context_mgr.selected_active(), 2, "Visual Space must not advance the cursor");
 
     // At the bottom, Space toggles the last mark without wrapping.
     gui.context_mgr.set_selection(names.len() - 1);
@@ -4309,6 +4309,517 @@ fn files_marks_are_independent_of_index_and_visual_ranges_survive_tree_switches(
     assert_eq!(gui.marked_file_paths.len(), 3, "marks are Git paths, not row indices");
     gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
     assert!(gui.marked_file_paths.is_empty());
+}
+
+#[test]
+fn visual_escape_restores_existing_file_states_without_mutating_git_or_marks() {
+    let repo = TempRepo::new("files-visual-esc-restore-mixed");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let paths: Vec<_> = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.current_path().to_owned()).collect();
+
+    // The three underlying states are: green/staged, orange/marked, unmarked.
+    gui.marked_file_paths.insert(paths[0].clone());
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    gui.marked_file_paths.insert(paths[1].clone());
+    let before_status = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.short_status.clone()).collect::<Vec<_>>();
+    let before_marks = gui.marked_file_paths.clone();
+
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
+    assert!(gui.file_visual_anchor.is_some());
+    gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+    assert!(gui.file_visual_anchor.is_none());
+    assert_eq!(gui.marked_file_paths, before_marks,
+        "Esc must not change orange marks while removing purple overlay");
+    assert_eq!(gui.model.lock().unwrap().files.iter()
+        .map(|file| file.short_status.clone()).collect::<Vec<_>>(), before_status,
+        "Esc must preserve green and unmarked files");
+
+    // Another Esc now clears the orange marks, without unstaging green files.
+    gui.context_mgr.set_selection(1);
+    gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+    assert!(gui.marked_file_paths.is_empty());
+    assert!(gui.model.lock().unwrap().files[0].has_staged_changes);
+}
+
+#[test]
+fn tree_space_skips_other_marked_files_and_directory_rows() {
+    let repo = TempRepo::new("files-tree-space-skip-marks");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = true;
+    gui.update_file_tree_state();
+    let paths = gui.model.lock().unwrap().files.iter()
+        .map(|f| f.current_path().to_owned()).collect::<Vec<_>>();
+    let row0 = gui.file_tree_nodes.iter().position(|node| node.file_index == Some(0)).unwrap();
+    let row2 = gui.file_tree_nodes.iter().position(|node| node.file_index == Some(2)).unwrap();
+    assert!(row2 > row0);
+    gui.marked_file_paths.insert(paths[1].clone());
+    gui.context_mgr.set_selection(row0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
+    assert!(gui.marked_file_paths.contains(&paths[0]));
+    assert_eq!(gui.context_mgr.selected_active(), row2);
+    // Last remaining unmarked file is marked without wrapping backwards.
+    gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
+    assert!(gui.marked_file_paths.contains(&paths[2]));
+    assert_eq!(gui.context_mgr.selected_active(), row2);
+}
+
+#[test]
+fn tree_space_skips_appended_files_and_existing_orange_marks() {
+    let repo = TempRepo::new("files-tree-space-skips-green");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let paths = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.current_path().to_owned()).collect::<Vec<_>>();
+    gui.marked_file_paths.insert(paths[1].clone());
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    assert!(gui.model.lock().unwrap().files[1].has_staged_changes);
+    gui.show_file_tree = true;
+    gui.update_file_tree_state();
+    let row0 = gui.file_tree_nodes.iter().position(|node| node.file_index == Some(0)).unwrap();
+    let row2 = gui.file_tree_nodes.iter().position(|node| node.file_index == Some(2)).unwrap();
+    gui.context_mgr.set_selection(row0);
+    // Space marks the first file; the next one is appended/green, so skip it.
+    gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
+    assert_eq!(gui.context_mgr.selected_active(), row2);
+    assert!(gui.marked_file_paths.contains(&paths[0]));
+    assert!(!gui.marked_file_paths.contains(&paths[1]));
+}
+
+#[test]
+fn lowercase_a_stages_only_marked_files_and_clears_their_orange_marks() {
+    let repo = TempRepo::new("files-a-stages-marked-only");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let files = gui.model.lock().unwrap().files.clone();
+    let selected = files[0].current_path().to_owned();
+    let excluded = files[1].current_path().to_owned();
+    gui.marked_file_paths.insert(selected.clone());
+    gui.context_mgr.set_selection(1);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    assert!(!gui.marked_file_paths.contains(&selected));
+    let model = gui.model.lock().unwrap();
+    assert!(model.files.iter().find(|file| file.current_path() == selected)
+        .unwrap().has_staged_changes);
+    assert!(!model.files.iter().find(|file| file.current_path() == excluded)
+        .unwrap().has_staged_changes);
+}
+
+#[test]
+fn lowercase_a_toggles_selected_files_between_staged_and_unstaged() {
+    let repo = TempRepo::new("files-a-stage-unstage-marked");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+
+    let paths: Vec<_> = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.current_path().to_owned())
+        .collect();
+    let marked = paths[0].clone();
+    let untouched = paths[1].clone();
+    gui.marked_file_paths.insert(marked.clone());
+    let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+
+    // Append only the marked path, leaving unrelated files unstaged.
+    gui.handle_key(a).unwrap();
+    {
+        let model = gui.model.lock().unwrap();
+        let target = model.files.iter().find(|file| file.current_path() == marked).unwrap();
+        assert!(target.has_staged_changes && !target.has_unstaged_changes);
+        assert!(!model.files.iter().find(|file| file.current_path() == untouched)
+            .unwrap().has_staged_changes);
+    }
+    assert!(!gui.marked_file_paths.contains(&marked));
+
+    // On the appended (green) row, `a` unstages every appended file and
+    // converts the result back to an orange mark.
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(a).unwrap();
+    assert!(gui.marked_file_paths.contains(&marked));
+    {
+        let model = gui.model.lock().unwrap();
+        let target = model.files.iter().find(|file| file.current_path() == marked).unwrap();
+        assert!(!target.has_staged_changes && target.has_unstaged_changes);
+        assert!(!model.files.iter().find(|file| file.current_path() == untouched)
+            .unwrap().has_staged_changes);
+    }
+    gui.handle_key(a).unwrap();
+    assert!(gui.model.lock().unwrap().files.iter()
+        .find(|file| file.current_path() == marked).unwrap().has_staged_changes);
+}
+
+#[test]
+fn lowercase_a_without_selection_stages_all_then_a_on_green_unstages_all() {
+    let repo = TempRepo::new("files-a-stage-all-no-selection");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+
+    gui.handle_key(a).unwrap();
+    assert!(gui.marked_file_paths.is_empty());
+    assert!(gui.model.lock().unwrap().files.iter()
+        .all(|file| file.has_staged_changes && !file.has_unstaged_changes));
+
+    // A second `a` on any green row unstages the complete appended group.
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(a).unwrap();
+    assert!(gui.model.lock().unwrap().files.iter()
+        .all(|file| !file.has_staged_changes && file.has_unstaged_changes));
+    assert_eq!(gui.marked_file_paths.len(), gui.model.lock().unwrap().files.len());
+
+    // A third `a` stages that marked group, returning it to green.
+    gui.handle_key(a).unwrap();
+    assert!(gui.marked_file_paths.is_empty());
+    assert!(gui.model.lock().unwrap().files.iter().all(|file| file.has_staged_changes));
+}
+
+#[test]
+fn lowercase_a_uses_live_visual_range_and_transitions_to_appended() {
+    let repo = TempRepo::new("files-visual-a-stage-unstage");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let paths: Vec<_> = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.current_path().to_owned()).collect();
+
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    assert!(gui.file_visual_anchor.is_none());
+    assert!(gui.marked_file_paths.is_empty());
+    {
+        let model = gui.model.lock().unwrap();
+        assert!(model.files[0].has_staged_changes);
+        assert!(model.files[1].has_staged_changes);
+        assert!(!model.files[2].has_staged_changes);
+    }
+
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    {
+        let model = gui.model.lock().unwrap();
+        assert!(!model.files[0].has_staged_changes);
+        assert!(!model.files[1].has_staged_changes);
+        assert!(!model.files[2].has_staged_changes);
+    }
+    assert!(gui.marked_file_paths.contains(&paths[0]));
+    assert!(gui.marked_file_paths.contains(&paths[1]));
+}
+
+#[test]
+fn escape_on_green_unstages_all_appended_then_escape_clears_orange_marks() {
+    let repo = TempRepo::new("files-green-esc-to-orange");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let paths = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.current_path().to_owned()).collect::<Vec<_>>();
+    let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+
+    gui.handle_key(a).unwrap();
+    assert!(gui.marked_file_paths.is_empty());
+    gui.context_mgr.set_selection(1);
+    gui.handle_key(esc).unwrap();
+    assert_eq!(gui.marked_file_paths.len(), paths.len());
+    assert!(paths.iter().all(|path| gui.marked_file_paths.contains(path)));
+    assert!(gui.model.lock().unwrap().files.iter().all(|file| !file.has_staged_changes));
+
+    gui.handle_key(esc).unwrap();
+    assert!(gui.marked_file_paths.is_empty());
+    assert!(gui.model.lock().unwrap().files.iter().all(|file| !file.has_staged_changes));
+}
+
+#[test]
+fn space_on_appended_row_unstages_and_marks_it_without_touching_other_green_rows() {
+    let repo = TempRepo::new("files-green-space-exclusive");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    let path = gui.model.lock().unwrap().files[0].current_path().to_owned();
+
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
+    assert!(gui.marked_file_paths.contains(&path));
+    {
+        let model = gui.model.lock().unwrap();
+        assert!(!model.files[0].has_staged_changes);
+        assert!(model.files.iter().skip(1).all(|file| file.has_staged_changes));
+        assert!(model.files.iter().all(|file| {
+            !file.has_staged_changes || !gui.marked_file_paths.contains(file.current_path())
+        }));
+    }
+}
+
+#[test]
+fn visual_escape_over_appended_files_preserves_the_git_index() {
+    let repo = TempRepo::new("files-green-visual-esc-preserves-stage");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+    assert!(gui.file_visual_anchor.is_none());
+    assert!(gui.marked_file_paths.is_empty());
+    assert!(gui.model.lock().unwrap().files.iter().all(|file| file.has_staged_changes),
+        "Esc must reveal green bars and leave all staged files staged");
+}
+
+
+#[test]
+fn x_toggles_individual_file_states_without_affecting_other_marks() {
+    let repo = TempRepo::new("files-x-state-cycle");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let paths = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.current_path().to_owned()).collect::<Vec<_>>();
+    let x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+
+    // Unmarked -> appended, with no orange mark. Another x -> unmarked,
+    // without silently converting it to an orange mark.
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(x).unwrap();
+    assert!(gui.model.lock().unwrap().files[0].has_staged_changes);
+    assert!(!gui.marked_file_paths.contains(&paths[0]));
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(x).unwrap();
+    assert!(!gui.model.lock().unwrap().files[0].has_staged_changes);
+    assert!(!gui.marked_file_paths.contains(&paths[0]));
+
+    // Marked -> unmarked, without Git staging and without clearing another
+    // file's marks. x is cursor-local, not a bulk mark action.
+    gui.marked_file_paths.insert(paths[0].clone());
+    gui.marked_file_paths.insert(paths[1].clone());
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(x).unwrap();
+    assert!(!gui.marked_file_paths.contains(&paths[0]));
+    assert!(gui.marked_file_paths.contains(&paths[1]));
+    assert!(!gui.model.lock().unwrap().files[0].has_staged_changes);
+    assert!(!gui.model.lock().unwrap().files[1].has_staged_changes);
+}
+
+#[test]
+fn x_on_visual_range_toggles_each_underlying_state_once() {
+    let repo = TempRepo::new("files-x-visual-mixed");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let paths = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.current_path().to_owned()).collect::<Vec<_>>();
+
+    // 0 staged, 1 marked, 2 unmarked.
+    gui.marked_file_paths.insert(paths[0].clone());
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    gui.marked_file_paths.insert(paths[1].clone());
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).unwrap();
+    let model = gui.model.lock().unwrap();
+    assert!(!model.files[0].has_staged_changes);
+    assert!(!model.files[1].has_staged_changes);
+    assert!(model.files[2].has_staged_changes);
+    assert!(gui.marked_file_paths.is_empty());
+    assert!(gui.file_visual_anchor.is_none());
+    assert_eq!(gui.context_mgr.selected_active(), 2,
+        "Visual x must not jump past the selected range");
+}
+
+#[test]
+fn x_on_tree_directory_toggles_children_by_state_without_touching_other_files() {
+    let repo = TempRepo::new("files-x-tree-directory");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let paths = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.current_path().to_owned()).collect::<Vec<_>>();
+
+    // The directory holds one staged and one orange-marked file; the file
+    // at the repository root must be left unchanged.
+    gui.marked_file_paths.insert(paths[0].clone());
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    gui.marked_file_paths.insert(paths[1].clone());
+    gui.show_file_tree = true;
+    gui.update_file_tree_state();
+    let directory = gui.file_tree_nodes.iter().position(|node| {
+        node.is_dir && node.child_file_indices.contains(&0)
+            && node.child_file_indices.contains(&1)
+            && !node.child_file_indices.contains(&2)
+    }).unwrap();
+    gui.context_mgr.set_selection(directory);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).unwrap();
+    let model = gui.model.lock().unwrap();
+    assert!(!model.files[0].has_staged_changes);
+    assert!(!model.files[1].has_staged_changes);
+    assert!(!model.files[2].has_staged_changes);
+    assert!(gui.marked_file_paths.is_empty());
+    assert_eq!(gui.context_mgr.selected_active(), directory,
+        "x on a directory must not move the cursor");
+}
+
+#[test]
+fn visual_space_on_all_orange_selection_unmarks_range_instead_of_remarking() {
+    let repo = TempRepo::new("files-visual-space-clears-marks");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let paths: Vec<_> = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.current_path().to_owned()).collect();
+    gui.marked_file_paths.insert(paths[0].clone());
+    gui.marked_file_paths.insert(paths[1].clone());
+    let before_status = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.short_status.clone()).collect::<Vec<_>>();
+
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
+    assert!(gui.marked_file_paths.is_empty());
+    assert!(gui.file_visual_anchor.is_none());
+    assert_eq!(gui.context_mgr.selected_active(), 1);
+    assert_eq!(gui.model.lock().unwrap().files.iter()
+        .map(|file| file.short_status.clone()).collect::<Vec<_>>(), before_status,
+        "unmarking a visual range must never mutate Git staging");
+
+    // Same range now unmarked -> orange marks via a second Visual Space.
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
+    assert!(gui.marked_file_paths.contains(&paths[0]));
+    assert!(gui.marked_file_paths.contains(&paths[1]));
+    assert!(!gui.marked_file_paths.contains(&paths[2]));
+}
+
+#[test]
+fn visual_space_with_mixed_states_marks_only_selected_files() {
+    let repo = TempRepo::new("files-visual-space-mixed");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let paths: Vec<_> = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.current_path().to_owned()).collect();
+    gui.marked_file_paths.insert(paths[0].clone());
+    gui.context_mgr.set_selection(2);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
+    assert!(gui.marked_file_paths.contains(&paths[0]));
+    assert!(gui.marked_file_paths.contains(&paths[1]));
+    assert!(gui.marked_file_paths.contains(&paths[2]));
+    assert!(gui.file_visual_anchor.is_none());
+}
+
+#[test]
+fn refresh_prunes_legacy_orange_marks_on_appended_files() {
+    let repo = TempRepo::new("files-exclusive-refresh");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    let path = gui.model.lock().unwrap().files[0].current_path().to_owned();
+    // Simulate the inconsistent state produced by earlier versions.
+    gui.marked_file_paths.insert(path.clone());
+    gui.prune_file_marks();
+    assert!(!gui.marked_file_paths.contains(&path));
+}
+
+#[test]
+fn lowercase_a_with_visual_on_green_only_unstages_that_range() {
+    let repo = TempRepo::new("files-visual-green-toggle");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+    let model = gui.model.lock().unwrap();
+    assert!(!model.files[0].has_staged_changes);
+    assert!(!model.files[1].has_staged_changes);
+    assert!(model.files[2].has_staged_changes);
+    assert!(gui.marked_file_paths.contains(model.files[0].current_path()));
+    assert!(gui.marked_file_paths.contains(model.files[1].current_path()));
+    assert!(!gui.marked_file_paths.contains(model.files[2].current_path()));
+}
+
+#[test]
+fn lowercase_a_on_orange_marks_does_not_unstage_other_green_files() {
+    let repo = TempRepo::new("files-marked-with-other-green");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let paths = gui.model.lock().unwrap().files.iter()
+        .map(|file| file.current_path().to_owned()).collect::<Vec<_>>();
+    let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+    gui.marked_file_paths.insert(paths[0].clone());
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(a).unwrap();
+    gui.marked_file_paths.insert(paths[1].clone());
+    gui.context_mgr.set_selection(1);
+    gui.handle_key(a).unwrap();
+    let model = gui.model.lock().unwrap();
+    assert!(model.files[0].has_staged_changes);
+    assert!(model.files[1].has_staged_changes);
+    assert!(!model.files[2].has_staged_changes);
+    assert!(gui.marked_file_paths.is_empty());
+}
+
+#[test]
+fn marked_discard_is_red_until_cancel_restores_original_marks() {
+    let repo = TempRepo::new("files-discard-red-cancel");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let target = gui.model.lock().unwrap().files[0].current_path().to_owned();
+    gui.marked_file_paths.insert(target.clone());
+    gui.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)).unwrap();
+    assert!(gui.marked_file_discarding.contains(&target));
+    assert!(matches!(gui.popup, PopupState::Confirm { .. }));
+    gui.handle_popup_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)).unwrap();
+    assert!(gui.marked_file_discarding.is_empty());
+    assert!(gui.marked_file_paths.contains(&target));
 }
 
 #[test]

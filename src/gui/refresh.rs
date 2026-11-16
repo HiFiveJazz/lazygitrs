@@ -188,6 +188,8 @@ impl Gui {
     /// Re-apply selection-dependent views after the model was reloaded
     /// (blocking `refresh` or background streaming refresh).
     pub(super) fn after_model_refresh(&mut self) -> Result<()> {
+        self.marked_file_discarding.clear();
+        self.marked_file_committing.clear();
         // Commits arrive already filtered via load_model_streaming(commit_filter)
         // or reload_filtered_commits_async — don't re-fetch here.
         self.subview_refresh_generation = self.subview_refresh_generation.wrapping_add(1);
@@ -460,6 +462,8 @@ impl Gui {
             model.total_deletions = deleted;
         }
 
+        self.marked_file_discarding.clear();
+        self.marked_file_committing.clear();
         // `set_files()` above may have removed the last working-tree file.
         // Keep the cached tree and its list-length override in lockstep with
         // the model before the next frame renders it.
@@ -556,6 +560,8 @@ impl Gui {
             model.total_deletions = deleted;
         }
 
+        self.marked_file_discarding.clear();
+        self.marked_file_committing.clear();
         // Amend/rewrite can also consume the final staged working-tree file,
         // so refresh the cached file tree before the next render.
         self.rebuild_file_tree_from_model();

@@ -40,19 +40,44 @@ in Files generates a commit message using `git.commit.generateCommand`.
 
 ### Bulk file actions (Files panel)
 
-Files has Jerc/Yazi-style **marks** independent of Git's staging index:
+Files uses the same connected `▌` selection bars for all bulk operations. The
+bar changes color with the action; individual Git status letters retain their
+own semantic colors:
 
-- `Space` marks/unmarks the current file or selected directory and **moves to the next visible row** (stopping at the bottom). Marked files show a continuous orange `▌` bar; a partially marked directory shows `▏`. Visual rows show the same `▌` bar in purple. The title uses a boxed-check `󰄲` to show the marked count.
-- `v` or `V` starts/stops purple Visual selection (both operate on whole rows in Files). Navigate with `j`/`k`, `gg`/`G`, or tree motions; `Space` marks/unmarks the selected range and leaves Visual mode.
-- `Esc` first exits Visual mode; pressing it again clears persistent marks.
-- `x` stages/unstages marked paths in one batch. With no marks it stages/unstages the current file/directory, like the old Space action.
-- `d` discards **only** marked paths when marks exist, or the current file/directory otherwise, using the existing destructive confirmation. `D` still discards all *unstaged* changes.
-- `c` opens the commit editor. With marks/Visual selection, the commit includes **only** those files, including untracked additions, without including unrelated staged files. The selected paths' full working-tree content is committed (not just their staged hunks). With no marks, `c` retains the previous staged-change commit flow.
-- `a` continues to toggle staging for all files. Switching between tree/list view with `t` preserves marks; Git status refreshes remove marks for paths no longer in the changed-files list.
+- **Purple**: temporary Visual selection (`v` or `V`). Move with `j`/`k`.
+  **Esc** exits Visual mode without modifying anything: each selected file
+  returns to its previous orange, green, or unmarked state. **Space** marks
+  the whole range; if all files are already marked, Space unmarks them.
+- **Orange**: marked, **unstaged** files (`Space`). Space marks/unmarks and
+  advances. Pressing Space on a green file first unstages it, then marks it.
+  In tree mode, Space skips directories and already colored rows. `▏` indicates
+  a partially marked directory.
+- **Green**: appended/staged files in the Git index. They cannot simultaneously
+  be orange marks. With no active selection, `a` stages everything from an
+  unmarked row; **on any green row**, `a` unstages the entire green group and
+  turns those files orange. On orange marks or a purple Visual range, `a`
+  stages those files (or unstages the range when it is already green).
+  **Esc on a green row** also unstages the green group and makes orange marks;
+  another Esc clears the marks. `A` still amends the last Git commit.
+- **Red**: marked files after `d`, while a discard is awaiting confirmation
+  or running. Canceling the confirmation restores the original mark colors.
+  `D` still discards all *unstaged* changes, with its existing confirmation.
 
-Colors follow the active theme: purple Visual selection, orange marked selection,
-red **unstaged** deletion (` D`) badges/discards, green **staged** deletion (`D `) badges and additions. Deleted filenames retain their normal text color. `Ctrl+J`/`Ctrl+K` jump 22 rows in list views. TokyoNight uses
-its own semantic purple, orange, red, and green instead of hardcoded colors.
+`c` commits only marked paths when marks exist, including untracked files, while
+preserving unrelated staged changes. The selected paths' complete working-tree
+content is committed, not just their staged hunks. Its marks turn green while
+the commit is pending; after Git refreshes, clean committed files disappear
+from the changed-files list. Without marks, `c` follows the usual staged-file
+commit flow. `x` directly toggles the file under the cursor (or the selected
+Visual range/directory), independently of other saved marks: **unmarked →
+green/staged**, **green/staged → unmarked/unstaged**, and **orange/marked →
+unmarked**. Use `a` to stage or unstage the marked group.
+
+The Files title uses a boxed-check `󰄲` with the saved mark count. Switching
+between tree and flat view via `t` preserves marks. `Ctrl+J`/`Ctrl+K` move
+22 rows. TokyoNight semantic purple, orange, green, and red colors are reused
+rather than fixed ANSI colors; deleted filenames stay neutral, with only the
+Git status `D` colored (green for staged, red for unstaged).
 
 ### File tree navigation
 

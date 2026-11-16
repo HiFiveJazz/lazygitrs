@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased — mutually exclusive file selection states
+
+- `x` is now a direct state toggle: unmarked → staged, staged → unmarked,
+  or marked → unmarked. It targets the cursor (or active Visual range), not
+  other saved orange marks; mixed tree directories toggle each child by state.
+- Visual selection is a temporary purple overlay; pressing Esc restores each
+  file's previous state without changing the Git index or persistent marks.
+  Space on a Visual range of only marked files clears those marks; Space on a
+  mixed/unmarked range marks the selected files. The cursor stays in place.
+- File states are exclusive: unmarked, orange marked, purple Visual,
+  green staged/appended, and red pending discard. Staging removes orange
+  marks; unstaging promotes files to orange marks.
+- Press `a` on any appended/green file to unstage the entire green group.
+  Press `Esc` on green to unstage and mark the group; another `Esc` clears
+  those marks. The active Visual range takes priority over cursor state.
+- `a` on marked/Visual files operates only on that selection; without a
+  selection, `a` still stages everything from an unmarked row.
+- Space on green unstages and marks only that file; tree-mode Space skips
+  all already colored files. Refreshes reconcile stale marks with Git index.
+- Keep `A` as amend last Git commit, `d` as confirmed discard, and existing
+  connected TokyoNight selection colors.
+
 ## [0.0.39] - 2026-10-07
 
 ### Bug Fixes

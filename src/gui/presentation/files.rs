@@ -27,6 +27,8 @@ pub fn render_file_list<'a>(
     theme: &Theme,
     width: usize,
     marked: &HashSet<String>,
+    discarding: &HashSet<String>,
+    committing: &HashSet<String>,
     visual_range: Option<(usize, usize)>,
 ) -> Vec<ListItem<'a>> {
     model
@@ -37,10 +39,11 @@ pub fn render_file_list<'a>(
             let name_style = file_name_style(file, theme);
             let is_marked = marked.contains(file.current_path());
             let visual = is_visual_row(visual_range, row);
+            let mark_color = file_mark_color(file, is_marked, visual, discarding, committing, theme);
             let dim_style = Style::default().fg(theme.text_dimmed);
 
             if file.rename_paths().is_some() {
-                let mut spans = vec![file_mark_span(is_marked, visual, theme)];
+                let mut spans = vec![file_mark_span(mark_color)];
                 spans.extend(file_status_spans(file, theme));
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(file.display_name.clone(), name_style));
@@ -52,7 +55,7 @@ pub fn render_file_list<'a>(
                     theme,
                     width,
                 )));
-                return mark_background(item, is_marked, theme);
+                return mark_background(item, mark_color, theme);
             }
 
             let path = file.display_name.as_str();
@@ -61,7 +64,7 @@ pub fn render_file_list<'a>(
                 None => ("", path),
             };
 
-            let mut spans = vec![file_mark_span(is_marked, visual, theme)];
+            let mut spans = vec![file_mark_span(mark_color)];
             spans.extend(file_status_spans(file, theme));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(name.to_string(), name_style));
@@ -77,30 +80,82 @@ pub fn render_file_list<'a>(
                 theme,
                 width,
             )));
-            mark_background(item, is_marked, theme)
+            mark_background(item, mark_color, theme)
         })
         .collect()
 }
 
-fn file_mark_span(marked: bool, visual: bool, theme: &Theme) -> Span<'static> {
-    // Visual selection takes priority over a persistent mark, but never
-    // modifies it. Only the indicator is recolored, not the Git status.
-    if visual {
-        Span::styled(FILE_MARK, Style::default().fg(theme.graph_colors[3]))
-    } else if marked {
-        Span::styled(FILE_MARK, Style::default().fg(theme.accent_secondary))
-    } else {
-        Span::raw(" ")
+/// Five mutually exclusive *visible* selection states. Appended reflects
+/// the Git index and orange marks apply only to unstaged files. Visual is a
+/// temporary purple overlay; Esc restores the underlying color unchanged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileMarkState {
+    Unmarked,
+    Marked,
+    Visual,
+    Appended,
+    Deleting,
+}
+
+impl FileMarkState {
+    fn color(self, theme: &Theme) -> Option<ratatui::style::Color> {
+        match self {
+            Self::Unmarked => None,
+            Self::Marked => Some(theme.accent_secondary),
+            Self::Visual => Some(theme.graph_colors[3]),
+            Self::Appended => Some(theme.file_staged.fg.unwrap_or(theme.graph_colors[2])),
+            Self::Deleting => Some(theme.change_deleted),
+        }
     }
 }
 
-fn mark_background<'a>(item: ListItem<'a>, marked: bool, theme: &Theme) -> ListItem<'a> {
-    if marked {
-        item.style(Style::default().bg(mix_colors(
-            theme.accent_secondary,
-            theme.selected_bg,
-            225,
-        )))
+fn file_mark_state(
+    file: &crate::model::File,
+    marked: bool,
+    visual: bool,
+    discarding: &HashSet<String>,
+    committing: &HashSet<String>,
+) -> FileMarkState {
+    if visual {
+        FileMarkState::Visual
+    } else if discarding.contains(file.current_path()) {
+        FileMarkState::Deleting
+    } else if committing.contains(file.current_path()) || file.has_staged_changes {
+        // An indexed file stays green, including when the user uses Space
+        // to target it for an unstage or when an external tool stages it.
+        FileMarkState::Appended
+    } else if marked {
+        FileMarkState::Marked
+    } else {
+        FileMarkState::Unmarked
+    }
+}
+
+fn file_mark_color(
+    file: &crate::model::File,
+    marked: bool,
+    visual: bool,
+    discarding: &HashSet<String>,
+    committing: &HashSet<String>,
+    theme: &Theme,
+) -> Option<ratatui::style::Color> {
+    file_mark_state(file, marked, visual, discarding, committing).color(theme)
+}
+
+fn file_mark_span(color: Option<ratatui::style::Color>) -> Span<'static> {
+    color.map_or_else(
+        || Span::raw(" "),
+        |color| Span::styled(FILE_MARK, Style::default().fg(color)),
+    )
+}
+
+fn mark_background<'a>(
+    item: ListItem<'a>,
+    color: Option<ratatui::style::Color>,
+    theme: &Theme,
+) -> ListItem<'a> {
+    if let Some(color) = color {
+        item.style(Style::default().bg(mix_colors(color, theme.selected_bg, 225)))
     } else {
         item
     }
@@ -181,6 +236,8 @@ pub fn render_file_tree<'a>(
     collapsed_dirs: &HashSet<String>,
     width: usize,
     marked: &HashSet<String>,
+    discarding: &HashSet<String>,
+    committing: &HashSet<String>,
     visual_range: Option<(usize, usize)>,
 ) -> Vec<ListItem<'a>> {
     nodes
@@ -203,23 +260,44 @@ pub fn render_file_tree<'a>(
                             .is_some_and(|f| f.has_staged_changes && !f.has_unstaged_changes)
                     });
 
-                let marked_children = node.child_file_indices.iter().filter(|&&idx| {
-                    model.files.get(idx).is_some_and(|f| marked.contains(f.current_path()))
-                }).count();
-                let all_marked = marked_children > 0
-                    && marked_children == node.child_file_indices.len();
-                let mark = if visual || all_marked {
+                // Directories summarize every visible child bar, including green
+                // staged files with no explicit Space marks.
+                let states: Vec<FileMarkState> = node.child_file_indices.iter()
+                    .filter_map(|&idx| model.files.get(idx))
+                    .map(|file| file_mark_state(
+                        file,
+                        marked.contains(file.current_path()),
+                        false,
+                        discarding,
+                        committing,
+                    ))
+                    .collect();
+                let colored: Vec<FileMarkState> = states.iter().copied()
+                    .filter(|state| *state != FileMarkState::Unmarked)
+                    .collect();
+                let all_colored = !states.is_empty()
+                    && states.len() == node.child_file_indices.len()
+                    && colored.len() == states.len();
+                let mark = if visual || all_colored {
                     FILE_MARK
-                } else if marked_children > 0 {
+                } else if !colored.is_empty() {
                     PARTIAL_DIR_MARK
                 } else {
                     " "
                 };
-                let mark_style = Style::default().fg(if visual {
-                    theme.graph_colors[3]
+                let dir_state = if visual {
+                    FileMarkState::Visual
+                } else if colored.contains(&FileMarkState::Deleting) {
+                    FileMarkState::Deleting
+                } else if colored.contains(&FileMarkState::Marked) {
+                    FileMarkState::Marked
+                } else if !colored.is_empty() {
+                    FileMarkState::Appended
                 } else {
-                    theme.accent_secondary
-                });
+                    FileMarkState::Unmarked
+                };
+                let dir_mark_color = dir_state.color(theme);
+                let mark_style = Style::default().fg(dir_mark_color.unwrap_or(theme.accent_secondary));
                 let dir_style = if all_staged {
                     theme.file_staged
                 } else {
@@ -239,7 +317,7 @@ pub fn render_file_tree<'a>(
                         Span::styled(node.name.clone(), dir_style),
                     ])
                 };
-                Some(mark_background(ListItem::new(line), all_marked, theme))
+                Some(mark_background(ListItem::new(line), dir_mark_color, theme))
             } else if let Some(file_idx) = node.file_index {
                 // The file list and cached tree are normally rebuilt together.
                 // Async model refreshes can briefly make a cached node stale,
@@ -247,8 +325,9 @@ pub fn render_file_tree<'a>(
                 let file = model.files.get(file_idx)?;
                 let name_style = file_name_style(file, theme);
                 let is_marked = marked.contains(file.current_path());
+                let mark_color = file_mark_color(file, is_marked, visual, discarding, committing, theme);
 
-                let mut spans = vec![file_mark_span(is_marked, visual, theme), Span::raw(indent)];
+                let mut spans = vec![file_mark_span(mark_color), Span::raw(indent)];
                 spans.extend(file_status_spans(file, theme));
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(node.name.clone(), name_style));
@@ -260,7 +339,7 @@ pub fn render_file_tree<'a>(
                     theme,
                     width,
                 ));
-                Some(mark_background(ListItem::new(line), is_marked, theme))
+                Some(mark_background(ListItem::new(line), mark_color, theme))
             } else {
                 Some(ListItem::new(Line::raw("")))
             }
@@ -349,19 +428,45 @@ mod tests {
     use crate::model::{File, FileStatus};
 
     #[test]
-    fn marked_files_use_full_height_connected_bars_and_visual_is_purple() {
+    fn bars_follow_visual_mark_stage_and_discard_colors() {
         let theme = Theme::dark();
-        let marker = file_mark_span(true, false, &theme);
-        assert_eq!(marker.content, FILE_MARK);
-        assert_eq!(marker.style.fg, Some(theme.accent_secondary));
-        let visual = file_mark_span(false, true, &theme);
-        assert_eq!(visual.content, FILE_MARK);
-        assert_eq!(visual.style.fg, Some(theme.graph_colors[3]));
-        // A live Visual row overrides orange without changing the saved mark.
-        assert_eq!(file_mark_span(true, true, &theme).style.fg, Some(theme.graph_colors[3]));
-        assert_eq!(file_mark_span(false, false, &theme).content, " ");
-        assert!(is_visual_row(Some((1, 3)), 2));
-        assert!(!is_visual_row(Some((1, 3)), 4));
+        let mut file = File {
+            name: "file.txt".into(), display_name: "file.txt".into(),
+            status: FileStatus::Modified, has_staged_changes: false,
+            has_unstaged_changes: true, tracked: true, added: false,
+            deleted: false, has_merge_conflicts: false, short_status: " M".into(),
+            hunk_count: 1, additions: 1, deletions: 0,
+        };
+        let none = HashSet::new();
+        assert_eq!(file_mark_span(None).content, " ");
+        assert_eq!(file_mark_span(Some(theme.accent_secondary)).content, FILE_MARK);
+        let color = |f: &File, marked, visual, deleting: &HashSet<String>, committing: &HashSet<String>|
+            file_mark_color(f, marked, visual, deleting, committing, &theme);
+        assert_eq!(color(&file, true, false, &none, &none), Some(theme.accent_secondary));
+        assert_eq!(color(&file, true, true, &none, &none), Some(theme.graph_colors[3]));
+        file.has_staged_changes = true;
+        file.has_unstaged_changes = false;
+        assert_eq!(color(&file, true, false, &none, &none), theme.file_staged.fg);
+        // Git-staged state is visible even without a Space mark. Space and Esc
+        // must never turn a green staged bar orange or make it disappear.
+        assert_eq!(file_mark_state(&file, false, false, &none, &none), FileMarkState::Appended);
+        assert_eq!(file_mark_state(&file, true, false, &none, &none), FileMarkState::Appended);
+        assert_eq!(color(&file, false, false, &none, &none), theme.file_staged.fg);
+        // A partially staged file is still appended, while its two-letter
+        // Git status continues to show the remaining unstaged work.
+        file.has_unstaged_changes = true;
+        assert_eq!(file_mark_state(&file, true, false, &none, &none), FileMarkState::Appended);
+        file.has_staged_changes = false;
+        assert_eq!(file_mark_state(&file, true, false, &none, &none), FileMarkState::Marked);
+        file.has_staged_changes = true;
+        file.has_unstaged_changes = false;
+        let deleting = HashSet::from(["file.txt".into()]);
+        assert_eq!(color(&file, true, false, &deleting, &none), Some(theme.change_deleted));
+        assert_eq!(color(&file, true, true, &deleting, &none), Some(theme.graph_colors[3]));
+        assert_eq!(file_mark_state(&file, false, false, &deleting, &none), FileMarkState::Deleting);
+        assert_eq!(file_mark_state(&file, true, true, &deleting, &none), FileMarkState::Visual);
+        let committing = HashSet::from(["file.txt".into()]);
+        assert_eq!(color(&file, true, false, &none, &committing), theme.file_staged.fg);
     }
 
     #[test]
@@ -441,6 +546,8 @@ mod tests {
             &nodes,
             &HashSet::new(),
             80,
+            &HashSet::new(),
+            &HashSet::new(),
             &HashSet::new(),
             None,
         );

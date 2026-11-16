@@ -979,6 +979,10 @@ pub struct Gui {
     /// Jerc/Yazi-style marks, keyed by actual Git path rather than row index.
     /// This survives sorting, status refreshes, and tree/list switches.
     pub marked_file_paths: HashSet<String>,
+    /// Red bars while selected paths are queued for destructive discard.
+    pub marked_file_discarding: HashSet<String>,
+    /// Green bars while a selected-only commit is pending its status refresh.
+    pub marked_file_committing: HashSet<String>,
     /// Visible row anchor for transient Visual Line selection in Files.
     pub file_visual_anchor: Option<usize>,
     /// Cached file tree nodes — rebuilt on refresh when tree view is active.
@@ -1602,6 +1606,8 @@ impl Gui {
             sidebar_resize_row_offset: 0,
             show_file_tree,
             marked_file_paths: HashSet::new(),
+            marked_file_discarding: HashSet::new(),
+            marked_file_committing: HashSet::new(),
             file_visual_anchor: None,
             file_tree_nodes: Vec::new(),
             collapsed_dirs: HashSet::new(),
@@ -3823,6 +3829,8 @@ impl Gui {
                 Ok(files) if is_latest => {
                     let mut model = self.model.lock().unwrap();
                     model.set_files(files);
+                    self.marked_file_discarding.clear();
+                    self.marked_file_committing.clear();
                     if let Some((added, deleted)) = result.totals {
                         model.total_additions = added;
                         model.total_deletions = deleted;
@@ -3835,6 +3843,9 @@ impl Gui {
                         self.context_mgr.files_list_len_override = None;
                     }
                     drop(model);
+                    // External changes and completed index mutations must not
+                    // leave legacy orange marks on staged (green) files.
+                    self.prune_file_marks();
                     self.invalidate_files_diff_previews();
                     self.needs_diff_refresh = true;
                 }
@@ -3885,6 +3896,8 @@ impl Gui {
                 {
                     let mut model = self.model.lock().unwrap();
                     model.set_files(files);
+                    self.marked_file_discarding.clear();
+                    self.marked_file_committing.clear();
                     if let Some((added, deleted)) = totals {
                         model.total_additions = added;
                         model.total_deletions = deleted;
@@ -4242,6 +4255,8 @@ impl Gui {
                         match files_result {
                             Ok(files) => {
                                 model.set_files(files);
+                                gui.marked_file_discarding.clear();
+                                gui.marked_file_committing.clear();
                                 files_changed = true;
                             }
                             Err(err) if refresh_error.is_none() => refresh_error = Some(err),
@@ -5349,7 +5364,12 @@ impl Gui {
         // Never keep stale marks after a commit, discard, or repository change.
         let model = self.model.lock().unwrap();
         let visible: HashSet<&str> = model.files.iter().map(|f| f.current_path()).collect();
-        self.marked_file_paths.retain(|path| visible.contains(path.as_str()));
+        let unstaged: HashSet<&str> = model.files.iter()
+            .filter(|file| !file.has_staged_changes)
+            .map(|file| file.current_path()).collect();
+        self.marked_file_paths.retain(|path| unstaged.contains(path.as_str()));
+        self.marked_file_discarding.retain(|path| visible.contains(path.as_str()));
+        self.marked_file_committing.retain(|path| visible.contains(path.as_str()));
     }
 
     pub fn update_file_tree_state(&mut self) {

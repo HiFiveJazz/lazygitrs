@@ -26,6 +26,8 @@ impl Gui {
                     match part {
                         ModelPart::Files(v) => {
                             model.set_files(v);
+                            self.marked_file_discarding.clear();
+                            self.marked_file_committing.clear();
                             got_files = true;
                         }
                         ModelPart::FileStats(v) => {
@@ -411,6 +413,8 @@ impl Gui {
                         &self.file_tree_nodes,
                         &self.collapsed_dirs,
                         &self.marked_file_paths,
+                        &self.marked_file_discarding,
+                        &self.marked_file_committing,
                         self.file_visual_anchor,
                         self.diff_focused,
                         search_state,

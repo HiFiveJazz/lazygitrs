@@ -44,6 +44,8 @@ pub fn render(
     file_tree_nodes: &[FileTreeNode],
     collapsed_dirs: &HashSet<String>,
     marked_file_paths: &HashSet<String>,
+    marked_file_discarding: &HashSet<String>,
+    marked_file_committing: &HashSet<String>,
     file_visual_anchor: Option<usize>,
     diff_focused: bool,
     search_state: Option<(&str, usize, usize)>,
@@ -190,6 +192,8 @@ pub fn render(
                             collapsed_dirs,
                             fl.main_panel.width.saturating_sub(2) as usize,
                             marked_file_paths,
+                            marked_file_discarding,
+                            marked_file_committing,
                             visual_range,
                         );
                         render_list_with_range_ctx(
@@ -210,6 +214,8 @@ pub fn render(
                             theme,
                             fl.main_panel.width.saturating_sub(2) as usize,
                             marked_file_paths,
+                            marked_file_discarding,
+                            marked_file_committing,
                             visual_range,
                         );
                         render_list_with_range_ctx(
@@ -531,6 +537,8 @@ pub fn render(
                         collapsed_dirs,
                         rect.width.saturating_sub(2) as usize,
                         marked_file_paths,
+                        marked_file_discarding,
+                        marked_file_committing,
                         visual_range,
                     );
                     render_list_with_range_ctx(
@@ -544,6 +552,8 @@ pub fn render(
                         theme,
                         rect.width.saturating_sub(2) as usize,
                         marked_file_paths,
+                        marked_file_discarding,
+                        marked_file_committing,
                         visual_range,
                     );
                     render_list_with_range_ctx(
@@ -1563,6 +1573,8 @@ mod tests {
                     mode,
                     false,
                     &[],
+                    &Default::default(),
+                    &Default::default(),
                     &Default::default(),
                     &Default::default(),
                     None,
@@ -3315,7 +3327,7 @@ fn render_status_bar(
             ContextId::Files => {
                 hints.extend([
                     ("c", "commit"),
-                    ("a", "stage all"),
+                    ("a", "stage"),
                     ("space", "mark"),
                     ("v/V", "visual"),
                     ("x", "stage marks"),

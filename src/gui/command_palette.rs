@@ -188,10 +188,10 @@ impl Gui {
                         "<enter>".into(),
                         "Focus file / directory diff".into(),
                     ),
-                    CommandEntry::keybinding("<space>".into(), "Mark/unmark and advance (or Visual range)".into()),
+                    CommandEntry::keybinding("<space>".into(), "Mark/unmark and advance; tree skips already marked files".into()),
                     CommandEntry::keybinding("v / V".into(), "Visual selection (purple)".into()),
-                    CommandEntry::keybinding("x".into(), "Stage/unstage marked files".into()),
-                    CommandEntry::keybinding("<escape>".into(), "Clear Visual selection / file marks".into()),
+                    CommandEntry::keybinding("x".into(), "Toggle file state".into()),
+                    CommandEntry::keybinding("<escape>".into(), "Exit Visual / clear marks".into()),
                     CommandEntry::keybinding(
                         kb.universal.toggle_diff_view_layout.clone(),
                         "Toggle unified / side-by-side view".into(),
@@ -207,7 +207,7 @@ impl Gui {
                     ),
                     CommandEntry::keybinding(
                         kb.files.toggle_staged_all.clone(),
-                        "Toggle stage all".into(),
+                        "Append selected / unappend green / all".into(),
                     ),
                     CommandEntry::keybinding(
                         kb.files.stash_all_changes.clone(),
@@ -227,7 +227,7 @@ impl Gui {
                     ),
                     CommandEntry::keybinding(kb.files.fetch.clone(), "Fetch".into()),
                     CommandEntry::keybinding(kb.files.ignore_file.clone(), "Ignore file".into()),
-                    CommandEntry::keybinding("d".into(), "Discard marked paths (or current file)".into()),
+                    CommandEntry::keybinding("d".into(), "Discard marked paths (red pending mark; confirm first)".into()),
                     CommandEntry::keybinding(kb.universal.edit.clone(), "Open in editor".into()),
                     CommandEntry::keybinding(
                         kb.universal.open_file.clone(),
