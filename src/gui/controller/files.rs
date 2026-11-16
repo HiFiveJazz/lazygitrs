@@ -41,9 +41,33 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return Ok(());
     }
 
-    // Stage/unstage toggle with space
+    // Both v and V select whole file rows: a file list has no characterwise selection.
+    // Jerc-style persistent marks are independent from Git's index.
+    if matches!(key.code, KeyCode::Char('v' | 'V')) {
+        if gui.file_visual_anchor.is_some() {
+            gui.file_visual_anchor = None;
+            gui.show_action_toast("Normal");
+        } else {
+            gui.file_visual_anchor = Some(gui.context_mgr.selected_active());
+            gui.show_action_toast("Visual");
+        }
+        return Ok(());
+    }
+    if key.code == KeyCode::Esc {
+        if gui.file_visual_anchor.take().is_some() {
+            gui.show_action_toast("Normal");
+        } else if !gui.marked_file_paths.is_empty() {
+            gui.marked_file_paths.clear();
+            gui.show_action_toast("Marks cleared");
+        }
+        return Ok(());
+    }
     if key.code == KeyCode::Char(' ') {
-        return toggle_stage(gui);
+        return toggle_file_marks(gui);
+    }
+    // `x` retains the old Space stage/unstage behavior, extended to marks.
+    if key.code == KeyCode::Char('x') {
+        return toggle_stage_marked(gui);
     }
 
     if matches_key(key, &keybindings.files.commit_changes) {
@@ -84,6 +108,7 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
 
     // Toggle file tree view
     if matches_key(key, &keybindings.files.toggle_tree_view) {
+        gui.file_visual_anchor = None;
         gui.show_file_tree = !gui.show_file_tree;
         gui.show_commit_file_tree = gui.show_file_tree;
         gui.update_file_tree_state();
@@ -125,6 +150,188 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
     Ok(())
 }
 
+/// Resolve the Visual Line range to file indices. A selected collapsed
+/// directory contributes its descendants, as it does for ordinary Space.
+/// Paths (not row offsets) are stored as marks after the range is accepted.
+fn visual_file_indices(gui: &Gui) -> Vec<usize> {
+    let Some(anchor) = gui.file_visual_anchor else { return Vec::new(); };
+    let current = gui.context_mgr.selected_active();
+    let (lo, hi) = (anchor.min(current), anchor.max(current));
+    if gui.show_file_tree {
+        let mut indices = std::collections::HashSet::new();
+        for node in gui.file_tree_nodes.get(lo..=hi).unwrap_or(&[]) {
+            if node.is_dir {
+                indices.extend(node.child_file_indices.iter().copied());
+            } else if let Some(index) = node.file_index {
+                indices.insert(index);
+            }
+        }
+        let mut indices: Vec<usize> = indices.into_iter().collect();
+        indices.sort_unstable();
+        indices
+    } else {
+        let len = gui.model.lock().unwrap().files.len();
+        (lo..=hi).filter(|&i| i < len).collect()
+    }
+}
+
+/// The marked set plus any live Visual selection, with no duplicate paths.
+/// A single unmarked cursor is intentionally not included; normal commands
+/// retain their original one-file or one-directory behavior.
+fn marked_action_files(gui: &Gui) -> Vec<crate::model::File> {
+    let visual: std::collections::HashSet<usize> = visual_file_indices(gui).into_iter().collect();
+    let model = gui.model.lock().unwrap();
+    model.files.iter().enumerate().filter_map(|(i, f)| {
+        (gui.marked_file_paths.contains(f.current_path()) || visual.contains(&i))
+            .then(|| f.clone())
+    }).collect()
+}
+
+fn selected_row_indices(gui: &Gui) -> Vec<usize> {
+    let selected = gui.context_mgr.selected_active();
+    if gui.show_file_tree {
+        gui.file_tree_nodes.get(selected).map_or_else(Vec::new, |node| {
+            if node.is_dir {
+                node.child_file_indices.clone()
+            } else {
+                node.file_index.into_iter().collect()
+            }
+        })
+    } else {
+        let len = gui.model.lock().unwrap().files.len();
+        if selected < len {
+            vec![selected]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+fn toggle_file_marks(gui: &mut Gui) -> Result<()> {
+    let visual = gui.file_visual_anchor.is_some();
+    let indices = if visual { visual_file_indices(gui) } else { selected_row_indices(gui) };
+    let paths = {
+        let model = gui.model.lock().unwrap();
+        indices.iter().filter_map(|&index| model.files.get(index)
+            .map(|file| file.current_path().to_string())).collect::<Vec<_>>()
+    };
+    if paths.is_empty() {
+        return Ok(());
+    }
+    // Mark a mixed selection; unmark only when every entry is already marked.
+    let mark = paths.iter().any(|path| !gui.marked_file_paths.contains(path));
+    for path in paths {
+        if mark {
+            gui.marked_file_paths.insert(path);
+        } else {
+            gui.marked_file_paths.remove(&path);
+        }
+    }
+    // Like a file manager, Space marks/unmarks then advances to the next
+    // visible row (including directories). At the bottom, stay in place.
+    // The marks remain separate from Git's staging index.
+    gui.file_visual_anchor = None;
+    {
+        let model = gui.model.lock().unwrap();
+        gui.context_mgr.move_selection(1, &model);
+    }
+    Ok(())
+}
+
+/// Batch index operations use the existing serialized index mutation worker.
+/// When no marks exist, `x` applies the old stage/unstage single-row behavior.
+fn toggle_stage_marked(gui: &mut Gui) -> Result<()> {
+    let files = marked_action_files(gui);
+    if files.is_empty() {
+        return toggle_stage(gui);
+    }
+    let stage = files.iter().any(|f| f.has_unstaged_changes || !f.tracked);
+    let (paths, changed): (Vec<String>, std::collections::HashSet<String>) = {
+        let mut paths = Vec::new();
+        let mut changed = std::collections::HashSet::new();
+        for file in &files {
+            if stage && (file.has_unstaged_changes || !file.tracked) {
+                paths.push(file.git_add_path().to_string());
+                changed.insert(file.current_path().to_string());
+            } else if !stage && file.has_staged_changes {
+                paths.extend(file.git_reset_paths().into_iter().map(str::to_string));
+                changed.insert(file.current_path().to_string());
+            }
+        }
+        (paths, changed)
+    };
+    if paths.is_empty() {
+        return Ok(());
+    }
+    {
+        let mut model = gui.model.lock().unwrap();
+        for file in &mut model.files {
+            if changed.contains(file.current_path()) {
+                if stage {
+                    let _ = file.optimistic_stage();
+                } else {
+                    let _ = file.optimistic_unstage();
+                }
+            }
+        }
+    }
+    gui.rebuild_file_tree_from_model();
+    gui.file_visual_anchor = None;
+    gui.enqueue_stage_then_refresh(paths, stage);
+    Ok(())
+}
+
+fn discard_marked_files(gui: &mut Gui, files: Vec<crate::model::File>) {
+    let count = files.len();
+    let execute = move |gui: &mut Gui| {
+        gui.file_visual_anchor = None;
+        gui.start_background_mutation("Discard selected changes", move |git| {
+            git.discard_files(&files)
+        });
+        Ok(())
+    };
+    if gui.config.user_config.gui.skip_discard_change_warning {
+        let _ = execute(gui);
+    } else {
+        gui.popup = PopupState::Confirm {
+            title: format!("Discard {count} selected files?"),
+            message: format!("Permanently discard changes in {count} selected files, including staged changes and untracked files?\n\nOther files will be preserved."),
+            on_confirm: Box::new(execute),
+        };
+    }
+}
+
+fn open_marked_commit_prompt(gui: &mut Gui, files: Vec<crate::model::File>) {
+    let count = files.len();
+    gui.file_visual_anchor = None;
+    gui.popup = PopupState::CommitInput {
+        kind: CommitInputKind::Commit,
+        summary_textarea: make_commit_summary_textarea(),
+        body_textarea: make_commit_body_textarea(),
+        body_state: crate::gui::popup::BodySoftWrap::new(),
+        focus: CommitInputFocus::Summary,
+        mode: CommitInputMode::Insert,
+        pending_command: Default::default(),
+        visual_line_anchor: None,
+        undo_stack: Vec::new(),
+        show_help: false,
+        body_scroll_remaining: 0,
+        body_scroll_top: 0,
+        on_confirm: Box::new(move |gui, message| {
+            if !message.is_empty() {
+                let message = message.to_string();
+                gui.start_remote_op(
+                    RemoteOpKind::LocalAppend,
+                    "Commit selected",
+                    &format!("Committing {count} marked files..."),
+                    move |git| git.create_commit_for_files(&message, &files),
+                );
+            }
+            Ok(())
+        }),
+    };
+}
+
 fn next_file_row_after_toggle<F>(selected: usize, len: usize, is_file: F) -> usize
 where
     F: Fn(usize) -> bool,
@@ -164,7 +371,7 @@ fn advance_selection_after_file_toggle(gui: &mut Gui, selected: usize) -> bool {
 
 fn toggle_stage(gui: &mut Gui) -> Result<()> {
     // If in tree view and a directory is selected, stage/unstage all child files.
-    // Optimistic UI + background git so rapid Space presses stay snappy.
+    // Optimistic UI + background git so rapid x presses stay snappy.
     if gui.show_file_tree {
         let selected = gui.context_mgr.selected_active();
         if let Some(node) = gui.file_tree_nodes.get(selected) {
@@ -236,7 +443,7 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
         drop(model);
         gui.rebuild_file_tree_from_model();
 
-        // Space acts like a checklist: after toggling one file, advance to the
+        // x acts like the old stage checklist: after toggling, advance to the
         // next visible file. At the bottom, keep the cursor on the last file;
         // never unexpectedly jump backwards when toggling it again.
         //
@@ -262,7 +469,7 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
 }
 
 fn toggle_stage_all(gui: &mut Gui) -> Result<()> {
-    // Optimistic UI + background git (same pattern as Space / dir toggle).
+    // Optimistic UI + background git (same pattern as x / dir toggle).
     let mut model = gui.model.lock().unwrap();
     let any_unstaged = model
         .files
@@ -304,6 +511,11 @@ fn open_commit_prompt(gui: &mut Gui) -> Result<()> {
 }
 
 fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
+    let files = marked_action_files(gui);
+    if !files.is_empty() {
+        open_marked_commit_prompt(gui, files);
+        return Ok(());
+    }
     let model = gui.model.lock().unwrap();
     let any_staged = model.files.iter().any(|f| f.has_staged_changes);
     let no_files = model.files.is_empty();
@@ -892,6 +1104,11 @@ fn discard_all_unstaged(gui: &mut Gui) -> Result<()> {
 }
 
 fn discard_file(gui: &mut Gui) -> Result<()> {
+    let selected = marked_action_files(gui);
+    if !selected.is_empty() {
+        discard_marked_files(gui, selected);
+        return Ok(());
+    }
     // If in tree view and a directory is selected, discard all child files
     if gui.show_file_tree {
         let selected = gui.context_mgr.selected_active();

@@ -188,12 +188,15 @@ impl Gui {
                         "<enter>".into(),
                         "Focus file / directory diff".into(),
                     ),
-                    CommandEntry::keybinding("<space>".into(), "Stage / Unstage".into()),
+                    CommandEntry::keybinding("<space>".into(), "Mark/unmark and advance (or Visual range)".into()),
+                    CommandEntry::keybinding("v / V".into(), "Visual selection (purple)".into()),
+                    CommandEntry::keybinding("x".into(), "Stage/unstage marked files".into()),
+                    CommandEntry::keybinding("<escape>".into(), "Clear Visual selection / file marks".into()),
                     CommandEntry::keybinding(
                         kb.universal.toggle_diff_view_layout.clone(),
                         "Toggle unified / side-by-side view".into(),
                     ),
-                    CommandEntry::keybinding(kb.files.commit_changes.clone(), "Commit".into()),
+                    CommandEntry::keybinding(kb.files.commit_changes.clone(), "Commit marked paths only (or staged changes)".into()),
                     CommandEntry::keybinding(
                         kb.files.generate_ai_commit.clone(),
                         "Generate AI commit".into(),
@@ -224,7 +227,7 @@ impl Gui {
                     ),
                     CommandEntry::keybinding(kb.files.fetch.clone(), "Fetch".into()),
                     CommandEntry::keybinding(kb.files.ignore_file.clone(), "Ignore file".into()),
-                    CommandEntry::keybinding("d".into(), "Discard changes".into()),
+                    CommandEntry::keybinding("d".into(), "Discard marked paths (or current file)".into()),
                     CommandEntry::keybinding(kb.universal.edit.clone(), "Open in editor".into()),
                     CommandEntry::keybinding(
                         kb.universal.open_file.clone(),

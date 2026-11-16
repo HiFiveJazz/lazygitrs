@@ -38,6 +38,22 @@ or pagination hide HEAD, it opens a separate HEAD history view without clearing
 your filters. Use `2` and `4` to navigate between Files and Commits; `Ctrl+G`
 in Files generates a commit message using `git.commit.generateCommand`.
 
+### Bulk file actions (Files panel)
+
+Files has Jerc/Yazi-style **marks** independent of Git's staging index:
+
+- `Space` marks/unmarks the current file or selected directory and **moves to the next visible row** (stopping at the bottom). Marked files show a continuous orange `▌` bar; a partially marked directory shows `▏`. Visual rows show the same `▌` bar in purple. The title uses a boxed-check `󰄲` to show the marked count.
+- `v` or `V` starts/stops purple Visual selection (both operate on whole rows in Files). Navigate with `j`/`k`, `gg`/`G`, or tree motions; `Space` marks/unmarks the selected range and leaves Visual mode.
+- `Esc` first exits Visual mode; pressing it again clears persistent marks.
+- `x` stages/unstages marked paths in one batch. With no marks it stages/unstages the current file/directory, like the old Space action.
+- `d` discards **only** marked paths when marks exist, or the current file/directory otherwise, using the existing destructive confirmation. `D` still discards all *unstaged* changes.
+- `c` opens the commit editor. With marks/Visual selection, the commit includes **only** those files, including untracked additions, without including unrelated staged files. The selected paths' full working-tree content is committed (not just their staged hunks). With no marks, `c` retains the previous staged-change commit flow.
+- `a` continues to toggle staging for all files. Switching between tree/list view with `t` preserves marks; Git status refreshes remove marks for paths no longer in the changed-files list.
+
+Colors follow the active theme: purple Visual selection, orange marked selection,
+red **unstaged** deletion (` D`) badges/discards, green **staged** deletion (`D `) badges and additions. Deleted filenames retain their normal text color. `Ctrl+J`/`Ctrl+K` jump 22 rows in list views. TokyoNight uses
+its own semantic purple, orange, red, and green instead of hardcoded colors.
+
 ### File tree navigation
 
 In Files, commit/stash file lists, and compare mode, press backtick (`` ` ``) to

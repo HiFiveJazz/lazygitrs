@@ -4258,3 +4258,126 @@ fn conflicting_file_picker_follows_async_files_refresh() {
     };
     assert_eq!(gui.model.lock().unwrap().files[file_index].name, "file");
 }
+
+#[test]
+fn files_marks_are_independent_of_index_and_visual_ranges_survive_tree_switches() {
+    let repo = TempRepo::new("file-bulk-marks");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let initial_status: Vec<_> = gui.model.lock().unwrap().files.iter()
+        .map(|f| f.short_status.clone()).collect();
+    let names: Vec<_> = gui.model.lock().unwrap().files.iter()
+        .map(|f| f.current_path().to_owned()).collect();
+    assert!(names.len() >= 3);
+
+    gui.context_mgr.set_selection(0);
+    gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
+    assert_eq!(gui.marked_file_paths.len(), 1);
+    assert!(gui.marked_file_paths.contains(&names[0]));
+    assert_eq!(gui.context_mgr.selected_active(), 1, "Space must move to the next row");
+    assert_eq!(initial_status, gui.model.lock().unwrap().files.iter()
+        .map(|f| f.short_status.clone()).collect::<Vec<_>>(),
+        "marking alone must never stage files");
+
+    // Both v and V toggle Visual range mode over whole file rows.
+    gui.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)).unwrap();
+    assert_eq!(gui.file_visual_anchor, Some(1));
+    gui.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)).unwrap();
+    assert!(gui.file_visual_anchor.is_none());
+
+    // Space advanced to row 1; build a Visual range from that position.
+    gui.handle_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT)).unwrap();
+    gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
+    assert_eq!(gui.file_visual_anchor, Some(1));
+    gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
+    assert!(gui.file_visual_anchor.is_none());
+    assert_eq!(gui.marked_file_paths.len(), 3);
+    assert_eq!(gui.context_mgr.selected_active(), 3.min(names.len() - 1));
+
+    // At the bottom, Space toggles the last mark without wrapping.
+    gui.context_mgr.set_selection(names.len() - 1);
+    gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
+    assert_eq!(gui.context_mgr.selected_active(), names.len() - 1);
+    assert_eq!(gui.marked_file_paths.len(), 2);
+    gui.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap();
+    assert_eq!(gui.marked_file_paths.len(), 3);
+
+    gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)).unwrap();
+    assert!(gui.show_file_tree);
+    assert_eq!(gui.marked_file_paths.len(), 3, "marks are Git paths, not row indices");
+    gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+    assert!(gui.marked_file_paths.is_empty());
+}
+
+#[test]
+fn files_ctrl_j_k_moves_exactly_22_rows_and_accumulates_repeated_jumps() {
+    let repo = TempRepo::new("files-neoscroll-22");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    {
+        let mut model = gui.model.lock().unwrap();
+        let example = model.files[0].clone();
+        while model.files.len() < 50 {
+            let i = model.files.len();
+            let mut file = example.clone();
+            file.name = format!("extra{i}.txt");
+            file.display_name = file.name.clone();
+            model.files.push(file);
+        }
+    }
+    gui.context_mgr.set_selection(0);
+    let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+    let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
+    gui.handle_key(down).unwrap();
+    assert_eq!(gui.context_mgr.selection_target(ContextId::Files), 22);
+    gui.handle_key(down).unwrap();
+    assert_eq!(gui.context_mgr.selection_target(ContextId::Files), 44);
+    gui.handle_key(up).unwrap();
+    assert_eq!(gui.context_mgr.selection_target(ContextId::Files), 22);
+}
+
+#[test]
+fn files_marked_discard_prompts_for_exact_count_without_touching_other_files() {
+    let repo = TempRepo::new("file-marked-discard");
+    let mut gui = tree_test_gui(&repo);
+    gui.context_mgr.set_active(ContextId::Files);
+    gui.show_file_tree = false;
+    gui.update_file_tree_state();
+    let target = gui.model.lock().unwrap().files[0].current_path().to_owned();
+    gui.marked_file_paths.insert(target);
+    gui.context_mgr.set_selection(2);
+    gui.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)).unwrap();
+    assert!(matches!(&gui.popup, PopupState::Confirm { title, message, .. }
+        if title == "Discard 1 selected files?" && message.contains("Other files will be preserved")));
+    // Merely opening the destructive dialog does not touch the working tree.
+    assert_eq!(gui.model.lock().unwrap().files.len(), 3);
+}
+
+#[test]
+fn commit_selected_paths_preserves_unrelated_staged_files_and_adds_untracked() {
+    let repo = TempRepo::new("file-marked-commit");
+    repo.git(&["config", "user.name", "Test"]);
+    repo.git(&["config", "user.email", "test@example.com"]);
+    repo.commit("other.txt", "initial\n");
+    repo.commit("modified.txt", "initial\n");
+    std::fs::write(repo.path().join("other.txt"), "staged only\n").unwrap();
+    repo.git(&["add", "other.txt"]);
+    std::fs::write(repo.path().join("modified.txt"), "selected change\n").unwrap();
+    std::fs::write(repo.path().join("brand-new.txt"), "selected addition\n").unwrap();
+
+    let git = crate::git::GitCommands::new(repo.path()).unwrap();
+    let files: Vec<_> = git.load_files().unwrap().into_iter()
+        .filter(|f| matches!(f.current_path(), "modified.txt" | "brand-new.txt"))
+        .collect();
+    assert_eq!(files.len(), 2);
+    git.create_commit_for_files("selected only", &files).unwrap();
+    let committed = repo.git(&["show", "--format=", "--name-only", "HEAD"]);
+    assert!(committed.contains("modified.txt"));
+    assert!(committed.contains("brand-new.txt"));
+    assert!(!committed.contains("other.txt"));
+    assert_eq!(repo.git(&["diff", "--cached", "--name-only"]), "other.txt");
+}

@@ -410,6 +410,8 @@ impl Gui {
                         self.show_file_tree,
                         &self.file_tree_nodes,
                         &self.collapsed_dirs,
+                        &self.marked_file_paths,
+                        self.file_visual_anchor,
                         self.diff_focused,
                         search_state,
                         self.search_textarea.as_ref(),

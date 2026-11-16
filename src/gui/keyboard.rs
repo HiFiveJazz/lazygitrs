@@ -157,11 +157,9 @@ impl Gui {
             )
         {
             let ctx = self.context_mgr.active();
-            let amount = if ctx == ContextId::Commits {
-                22
-            } else {
-                self.config.user_config.gui.scroll_height.max(1)
-            };
+            // Use the same full 22-row neoscroll in every list, not the old
+            // 2-row default for Files/Branches/Tags/etc.
+            let amount = 22;
 
             let model = self.model.lock().unwrap();
             let len = self.context_mgr.list_len(&model);

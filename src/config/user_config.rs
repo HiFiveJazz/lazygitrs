@@ -148,7 +148,7 @@ pub struct GuiConfig {
 impl Default for GuiConfig {
     fn default() -> Self {
         Self {
-            scroll_height: 2,
+            scroll_height: 22,
             scroll_past_bottom: true,
             mouse_events: true,
             skip_discard_change_warning: false,

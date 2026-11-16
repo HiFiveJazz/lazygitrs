@@ -43,6 +43,8 @@ pub fn render(
     show_file_tree: bool,
     file_tree_nodes: &[FileTreeNode],
     collapsed_dirs: &HashSet<String>,
+    marked_file_paths: &HashSet<String>,
+    file_visual_anchor: Option<usize>,
     diff_focused: bool,
     search_state: Option<(&str, usize, usize)>,
     search_textarea: Option<&tui_textarea::TextArea<'_>>,
@@ -161,7 +163,12 @@ pub fn render(
                     ),
                 ])
             } else {
-                build_window_title(ctx_mgr.active_window(), ctx_id, ctx_mgr, theme)
+                let base = build_window_title(ctx_mgr.active_window(), ctx_id, ctx_mgr, theme);
+                if ctx_id == ContextId::Files {
+                    decorate_files_title(base, marked_file_paths.len(), file_visual_anchor.is_some(), theme)
+                } else {
+                    base
+                }
             };
             let block = Block::default()
                 .title(title)
@@ -173,6 +180,8 @@ pub fn render(
                     render_status_main(frame, fl.main_panel, model, config, theme, block);
                 }
                 ContextId::Files => {
+                    let visual_range = file_visual_anchor
+                        .map(|anchor| (anchor.min(selected), anchor.max(selected)));
                     if show_file_tree {
                         let items = presentation::files::render_file_tree(
                             model,
@@ -180,8 +189,10 @@ pub fn render(
                             file_tree_nodes,
                             collapsed_dirs,
                             fl.main_panel.width.saturating_sub(2) as usize,
+                            marked_file_paths,
+                            visual_range,
                         );
-                        render_list_ctx(
+                        render_list_with_range_ctx(
                             frame,
                             fl.main_panel,
                             block,
@@ -189,6 +200,7 @@ pub fn render(
                             selected,
                             true,
                             theme,
+                            visual_range,
                             ctx_mgr,
                             ctx_id,
                         );
@@ -197,8 +209,10 @@ pub fn render(
                             model,
                             theme,
                             fl.main_panel.width.saturating_sub(2) as usize,
+                            marked_file_paths,
+                            visual_range,
                         );
-                        render_list_ctx(
+                        render_list_with_range_ctx(
                             frame,
                             fl.main_panel,
                             block,
@@ -206,6 +220,7 @@ pub fn render(
                             selected,
                             true,
                             theme,
+                            visual_range,
                             ctx_mgr,
                             ctx_id,
                         );
@@ -485,7 +500,12 @@ pub fn render(
                 ),
             ])
         } else {
-            build_window_title(*window, ctx_id, ctx_mgr, theme)
+            let base = build_window_title(*window, ctx_id, ctx_mgr, theme);
+            if ctx_id == ContextId::Files {
+                decorate_files_title(base, marked_file_paths.len(), file_visual_anchor.is_some(), theme)
+            } else {
+                base
+            }
         };
 
         let block = Block::default()
@@ -501,6 +521,8 @@ pub fn render(
                 frame.render_widget(widget, rect);
             }
             ContextId::Files => {
+                let visual_range = file_visual_anchor
+                    .map(|anchor| (anchor.min(selected), anchor.max(selected)));
                 if show_file_tree {
                     let items = presentation::files::render_file_tree(
                         model,
@@ -508,18 +530,26 @@ pub fn render(
                         file_tree_nodes,
                         collapsed_dirs,
                         rect.width.saturating_sub(2) as usize,
+                        marked_file_paths,
+                        visual_range,
                     );
-                    render_list_ctx(
-                        frame, rect, block, items, selected, is_active, theme, ctx_mgr, ctx_id,
+                    render_list_with_range_ctx(
+                        frame, rect, block, items, selected, is_active, theme,
+                        visual_range,
+                        ctx_mgr, ctx_id,
                     );
                 } else {
                     let items = presentation::files::render_file_list(
                         model,
                         theme,
                         rect.width.saturating_sub(2) as usize,
+                        marked_file_paths,
+                        visual_range,
                     );
-                    render_list_ctx(
-                        frame, rect, block, items, selected, is_active, theme, ctx_mgr, ctx_id,
+                    render_list_with_range_ctx(
+                        frame, rect, block, items, selected, is_active, theme,
+                        visual_range,
+                        ctx_mgr, ctx_id,
                     );
                 }
             }
@@ -1375,6 +1405,20 @@ mod tests {
     use ratatui::layout::Rect;
 
     #[test]
+    fn files_title_uses_checkbox_icon_for_saved_marks() {
+        let theme = Theme::dark();
+        let title = super::decorate_files_title(
+            ratatui::text::Line::from(" Files "),
+            3,
+            true,
+            &theme,
+        );
+        let marked = title.spans.last().unwrap();
+        assert_eq!(marked.content, " 󰄲 3 ");
+        assert_eq!(marked.style.fg, Some(theme.accent_secondary));
+    }
+
+    #[test]
     fn commit_body_viewport_slices_from_explicit_top_row() {
         use tui_textarea::CursorMove;
 
@@ -1520,6 +1564,8 @@ mod tests {
                     false,
                     &[],
                     &Default::default(),
+                    &Default::default(),
+                    None,
                     false,
                     None,
                     None,
@@ -2282,6 +2328,23 @@ fn build_commit_files_title<'a>(
     Line::from(spans)
 }
 
+/// Persistently marked count (orange) and transient Visual mode (purple).
+fn decorate_files_title<'a>(mut base: Line<'a>, marked: usize, visual: bool, theme: &Theme) -> Line<'a> {
+    if visual {
+        base.spans.push(Span::styled(
+            " VISUAL ",
+            Style::default().fg(theme.graph_colors[3]).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if marked > 0 {
+        base.spans.push(Span::styled(
+            format!(" 󰄲 {marked} "),
+            Style::default().fg(theme.accent_secondary),
+        ));
+    }
+    base
+}
+
 fn build_window_title<'a>(
     window: SideWindow,
     active_ctx: ContextId,
@@ -2693,12 +2756,23 @@ fn render_list_with_range_ctx(
 
     render_list_with_range_raw(
         frame, rect, block, items, selected, is_active, theme, range, &mut so, false,
+        ctx == ContextId::Files,
     );
 
     ctx_mgr.set_scroll_offset(ctx, so);
 }
 
-fn visual_range_style(theme: &crate::config::Theme, current: bool) -> Style {
+fn visual_range_style(theme: &crate::config::Theme, current: bool, files: bool) -> Style {
+    if files {
+        // Purple Visual range; blend with the panel's selection background
+        // so status text remains legible in both dark and light themes.
+        let bg = mix_colors(theme.graph_colors[3], theme.selected_bg, 170);
+        let mut style = Style::default().bg(bg);
+        if current {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        return style;
+    }
     let style = Style::default().bg(theme.graph_colors[0]);
     if current {
         style.add_modifier(Modifier::BOLD)
@@ -2779,7 +2853,7 @@ fn render_commit_list_ctx(
             let idx = offset + i;
             let in_visual_range = is_active && range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi);
             if in_visual_range {
-                item.style(visual_range_style(theme, idx == selected))
+                item.style(visual_range_style(theme, idx == selected, false))
             } else if is_active && idx == selected {
                 item.style(theme.selected_line)
             } else {
@@ -2869,6 +2943,7 @@ fn render_list_with_range_raw(
     range: Option<(usize, usize)>,
     scroll_offset: &mut usize,
     follow_selection: bool,
+    files: bool,
 ) {
     if items.is_empty() {
         frame.render_widget(block, rect);
@@ -2903,7 +2978,7 @@ fn render_list_with_range_raw(
             let idx = i + offset;
             let in_visual_range = is_active && range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi);
             if in_visual_range {
-                item.style(visual_range_style(theme, idx == selected))
+                item.style(visual_range_style(theme, idx == selected, files))
             } else if is_active && idx == selected {
                 item.style(theme.selected_line)
             } else {
@@ -3241,7 +3316,9 @@ fn render_status_bar(
                 hints.extend([
                     ("c", "commit"),
                     ("a", "stage all"),
-                    ("space", "toggle"),
+                    ("space", "mark"),
+                    ("v/V", "visual"),
+                    ("x", "stage marks"),
                     (tree_key.as_str(), "tree"),
                 ]);
                 hints.extend([

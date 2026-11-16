@@ -1,4 +1,5 @@
 _tmp_*
 target/
+*.patch
 
 .claude/settings.local.json

@@ -609,6 +609,38 @@ impl GitCommands {
         Ok(())
     }
 
+    /// Commit only the user-marked paths without pulling other staged changes
+    /// into the commit. The selected files' complete working-tree versions are
+    /// committed (`--only` semantics); unrelated staged changes remain staged.
+    pub fn create_commit_for_files(&self, message: &str, files: &[crate::model::File]) -> Result<()> {
+        if files.is_empty() {
+            return Err(anyhow!("No marked files to commit"));
+        }
+        // `git commit --only` cannot discover untracked paths by itself.
+        // Stage only the genuinely untracked paths first. `--only` handles
+        // tracked working-tree modifications/deletions itself, so avoid
+        // changing their index state if the commit fails.
+        let to_stage: Vec<String> = files
+            .iter()
+            .filter(|file| !file.tracked)
+            .map(|file| file.git_add_path().to_owned())
+            .collect();
+        self.stage_files(&to_stage)?;
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+        for file in files {
+            for path in file.git_reset_paths() {
+                if seen.insert(path) {
+                    paths.push(path);
+                }
+            }
+        }
+        let mut args = vec!["--literal-pathspecs", "commit", "--only", "-m", message, "--"];
+        args.extend(paths);
+        self.git().args(&args).run_expecting_success()?;
+        Ok(())
+    }
+
     pub fn create_empty_commit(&self, message: &str) -> Result<()> {
         self.git()
             .args(&["commit", "--allow-empty", "-m", message])

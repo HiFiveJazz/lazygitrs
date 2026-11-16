@@ -976,6 +976,11 @@ pub struct Gui {
     /// the main/diff top border share one continuous drag.
     sidebar_resize_row_offset: u16,
     pub show_file_tree: bool,
+    /// Jerc/Yazi-style marks, keyed by actual Git path rather than row index.
+    /// This survives sorting, status refreshes, and tree/list switches.
+    pub marked_file_paths: HashSet<String>,
+    /// Visible row anchor for transient Visual Line selection in Files.
+    pub file_visual_anchor: Option<usize>,
     /// Cached file tree nodes — rebuilt on refresh when tree view is active.
     pub file_tree_nodes: Vec<FileTreeNode>,
     /// Set of collapsed directory paths in the file tree.
@@ -1596,6 +1601,8 @@ impl Gui {
             sidebar_resizing: false,
             sidebar_resize_row_offset: 0,
             show_file_tree,
+            marked_file_paths: HashSet::new(),
+            file_visual_anchor: None,
             file_tree_nodes: Vec::new(),
             collapsed_dirs: HashSet::new(),
             diff_focused: false,
@@ -5338,7 +5345,15 @@ impl Gui {
         let _ = std::fs::write(&path, contents);
     }
 
+    pub(crate) fn prune_file_marks(&mut self) {
+        // Never keep stale marks after a commit, discard, or repository change.
+        let model = self.model.lock().unwrap();
+        let visible: HashSet<&str> = model.files.iter().map(|f| f.current_path()).collect();
+        self.marked_file_paths.retain(|path| visible.contains(path.as_str()));
+    }
+
     pub fn update_file_tree_state(&mut self) {
+        self.prune_file_marks();
         if self.show_file_tree {
             let model = self.model.lock().unwrap();
             self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);

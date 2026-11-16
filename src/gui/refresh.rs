@@ -734,6 +734,7 @@ impl Gui {
 
     /// Rebuild the file tree from the current in-memory model (no git).
     pub(crate) fn rebuild_file_tree_from_model(&mut self) {
+        self.prune_file_marks();
         let model = self.model.lock().unwrap();
         if self.show_file_tree {
             self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
